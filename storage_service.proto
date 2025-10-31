@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+// Defines the Go package path for generated code
+option go_package = "github.com/yourorg/sentinelkv/api;api";
+
+package sentinelkv.api;
+
+// -----------------------------------------------------------------------------
+// SERVICE DEFINITION
+// -----------------------------------------------------------------------------
+
+// StorageService exposes the core Key-Value operations for the SentinelKV cluster.
+// All write operations must be routed to the current Raft Leader.
+service StorageService {
+  // Set proposes a command to the Raft Leader to set a key-value pair with an expiration time (TTL).
+  // This operation is strongly consistent (linearizable write).
+  rpc Set (SetRequest) returns (SetResponse);
+
+  // Get retrieves the value associated with a key from the local node.
+  // Consistency is flexible: default is fast eventual consistency; strong_consistency flag forces linearizability.
+  rpc Get (GetRequest) returns (GetResponse);
+
+  // Delete proposes a command to the Raft Leader to remove a key-value pair.
+  // This operation is strongly consistent (linearizable write).
+  rpc Delete (DeleteRequest) returns (DeleteResponse);
+  
+  // Join allows a new node to request admission to the existing Raft cluster via the Leader.
+  rpc Join (JoinRequest) returns (JoinResponse);
+}
+
+
+// -----------------------------------------------------------------------------
+// MESSAGES (Data Structures)
+// -----------------------------------------------------------------------------
+
+// --- Write Operation: Set ---
+
+message SetRequest {
+  string key = 1;
+  bytes value = 2; // Data to be stored, providing flexibility for serialization format (JSON, Gob, etc.)
+  int64 ttl_seconds = 3; // Time-to-Live in seconds. Use 0 for no expiration.
+}
+
+message SetResponse {
+  bool success = 1;
+  // If the recipient node is not the Leader, this field contains the address of the current Leader 
+  // to allow the client to redirect the write request.
+  string leader_address = 2; 
+}
+
+// --- Read Operation: Get ---
+
+message GetRequest {
+  string key = 1;
+  // Flag to force a linearizable read (using Raft Read Index or Barrier), guaranteeing the freshest state.
+  bool strong_consistency = 2; 
+}
+
+message GetResponse {
+  bytes value = 1;
+  // The actual UTC timestamp (seconds since epoch) when the item is scheduled to expire.
+  int64 expiry_timestamp_utc = 2; 
+  bool found = 3; // True if the key was found and has not yet expired.
+}
+
+// --- Delete Operation ---
+
+message DeleteRequest {
+  string key = 1;
+}
+
+message DeleteResponse {
+  bool success = 1;
+  string leader_address = 2; // Leader address for redirection.
+}
+
+// --- Cluster Management: Join Operation ---
+
+message JoinRequest {
+  string node_id = 1; // Unique ID of the joining Raft node.
+  string node_address = 2; // The gRPC and Raft communication address of the joining node.
+}
+
+message JoinResponse {
+  bool success = 1;
+  string error_message = 2;
+}
