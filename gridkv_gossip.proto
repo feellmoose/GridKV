@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package gridkv_gossip;
+
+// --- Core Data Structures ---
+
+// Represents a single Key-Value cache entry for synchronization.
+message CacheItem {
+  string key = 1;                 // The key of the cache entry.
+  bytes value = 2;                // The value of the cache entry (using bytes for flexibility).
+  int64 expiry_ts_sec = 3;        // Expiration timestamp (Unix seconds).
+  int64 version = 4;              // Version or sequence number for conflict resolution.
+}
+
+// --- Sync Messages ---
+
+// Message for synchronizing a batch of cache data (Gossip payload).
+message CacheSyncPayload {
+  string source_node_id = 1;      // The ID of the node originating the sync.
+  repeated CacheItem items = 2;   // A list of cache items to update on receiving nodes.
+}
+
+// Message for synchronizing cluster membership (Gossip payload).
+// This is often used for anti-entropy in memberlist implementations.
+message ClusterSyncPayload {
+  string source_node_id = 1;      // The ID of the node originating the sync.
+  // We can choose to send partial or full lists depending on the anti-entropy strategy.
+  repeated NodeInfo nodes = 2;    // A list of nodes known by the source.
+}
+
+// Message sent when a node first joins or updates its status.
+message ConnectPayload {
+  string node_id = 1;             // The unique ID of the joining/reconnecting node.
+  string address = 2;             // The network address (IP:Port) of the node.
+  int64 timestamp = 3;            // Timestamp of the connection event.
+}
+
+// --- Node Management ---
+
+// Detailed information about a peer in the GridKV cluster.
+message NodeInfo {
+  string node_id = 1;             // The unique ID of the node.
+  string address = 2;             // The network address (IP:Port) for gnet connection.
+  int64 last_active_ts = 3;       // Last known activity/heartbeat timestamp (Unix seconds).
+}
+
+// --- Gossip Protocol Wrapper ---
+
+// Message types for the Gossip protocol.
+enum GossipMessageType {
+  MESSAGE_TYPE_UNSPECIFIED = 0; // Default/Unspecified
+  CACHE_SYNC = 1;               // For synchronizing cache content.
+  CLUSTER_SYNC = 2;             // For synchronizing cluster membership.
+  CONNECT = 3;                  // For announcing a new node or a status change.
+}
+
+// The main message structure used for all P2P communication via gnet.
+message GossipMessage {
+  // Required fields for protocol metadata.
+  GossipMessageType message_type = 1; // The type of the payload carried by this message.
+  string message_id = 2;              // A unique ID for the message (useful for Ristretto de-duplication).
+  int64 timestamp = 3;                // Timestamp of message creation.
+
+  // Use oneof to carry only one specific payload type per message.
+  oneof payload {
+    CacheSyncPayload cache_sync_payload = 4;    // Cache content synchronization.
+    ClusterSyncPayload cluster_sync_payload = 5; // Cluster membership synchronization.
+    ConnectPayload connect_payload = 6;          // New node connection or status update.
+  }
+}
