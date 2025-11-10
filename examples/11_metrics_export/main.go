@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== GridKV Enterprise Metrics Example ===\n")
+	fmt.Println("=== GridKV Enterprise Metrics Example ===")
 
 	// Example 1: Prometheus Format Export
 	prometheusExample()
