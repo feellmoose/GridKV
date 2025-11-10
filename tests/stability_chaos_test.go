@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/feellmoose/gridkv/internal/gossip"
 	gridkv "github.com/feellmoose/gridkv"
 )
 
@@ -539,12 +538,12 @@ func createNode(t *testing.T, idx, basePort int, isSeed bool) *gridkv.GridKV {
 		LocalNodeID:  fmt.Sprintf("node-%d", idx),
 		LocalAddress: fmt.Sprintf("localhost:%d", basePort+idx),
 		SeedAddrs:    seedAddrs,
-		Network: &gossip.NetworkOptions{
-			Type:     gossip.TCP,
+		Network: &gridkv.NetworkOptions{
+			Type:     gridkv.TCP,
 			BindAddr: fmt.Sprintf("localhost:%d", basePort+idx),
 		},
-		Storage: &gossip.StorageOptions{
-			Backend:     gossip.Memory,
+		Storage: &gridkv.StorageOptions{
+			Backend:     gridkv.BackendMemory,
 			MaxMemoryMB: 256,
 		},
 		ReplicaCount: 3,

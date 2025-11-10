@@ -45,11 +45,11 @@ func (t *GnetTransport) Dial(address string) (TransportConn, error) {
 		}
 		return nil, fmt.Errorf("dial failed: %w", err)
 	}
-	
+
 	if t.metrics != nil {
 		t.metrics.RecordConnection(1) // Active connection
 	}
-	
+
 	return &GnetTransportConn{
 		conn:    conn,
 		metrics: t.metrics,
@@ -71,14 +71,14 @@ func (t *GnetTransportConn) WriteDataWithContext(ctx context.Context, data []byt
 	}
 
 	start := time.Now()
-	
+
 	lengthPrefix := make([]byte, 4)
 	binary.BigEndian.PutUint32(lengthPrefix, uint32(len(data)))
 
 	// Merge into a single write to minimize syscalls
 	buf := append(lengthPrefix, data...)
 	_, err := t.conn.Write(buf)
-	
+
 	// Record metrics
 	if t.metrics != nil {
 		if err != nil {
@@ -88,7 +88,7 @@ func (t *GnetTransportConn) WriteDataWithContext(ctx context.Context, data []byt
 			t.metrics.RecordWrite(int64(len(buf)), latency)
 		}
 	}
-	
+
 	if err != nil {
 		return fmt.Errorf("gnet write failed: %w", err)
 	}
@@ -158,13 +158,13 @@ func (l *GnetTransportListener) Start() error {
 			address:  l.address,
 			metrics:  l.metrics,
 		}
-		
+
 		// OPTIMIZATION: gnet with production-ready settings
 		startErr = gnet.Run(engineHandler, "tcp://"+l.address.String(),
-			gnet.WithMulticore(true),              // Multi-core support
-			gnet.WithReusePort(true),              // SO_REUSEPORT for load balancing
-			gnet.WithTCPKeepAlive(30*time.Second), // Keep-alive
-			gnet.WithTCPNoDelay(gnet.TCPNoDelay),  // Disable Nagle
+			gnet.WithMulticore(true),                // Multi-core support
+			gnet.WithReusePort(true),                // SO_REUSEPORT for load balancing
+			gnet.WithTCPKeepAlive(30*time.Second),   // Keep-alive
+			gnet.WithTCPNoDelay(gnet.TCPNoDelay),    // Disable Nagle
 			gnet.WithLoadBalancing(gnet.RoundRobin), // Round-robin load balancing
 		)
 	})
@@ -219,11 +219,11 @@ func (es *GnetTransportEventEngine) OnShutdown(engine gnet.Engine) {
 
 func (es *GnetTransportEventEngine) OnOpen(conn gnet.Conn) (out []byte, action gnet.Action) {
 	logging.Debug("gnet connection opened", "remote_addr", conn.RemoteAddr().String())
-	
+
 	if es.metrics != nil {
 		es.metrics.RecordConnection(1)
 	}
-	
+
 	return nil, gnet.None
 }
 
@@ -231,7 +231,7 @@ func (es *GnetTransportEventEngine) OnClose(conn gnet.Conn, err error) (action g
 	if es.metrics != nil {
 		es.metrics.RecordConnection(-1)
 	}
-	
+
 	if err != nil {
 		logging.Warn("gnet connection closed with error", "err", err, "remote_addr", conn.RemoteAddr().String())
 	} else {
@@ -246,29 +246,43 @@ func (es *GnetTransportEventEngine) OnTraffic(conn gnet.Conn) (action gnet.Actio
 		return gnet.None
 	}
 
-	for {
+	// OPTIMIZATION: Process multiple messages in one callback to reduce event loop overhead
+	messagesProcessed := 0
+	const maxBatchPerCallback = 10 // Process up to 10 messages per callback
+
+	for messagesProcessed < maxBatchPerCallback {
+		// Check if we have enough data for the length prefix
 		if conn.InboundBuffered() < 4 {
 			return gnet.None
 		}
 
+		// OPTIMIZATION: Use Next() for zero-copy peek
 		prefix, _ := conn.Peek(4)
 		msgLen := int(binary.BigEndian.Uint32(prefix))
+
+		// Validate message length
 		if msgLen <= 0 || msgLen > 10*1024*1024 {
 			logging.Error(errors.New("invalid message length"),
 				"len", msgLen, "remote_addr", conn.RemoteAddr().String())
-			
+
 			if es.metrics != nil {
 				es.metrics.RecordError("read")
 			}
-			
+
 			return gnet.Close
 		}
 
-		if conn.InboundBuffered() < 4+msgLen {
+		// Check if complete message is available
+		totalNeeded := 4 + msgLen
+		if conn.InboundBuffered() < totalNeeded {
 			return gnet.None
 		}
 
+		// Discard length prefix
 		conn.Discard(4)
+
+		// OPTIMIZATION: Zero-copy message access
+		// Use Peek to avoid copying, then Discard after processing
 		message, _ := conn.Peek(msgLen)
 
 		// Record metrics
@@ -276,16 +290,26 @@ func (es *GnetTransportEventEngine) OnTraffic(conn gnet.Conn) (action gnet.Actio
 			es.metrics.RecordRead(int64(msgLen))
 		}
 
-		// Zero-copy handler (copy only if handler modifies data)
+		// CRITICAL: Zero-copy handler
+		// The message buffer is only valid until the next Discard/Read call
+		// Handler MUST NOT retain references to the message slice
 		if err := es.handler(message); err != nil {
 			logging.Error(err, "message handling failed", "remote_addr", conn.RemoteAddr().String())
-			
+
 			if es.metrics != nil {
 				es.metrics.RecordError("handler")
 			}
-			
+
 			return gnet.Close
 		}
+
+		// Discard the message now that it's processed
 		conn.Discard(msgLen)
+
+		messagesProcessed++
 	}
+
+	// If we processed the maximum batch, yield to allow other connections to be serviced
+	// This prevents connection starvation under high load
+	return gnet.None
 }

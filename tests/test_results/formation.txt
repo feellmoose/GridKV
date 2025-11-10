@@ -1,2 +1,0 @@
-FAIL	./tests [setup failed]
-FAIL

@@ -53,7 +53,7 @@ type NetworkBackendType int
 const (
 	TCP     NetworkBackendType = 1
 	GnetTCP NetworkBackendType = 2
-	UDP     NetworkBackendType = 4 // OPTIMIZATION: Ultra-low latency (like memberlist)
+	// UDP NetworkBackendType = 4  // Not implemented (reserved for future)
 )
 
 // NetworkOptions configures the Gossip protocol and network settings.
@@ -96,12 +96,8 @@ func NewTransportProtocol(opts *NetworkOptions) (*TransportProtocol, error) {
 		if err != nil {
 			return nil, err
 		}
-	case UDP:
-		// OPTIMIZATION: UDP for ultra-low latency (memberlist-style)
-		tr = transport.NewUDPTransport()
-		logging.Info("Using UDP transport for low-latency gossip", "bindAddr", opts.BindAddr)
 	default:
-		return nil, fmt.Errorf("invalid Network type %v", opts.Type)
+		return nil, fmt.Errorf("invalid network type %v (supported: TCP, GnetTCP)", opts.Type)
 	}
 
 	// Assuming Transport.Listen returns a TransportListener implementation

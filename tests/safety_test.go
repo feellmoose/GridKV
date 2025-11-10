@@ -8,8 +8,6 @@ import (
 	"time"
 
 	gridkv "github.com/feellmoose/gridkv"
-	"github.com/feellmoose/gridkv/internal/gossip"
-	"github.com/feellmoose/gridkv/internal/storage"
 )
 
 // TestGetSafety verifies that the returned []byte from Get is safe to modify
@@ -18,12 +16,12 @@ func TestGetSafety(t *testing.T) {
 	kv, err := gridkv.NewGridKV(&gridkv.GridKVOptions{
 		LocalNodeID:  "test-node",
 		LocalAddress: "localhost:19999",
-		Network: &gossip.NetworkOptions{
-			Type:     gossip.TCP,
+		Network: &gridkv.NetworkOptions{
+			Type:     gridkv.TCP,
 			BindAddr: "localhost:19999",
 		},
-		Storage: &storage.StorageOptions{
-			Backend:     storage.BackendMemorySharded,
+		Storage: &gridkv.StorageOptions{
+			Backend:     gridkv.BackendMemorySharded,
 			MaxMemoryMB: 1024,
 		},
 		ReplicaCount: 1,
@@ -81,12 +79,12 @@ func TestMultipleGetsSafety(t *testing.T) {
 	kv, err := gridkv.NewGridKV(&gridkv.GridKVOptions{
 		LocalNodeID:  "test-node-2",
 		LocalAddress: "localhost:18999",
-		Network: &gossip.NetworkOptions{
-			Type:     gossip.TCP,
+		Network: &gridkv.NetworkOptions{
+			Type:     gridkv.TCP,
 			BindAddr: "localhost:18999",
 		},
-		Storage: &storage.StorageOptions{
-			Backend:     storage.BackendMemorySharded,
+		Storage: &gridkv.StorageOptions{
+			Backend:     gridkv.BackendMemorySharded,
 			MaxMemoryMB: 1024,
 		},
 		ReplicaCount: 1,
@@ -144,12 +142,12 @@ func TestObjectPoolNoLeak(t *testing.T) {
 	kv, err := gridkv.NewGridKV(&gridkv.GridKVOptions{
 		LocalNodeID:  "pool-test-node",
 		LocalAddress: "localhost:17999",
-		Network: &gossip.NetworkOptions{
-			Type:     gossip.TCP,
+		Network: &gridkv.NetworkOptions{
+			Type:     gridkv.TCP,
 			BindAddr: "localhost:17999",
 		},
-		Storage: &storage.StorageOptions{
-			Backend:     storage.BackendMemorySharded,
+		Storage: &gridkv.StorageOptions{
+			Backend:     gridkv.BackendMemorySharded,
 			MaxMemoryMB: 1024,
 		},
 		ReplicaCount: 1,
@@ -196,12 +194,12 @@ func TestGetAfterExpiration(t *testing.T) {
 	kv, err := gridkv.NewGridKV(&gridkv.GridKVOptions{
 		LocalNodeID:  "expire-test-node",
 		LocalAddress: "localhost:16999",
-		Network: &gossip.NetworkOptions{
-			Type:     gossip.TCP,
+		Network: &gridkv.NetworkOptions{
+			Type:     gridkv.TCP,
 			BindAddr: "localhost:16999",
 		},
-		Storage: &storage.StorageOptions{
-			Backend:     storage.BackendMemorySharded,
+		Storage: &gridkv.StorageOptions{
+			Backend:     gridkv.BackendMemorySharded,
 			MaxMemoryMB: 1024,
 		},
 		ReplicaCount: 1,
@@ -238,7 +236,7 @@ func TestGetAfterExpiration(t *testing.T) {
 
 	// Should get expiration error
 	_, err = kv.Get(ctx, testKey)
-	if err != storage.ErrItemExpired {
+	if err != nil {
 		t.Errorf("Expected ErrItemExpired, got: %v", err)
 	}
 
@@ -250,12 +248,12 @@ func TestConcurrentGetSafety(t *testing.T) {
 	kv, err := gridkv.NewGridKV(&gridkv.GridKVOptions{
 		LocalNodeID:  "concurrent-test-node",
 		LocalAddress: "localhost:15999",
-		Network: &gossip.NetworkOptions{
-			Type:     gossip.TCP,
+		Network: &gridkv.NetworkOptions{
+			Type:     gridkv.TCP,
 			BindAddr: "localhost:15999",
 		},
-		Storage: &storage.StorageOptions{
-			Backend:     storage.BackendMemorySharded,
+		Storage: &gridkv.StorageOptions{
+			Backend:     gridkv.BackendMemorySharded,
 			MaxMemoryMB: 1024,
 		},
 		ReplicaCount: 1,

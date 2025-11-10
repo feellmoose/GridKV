@@ -31,6 +31,158 @@ var (
 	}
 )
 
+// TCPOptimizationConfig contains TCP tuning parameters based on network characteristics
+type TCPOptimizationConfig struct {
+	NoDelay         bool          // Disable Nagle's algorithm (lower latency)
+	KeepAlive       bool          // Enable TCP keep-alive
+	KeepAlivePeriod time.Duration // Keep-alive probe interval
+	ReadBufferSize  int           // SO_RCVBUF size
+	WriteBufferSize int           // SO_SNDBUF size
+	ReadTimeout     time.Duration // Read operation timeout
+	WriteTimeout    time.Duration // Write operation timeout
+}
+
+// CalculateTCPOptimization calculates optimal TCP parameters based on RTT and bandwidth.
+// This implements BDP (Bandwidth-Delay Product) calculation for buffer sizing.
+//
+// Parameters:
+//   - avgRTT: Average round-trip time to the peer
+//   - estimatedBandwidth: Estimated network bandwidth in bytes/sec (0 = default 1Gbps)
+//
+// Returns optimized TCP configuration
+func CalculateTCPOptimization(avgRTT time.Duration, estimatedBandwidth int64) *TCPOptimizationConfig {
+	config := &TCPOptimizationConfig{
+		NoDelay:   true, // Always disable Nagle for low latency
+		KeepAlive: true, // Always enable keep-alive
+	}
+
+	// Default bandwidth: 1Gbps = 125MB/s
+	if estimatedBandwidth == 0 {
+		estimatedBandwidth = 125 * 1024 * 1024 // 125 MB/s
+	}
+
+	// Calculate BDP: Bandwidth × RTT
+	// This is the optimal buffer size to keep the pipe full
+	bdp := int64(float64(estimatedBandwidth) * avgRTT.Seconds())
+
+	// Keep-alive period: 3× RTT (detect failures quickly)
+	config.KeepAlivePeriod = avgRTT * 3
+	if config.KeepAlivePeriod < 10*time.Second {
+		config.KeepAlivePeriod = 10 * time.Second // Minimum for stability
+	}
+	if config.KeepAlivePeriod > 60*time.Second {
+		config.KeepAlivePeriod = 60 * time.Second // Maximum to avoid over-probing
+	}
+
+	// Buffer size: max(BDP, 128KB)
+	bufferSize := int(bdp)
+	if bufferSize < 128*1024 {
+		bufferSize = 128 * 1024 // Minimum 128KB
+	}
+	if bufferSize > 4*1024*1024 {
+		bufferSize = 4 * 1024 * 1024 // Maximum 4MB (kernel limits)
+	}
+
+	config.ReadBufferSize = bufferSize
+	config.WriteBufferSize = bufferSize
+
+	// Timeouts: 10× RTT (allow for retransmissions and jitter)
+	config.ReadTimeout = avgRTT * 10
+	config.WriteTimeout = avgRTT * 10
+
+	// Minimum timeouts for stability
+	if config.ReadTimeout < 5*time.Second {
+		config.ReadTimeout = 5 * time.Second
+	}
+	if config.WriteTimeout < 5*time.Second {
+		config.WriteTimeout = 5 * time.Second
+	}
+
+	return config
+}
+
+// OptimizeTCPConn applies performance optimizations to a TCP connection based on
+// network characteristics. This should be called immediately after establishing
+// a connection for optimal performance.
+//
+// Optimizations applied:
+//   - TCP_NODELAY: Disable Nagle's algorithm for lower latency
+//   - Keep-Alive: Enable with RTT-based probing
+//   - Buffer sizes: Calculated based on BDP (Bandwidth-Delay Product)
+//
+// Parameters:
+//   - conn: The TCP connection to optimize
+//   - avgRTT: Average round-trip time (use 0 for default 10ms)
+//
+// Returns error if any optimization fails (non-fatal, connection still usable)
+func OptimizeTCPConn(conn *net.TCPConn, avgRTT time.Duration) error {
+	if avgRTT == 0 {
+		avgRTT = 10 * time.Millisecond // Default for LAN
+	}
+
+	config := CalculateTCPOptimization(avgRTT, 0)
+	return ApplyTCPConfig(conn, config)
+}
+
+// ApplyTCPConfig applies a TCPOptimizationConfig to a connection
+func ApplyTCPConfig(conn *net.TCPConn, config *TCPOptimizationConfig) error {
+	var lastErr error
+
+	// 1. Disable Nagle's algorithm for lower latency
+	if config.NoDelay {
+		if err := conn.SetNoDelay(true); err != nil {
+			logging.Warn("Failed to set TCP_NODELAY", "err", err)
+			lastErr = err
+		}
+	}
+
+	// 2. Enable TCP keep-alive to detect dead connections
+	if config.KeepAlive {
+		if err := conn.SetKeepAlive(true); err != nil {
+			logging.Warn("Failed to enable TCP keep-alive", "err", err)
+			lastErr = err
+		}
+
+		if err := conn.SetKeepAlivePeriod(config.KeepAlivePeriod); err != nil {
+			logging.Warn("Failed to set keep-alive period", "err", err)
+			lastErr = err
+		}
+	}
+
+	// 3. Set optimal buffer sizes (BDP-based)
+	if config.ReadBufferSize > 0 {
+		if err := conn.SetReadBuffer(config.ReadBufferSize); err != nil {
+			logging.Warn("Failed to set read buffer", "size", config.ReadBufferSize, "err", err)
+			lastErr = err
+		}
+	}
+
+	if config.WriteBufferSize > 0 {
+		if err := conn.SetWriteBuffer(config.WriteBufferSize); err != nil {
+			logging.Warn("Failed to set write buffer", "size", config.WriteBufferSize, "err", err)
+			lastErr = err
+		}
+	}
+
+	return lastErr
+}
+
+// GetTCPStats returns TCP connection statistics (if available)
+func GetTCPStats(conn *net.TCPConn) map[string]interface{} {
+	stats := make(map[string]interface{})
+
+	if conn == nil {
+		return stats
+	}
+
+	stats["local_addr"] = conn.LocalAddr().String()
+	stats["remote_addr"] = conn.RemoteAddr().String()
+
+	// Additional stats could be gathered from /proc/net/tcp on Linux
+	// For now, return basic info
+	return stats
+}
+
 // TCPTransportConn implements TransportConn using TCP connections.
 type TCPTransportConn struct {
 	conn *net.TCPConn
@@ -167,15 +319,35 @@ func (t *TCPTransport) Dial(address string) (TransportConn, error) {
 
 	tcpConn := conn.(*net.TCPConn)
 
-	// OPTIMIZATION: Enable TCP optimizations for lower latency
-	if err := tcpConn.SetNoDelay(true); err != nil {
-		logging.Warn("Failed to set TCP_NODELAY", "err", err)
+	// OPTIMIZATION: Apply dynamic TCP optimizations based on default RTT
+	// For more precise optimization, use DialWithRTT instead
+	if err := OptimizeTCPConn(tcpConn, 10*time.Millisecond); err != nil {
+		// Non-fatal: connection still usable even if optimization fails
+		logging.Debug("TCP optimization warnings (non-fatal)", "err", err)
 	}
-	if err := tcpConn.SetKeepAlive(true); err != nil {
-		logging.Warn("Failed to set TCP keepalive", "err", err)
+
+	return &TCPTransportConn{conn: tcpConn}, nil
+}
+
+// DialWithRTT creates an optimized TCP connection with RTT-specific tuning.
+// This method should be used when you know the approximate RTT to the target.
+//
+// Parameters:
+//   - address: Target address (host:port)
+//   - avgRTT: Expected average RTT to the target
+//
+// Returns optimized TransportConn
+func (t *TCPTransport) DialWithRTT(address string, avgRTT time.Duration) (TransportConn, error) {
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		return nil, err
 	}
-	if err := tcpConn.SetKeepAlivePeriod(30 * time.Second); err != nil {
-		logging.Warn("Failed to set TCP keepalive period", "err", err)
+
+	tcpConn := conn.(*net.TCPConn)
+
+	// Apply RTT-specific optimizations
+	if err := OptimizeTCPConn(tcpConn, avgRTT); err != nil {
+		logging.Debug("TCP optimization warnings (non-fatal)", "err", err)
 	}
 
 	return &TCPTransportConn{conn: tcpConn}, nil
@@ -277,14 +449,11 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 		}
 	}()
 
-	// OPTIMIZATION: Enable TCP optimizations for accepted connections
-	conn.SetNoDelay(true)
-	conn.SetKeepAlive(true)
-	conn.SetKeepAlivePeriod(30 * time.Second)
-
-	// OPTIMIZATION: Set larger socket buffers for better throughput
-	conn.SetReadBuffer(256 * 1024)  // 256KB
-	conn.SetWriteBuffer(256 * 1024) // 256KB
+	// OPTIMIZATION: Apply dynamic TCP optimizations for accepted connections
+	// Use default LAN RTT for server-side connections
+	if err := OptimizeTCPConn(conn, 10*time.Millisecond); err != nil {
+		logging.Debug("TCP optimization warnings on accept (non-fatal)", "err", err)
+	}
 
 	// OPTIMIZATION: Use larger buffer size for high throughput
 	reader := bufio.NewReaderSize(conn, 16384) // 16KB buffer

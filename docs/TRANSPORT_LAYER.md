@@ -1,8 +1,15 @@
-# Transport Layer Design
+# Transport Layer
+
+**Version**: v3.1  
+**Status**: TCP (default), gnet (high-performance)
+
+---
 
 ## Overview
 
-GridKV provides a pluggable transport layer supporting multiple network protocols. The transport layer abstracts network communication, allowing the gossip protocol to operate over different transports without modification.
+GridKV provides a pluggable transport layer with two network protocol implementations. The transport layer abstracts network communication, allowing the gossip protocol to operate seamlessly.
+
+---
 
 ## Transport Interface
 
@@ -30,21 +37,23 @@ type TransportListener interface {
 }
 ```
 
+---
+
 ## Available Transports
 
-### 1. TCP (Default)
+### 1. TCP (Default, Recommended)
 
-**Implementation**: `transports/tcp/transport.go`
+**Implementation**: `internal/transport/tcp.go`
 
 **Characteristics**:
 - Reliable, ordered delivery
-- Connection-oriented
-- Flow control
+- Connection-oriented with flow control
 - Zero external dependencies
+- Production-ready
 
-**Optimizations**:
+**TCP Optimizations**:
 ```go
-conn.SetNoDelay(true)          // Disable Nagle's algorithm
+conn.SetNoDelay(true)          // Disable Nagle's algorithm (reduce latency)
 conn.SetKeepAlive(true)        // Enable TCP keep-alive
 conn.SetKeepAlivePeriod(30s)   // Keep-alive interval
 conn.SetReadBuffer(32KB)       // Read buffer size
@@ -57,12 +66,12 @@ conn.SetWriteBuffer(32KB)      // Write buffer size
 - Concurrent connections: >1000
 
 **Message Framing**:
-```go
-Frame format:
-  [4-byte length prefix][message data]
+```
+Wire Format:
+  [4-byte length prefix (big-endian)][message data]
   
 Write:
-  1. Write 4-byte length (big-endian)
+  1. Write 4-byte length
   2. Write message data
   
 Read:
@@ -72,112 +81,64 @@ Read:
 ```
 
 **Use Cases**:
-- Production deployments (recommended)
-- Reliable communication required
-- LAN/WAN scenarios
+- ✅ Production deployments (recommended)
+- ✅ Reliable communication required
+- ✅ LAN/WAN scenarios
+- ✅ Zero external dependencies
 
-### 2. UDP
-
-**Implementation**: `internal/transport/udp.go`
-
-**Characteristics**:
-- Connectionless
-- Lower latency than TCP
-- No guaranteed delivery
-- Suitable for gossip (eventual consistency)
-
-**Optimizations**:
+**Configuration**:
 ```go
-Connection pooling:
-  - Reuse UDP sockets
-  - Avoid socket creation overhead
-  - Per-destination connection tracking
-  
-Message size:
-  - Max: 65,507 bytes (UDP limit)
-  - Recommended: <1KB for reliability
+Network: &gossip.NetworkOptions{
+    Type:     gossip.TCP,
+    BindAddr: "0.0.0.0:8001",
+}
 ```
 
-**Performance**:
-- Latency: ~0.5-1ms (LAN)
-- Throughput: ~300MB/s
-- Packet loss handling: Application-level retry
-
-**Use Cases**:
-- Low-latency gossip
-- Eventual consistency acceptable
-- LAN deployments
-
-### 3. QUIC
-
-**Implementation**: `internal/transport/quic.go`
-
-**Characteristics**:
-- Encrypted by default (TLS 1.3)
-- Multiplexed streams
-- Fast connection establishment
-- UDP-based
-
-**Dependencies**: `github.com/quic-go/quic-go`
-
-**Optimizations**:
-```go
-Stream multiplexing:
-  - One connection, multiple streams
-  - Reduced handshake overhead
-  - Better resource utilization
-  
-0-RTT connection:
-  - Resume previous sessions
-  - No handshake on reconnect
-  - ~50% latency reduction
-```
-
-**Performance**:
-- Latency: ~2-3ms (includes crypto)
-- Throughput: ~400MB/s
-- Connection setup: <1ms (0-RTT)
-
-**Use Cases**:
-- WAN deployments
-- Security required
-- Mobile clients
-- High packet loss scenarios
-
-### 4. gnet
+### 2. gnet (High-Performance)
 
 **Implementation**: `internal/transport/gnet.go`
 
 **Characteristics**:
-- Event-driven architecture
+- Event-driven architecture (Reactor pattern)
 - Zero-copy I/O
-- Very high performance
+- Very high throughput
 - Linux/macOS only
 
 **Dependencies**: `github.com/panjf2000/gnet/v2`
 
-**Architecture**:
+**Event-Driven Architecture**:
 ```go
-Event-driven model:
-  - Reactor pattern
+Reactor Pattern:
   - Non-blocking I/O
   - Event loop per CPU core
+  - Minimal context switching
   
-Zero-copy:
+Zero-Copy:
   - Direct buffer access
   - No intermediate copies
-  - Kernel bypass where possible
+  - Reduced memory allocations
 ```
 
 **Performance**:
 - Latency: ~0.5-1ms
-- Throughput: ~800MB/s
-- Connections: >100K
+- Throughput: ~800MB/s (1.6x faster than TCP)
+- Connections: >100K concurrent
 
 **Use Cases**:
 - Maximum throughput required
 - High connection count (>10K)
 - Linux/macOS deployments
+- Accept external dependency
+
+**Configuration**:
+```go
+Network: &gossip.NetworkOptions{
+    Type:     gossip.GNET,
+    BindAddr: "0.0.0.0:8001",
+}
+```
+
+---
 
 ## Connection Management
 
@@ -188,12 +149,12 @@ Zero-copy:
 type ConnPool struct {
     transport   Transport
     address     string
-    maxIdle     int       // Max idle connections
-    maxConns    int       // Max total connections
+    maxIdle     int           // Max idle connections
+    maxConns    int           // Max total connections
     idleTimeout time.Duration
     
     mu        sync.Mutex
-    idleConns []pooledTransportConn
+    idleConns []TransportConn
     total     int
 }
 ```
@@ -204,23 +165,22 @@ type ConnPool struct {
 - Better resource utilization
 - Configurable limits
 
-**Configuration**:
-```go
-Default:
-  - MaxConns: 1000
-  - MaxIdle: 100
-  - IdleTimeout: 90s
-  
-Tuning:
-  - Increase MaxConns for high-concurrency
-  - Increase MaxIdle for request bursts
-  - Decrease IdleTimeout to save resources
+**Default Configuration**:
 ```
+MaxConns:    1000
+MaxIdle:     100
+IdleTimeout: 90s
+```
+
+**Tuning Guidelines**:
+- High concurrency → Increase MaxConns
+- Burst traffic → Increase MaxIdle
+- Save resources → Decrease IdleTimeout
 
 ### Connection Lifecycle
 
-```go
-Connection States:
+```
+States:
   1. Created (Dial)
   2. Active (in-use)
   3. Idle (returned to pool)
@@ -232,6 +192,8 @@ Pool Management:
   - Background cleanup: Close expired connections
 ```
 
+---
+
 ## Transport Selection
 
 ### Decision Matrix
@@ -239,19 +201,19 @@ Pool Management:
 | Requirement | Recommended Transport |
 |-------------|----------------------|
 | Production, reliable | TCP |
-| Low latency, eventual consistency | UDP |
-| Security required | QUIC |
 | Maximum throughput | gnet |
 | Development/testing | TCP |
+| Linux/macOS only | gnet |
+| Zero dependencies | TCP |
 
 ### Performance Comparison
 
-| Transport | Latency | Throughput | Reliability | Encryption |
-|-----------|---------|------------|-------------|------------|
-| TCP | 1-2ms | 500MB/s | High | No (TLS optional) |
-| UDP | 0.5-1ms | 300MB/s | Best-effort | No |
-| QUIC | 2-3ms | 400MB/s | High | Yes (built-in) |
-| gnet | 0.5-1ms | 800MB/s | High | No |
+| Transport | Latency | Throughput | Reliability | Dependencies |
+|-----------|---------|------------|-------------|--------------|
+| TCP | 1-2ms | 500MB/s | High | None |
+| gnet | 0.5-1ms | 800MB/s | High | gnet/v2 |
+
+---
 
 ## Message Protocol
 
@@ -267,14 +229,15 @@ Benefits:
   - Simple parsing
   - No delimiter ambiguity
   - Efficient buffering
+  - Max message size: 10MB (configurable)
 ```
 
 ### Flow Control
 
-**TCP**: Built-in flow control
-**UDP**: Application-level (size limits)
-**QUIC**: Built-in flow control per-stream
-**gnet**: Event-driven backpressure
+- **TCP**: Built-in TCP flow control
+- **gnet**: Event-driven backpressure
+
+---
 
 ## Network Configuration
 
@@ -287,7 +250,7 @@ NetworkOptions:
   DialTimeout:  3 * time.Second   // Connection establishment
 ```
 
-**Tuning Guidelines**:
+**Tuning by Network Type**:
 - LAN: 1-5s timeouts
 - WAN: 10-30s timeouts
 - Satellite: 60s+ timeouts
@@ -296,13 +259,15 @@ NetworkOptions:
 
 ```go
 Recommended:
-  ReadBuffer:  32 KB  // Small messages
-  WriteBuffer: 32 KB  // Small messages
+  ReadBuffer:  32 KB   // Small messages
+  WriteBuffer: 32 KB   // Small messages
   
 For large values:
   ReadBuffer:  256 KB
   WriteBuffer: 256 KB
 ```
+
+---
 
 ## Error Handling
 
@@ -328,22 +293,15 @@ Handling:
   4. If all retries fail, mark node as suspect (SWIM)
 ```
 
+---
+
 ## Security
 
 ### Transport-Level Security
 
 **TCP**:
-- Optional TLS wrapper (future enhancement)
 - Application-level encryption (Ed25519 signing)
-
-**QUIC**:
-- Built-in TLS 1.3
-- Always encrypted
-- Certificate validation
-
-**UDP**:
-- No built-in security
-- Relies on application-level signing
+- TLS wrapper (future enhancement)
 
 **gnet**:
 - No built-in security
@@ -352,6 +310,7 @@ Handling:
 ### Message Authentication
 
 All transports benefit from GridKV's message signing:
+
 ```go
 Process:
   1. Serialize message
@@ -365,18 +324,17 @@ Receiver:
   3. Process if valid
 ```
 
+---
+
 ## Monitoring
 
 ### Metrics
 
-```go
-Per-transport metrics:
-  - Active connections
-  - Idle connections
-  - Bytes sent/received
-  - Error rate
-  - Latency percentiles
-```
+Per-transport metrics available via GridKVMetrics:
+- Active connections
+- Bytes sent/received
+- Error rate
+- Latency percentiles
 
 ### Health Checks
 
@@ -388,6 +346,8 @@ TCP health check:
   Timeout = healthy
   Data/Error = investigate
 ```
+
+---
 
 ## Transport Registry
 
@@ -410,27 +370,26 @@ if err != nil {
 }
 ```
 
-## Future Enhancements
-
-1. **TLS for TCP**: Optional encryption
-2. **DTLS for UDP**: Encrypted UDP
-3. **HTTP/3**: For web client integration
-4. **WebSocket**: Browser client support
-5. **Unix Domain Sockets**: Local-only optimization
+---
 
 ## Implementation Files
 
 - `internal/transport/transport.go` - Interface definitions
 - `internal/transport/registry.go` - Transport registry
-- `transports/tcp/` - TCP implementation
-- `internal/transport/udp.go` - UDP implementation
-- `internal/transport/quic.go` - QUIC implementation
+- `internal/transport/tcp.go` - TCP implementation
+- `internal/transport/tcp_register.go` - TCP registration
 - `internal/transport/gnet.go` - gnet implementation
+- `internal/transport/gnet_metrics.go` - gnet metrics
+
+---
 
 ## References
 
 - TCP: RFC 793, RFC 7323 (TCP Extensions)
-- UDP: RFC 768
-- QUIC: RFC 9000
 - gnet: Event-driven networking in Go
+- Reactor Pattern: Douglas C. Schmidt
 
+---
+
+**Last Updated**: 2025-11-09  
+**GridKV Version**: v3.1

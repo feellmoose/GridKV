@@ -9,29 +9,27 @@ import (
 	"time"
 
 	gridkv "github.com/feellmoose/gridkv"
-	"github.com/feellmoose/gridkv/internal/gossip"
-	"github.com/feellmoose/gridkv/internal/storage"
 )
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
 
-func setupSingleNode(b *testing.B, backend storage.StorageBackendType, basePort int) (*gridkv.GridKV, error) {
+func setupSingleNode(b *testing.B, backend gridkv.StorageBackendType, basePort int) (*gridkv.GridKV, error) {
 	// Use random port offset to avoid conflicts
 	port := basePort + rand.Intn(1000)
 	opts := &gridkv.GridKVOptions{
 		LocalNodeID:  fmt.Sprintf("bench-node-%d", port),
 		LocalAddress: fmt.Sprintf("localhost:%d", port),
-		Network: &gossip.NetworkOptions{
-			Type:         gossip.TCP,
+		Network: &gridkv.NetworkOptions{
+			Type:         gridkv.TCP,
 			BindAddr:     fmt.Sprintf("localhost:%d", port),
 			MaxConns:     2000,
 			MaxIdle:      200,
 			ReadTimeout:  5 * time.Second,
 			WriteTimeout: 5 * time.Second,
 		},
-		Storage: &storage.StorageOptions{
+		Storage: &gridkv.StorageOptions{
 			Backend:     backend,
 			MaxMemoryMB: 4096, // 4GB limit
 		},
@@ -64,7 +62,7 @@ func BenchmarkSet(b *testing.B) {
 
 	for _, size := range sizes {
 		b.Run(size.name, func(b *testing.B) {
-			kv, err := setupSingleNode(b, storage.BackendMemorySharded, 19000+size.size)
+			kv, err := setupSingleNode(b, gridkv.BackendMemorySharded, 19000+size.size)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -102,7 +100,7 @@ func BenchmarkGet(b *testing.B) {
 
 	for _, size := range sizes {
 		b.Run(size.name, func(b *testing.B) {
-			kv, err := setupSingleNode(b, storage.BackendMemorySharded, 19100+size.size)
+			kv, err := setupSingleNode(b, gridkv.BackendMemorySharded, 19100+size.size)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -147,7 +145,7 @@ func BenchmarkConcurrentSet(b *testing.B) {
 
 	for _, numGoroutines := range goroutineCounts {
 		b.Run(fmt.Sprintf("%dGoroutines", numGoroutines), func(b *testing.B) {
-			kv, err := setupSingleNode(b, storage.BackendMemorySharded, 19300+numGoroutines)
+			kv, err := setupSingleNode(b, gridkv.BackendMemorySharded, 19300+numGoroutines)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -191,7 +189,7 @@ func BenchmarkConcurrentGet(b *testing.B) {
 
 	for _, numGoroutines := range goroutineCounts {
 		b.Run(fmt.Sprintf("%dGoroutines", numGoroutines), func(b *testing.B) {
-			kv, err := setupSingleNode(b, storage.BackendMemorySharded, 19400+numGoroutines)
+			kv, err := setupSingleNode(b, gridkv.BackendMemorySharded, 19400+numGoroutines)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -255,7 +253,7 @@ func BenchmarkMixedWorkload(b *testing.B) {
 
 	for _, workload := range workloads {
 		b.Run(workload.name, func(b *testing.B) {
-			kv, err := setupSingleNode(b, storage.BackendMemorySharded, 19500+int(workload.readPercent*100))
+			kv, err := setupSingleNode(b, gridkv.BackendMemorySharded, 19500+int(workload.readPercent*100))
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -321,7 +319,7 @@ func BenchmarkLatency(b *testing.B) {
 
 	for _, op := range operations {
 		b.Run(op, func(b *testing.B) {
-			kv, err := setupSingleNode(b, storage.BackendMemorySharded, 19600)
+			kv, err := setupSingleNode(b, gridkv.BackendMemorySharded, 19600)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -382,10 +380,10 @@ func BenchmarkLatency(b *testing.B) {
 func BenchmarkStorageBackends(b *testing.B) {
 	backends := []struct {
 		name    string
-		backend storage.StorageBackendType
+		backend gridkv.StorageBackendType
 	}{
-		{"Memory", storage.BackendMemory},
-		{"MemorySharded", storage.BackendMemorySharded},
+		{"Memory", gridkv.BackendMemory},
+		{"MemorySharded", gridkv.BackendMemorySharded},
 	}
 
 	for _, be := range backends {

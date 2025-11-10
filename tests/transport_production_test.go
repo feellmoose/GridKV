@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/transport"
-	
 )
 
 // Production-Grade Transport Tests
@@ -22,11 +21,10 @@ import (
 // Run with: go test -race -run=TestTransport_RaceDetector
 func TestTransport_RaceDetector(t *testing.T) {
 	transports := []struct {
-		name string
+		name    string
 		factory func() (transport.Transport, error)
 	}{
 		{"TCP", func() (transport.Transport, error) { return transport.NewTCPTransport(), nil }},
-		{"UDP", func() (transport.Transport, error) { return transport.NewUDPTransport(), nil }},
 		{"gnet", func() (transport.Transport, error) { return transport.NewGnetTransport() }},
 	}
 
@@ -107,11 +105,10 @@ func TestTransport_LoadTesting(t *testing.T) {
 	}
 
 	transports := []struct {
-		name string
+		name    string
 		factory func() (transport.Transport, error)
 	}{
 		{"TCP", func() (transport.Transport, error) { return transport.NewTCPTransport(), nil }},
-		{"UDP", func() (transport.Transport, error) { return transport.NewUDPTransport(), nil }},
 		{"gnet", func() (transport.Transport, error) { return transport.NewGnetTransport() }},
 	}
 
@@ -139,7 +136,7 @@ func testLoadCapacity(t *testing.T, trans transport.Transport, name string) {
 
 	received := atomic.Int64{}
 	errors := atomic.Int64{}
-	
+
 	listener.HandleMessage(func(msg []byte) error {
 		received.Add(1)
 		return nil
@@ -153,7 +150,7 @@ func testLoadCapacity(t *testing.T, trans transport.Transport, name string) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Load parameters
-	concurrency := runtime.NumCPU() * 4  // High concurrency
+	concurrency := runtime.NumCPU() * 4 // High concurrency
 	opsPerGoroutine := 10000
 	message := make([]byte, 1024)
 
@@ -215,11 +212,10 @@ func TestTransport_Stability(t *testing.T) {
 	}
 
 	transports := []struct {
-		name string
+		name    string
 		factory func() (transport.Transport, error)
 	}{
 		{"TCP", func() (transport.Transport, error) { return transport.NewTCPTransport(), nil }},
-		{"UDP", func() (transport.Transport, error) { return transport.NewUDPTransport(), nil }},
 		{"gnet", func() (transport.Transport, error) { return transport.NewGnetTransport() }},
 	}
 
@@ -231,7 +227,7 @@ func TestTransport_Stability(t *testing.T) {
 				return
 			}
 
-			testStability(t, trans, tt.name, 30*time.Second)  // 30-second test
+			testStability(t, trans, tt.name, 30*time.Second) // 30-second test
 		})
 	}
 }
@@ -316,7 +312,7 @@ func testStability(t *testing.T, trans transport.Transport, name string, duratio
 
 	// Verify stability
 	errorRate := float64(errors) / float64(sent+errors)
-	if errorRate > 0.001 {  // < 0.1% error rate
+	if errorRate > 0.001 { // < 0.1% error rate
 		t.Errorf("%s: Error rate too high for stability: %.4f%%", name, errorRate*100)
 	}
 
@@ -324,4 +320,3 @@ func testStability(t *testing.T, trans transport.Transport, name string, duratio
 		t.Errorf("%s: No messages sent during stability test", name)
 	}
 }
-

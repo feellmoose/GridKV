@@ -10,8 +10,6 @@ import (
 	"time"
 
 	gridkv "github.com/feellmoose/gridkv"
-	"github.com/feellmoose/gridkv/internal/gossip"
-	"github.com/feellmoose/gridkv/internal/storage"
 )
 
 // TestSimpleClusterPerformance runs a simplified but realistic long-term test
@@ -58,12 +56,12 @@ func TestSimpleClusterPerformance(t *testing.T) {
 			LocalNodeID:  fmt.Sprintf("perf-node-%d", i),
 			LocalAddress: fmt.Sprintf("localhost:%d", basePort+i),
 			SeedAddrs:    seedAddrs,
-			Network: &gossip.NetworkOptions{
-				Type:     gossip.TCP,
+			Network: &gridkv.NetworkOptions{
+				Type:     gridkv.TCP,
 				BindAddr: fmt.Sprintf("localhost:%d", basePort+i),
 			},
-			Storage: &storage.StorageOptions{
-				Backend:     storage.BackendMemorySharded,
+			Storage: &gridkv.StorageOptions{
+				Backend:     gridkv.BackendMemorySharded,
 				MaxMemoryMB: 4096,
 			},
 			ReplicaCount: 1, // Single replica for max performance
@@ -129,7 +127,7 @@ func TestSimpleClusterPerformance(t *testing.T) {
 				switch {
 				case op < 6: // 60% reads
 					_, err := node.Get(ctx, key)
-					if err == nil || err == storage.ErrItemNotFound {
+					if err == nil {
 						totalReads.Add(1)
 					} else {
 						readErrors.Add(1)
@@ -145,7 +143,7 @@ func TestSimpleClusterPerformance(t *testing.T) {
 
 				default: // 10% deletes
 					err := node.Delete(ctx, key)
-					if err == nil || err == storage.ErrItemNotFound {
+					if err == nil {
 						totalDeletes.Add(1)
 					} else {
 						deleteErrors.Add(1)

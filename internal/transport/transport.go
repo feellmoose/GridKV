@@ -55,6 +55,49 @@ type ConnPool struct {
 	idleConns []pooledTransportConn
 	total     int // Total number of connections, both idle and in-use
 	closed    bool
+
+	// OPTIMIZATION: Pool metrics for monitoring and tuning
+	metrics *ConnPoolMetrics
+}
+
+// ConnPoolMetrics tracks connection pool statistics for monitoring
+type ConnPoolMetrics struct {
+	totalGets       int64 // Total Get() calls
+	totalPuts       int64 // Total Put() calls
+	totalInvalidate int64 // Total Invalidate() calls
+	totalWaits      int64 // Number of times Get() had to wait
+	totalDialed     int64 // Total new connections created
+	totalReused     int64 // Total connections reused from pool
+	healthCheckFail int64 // Total health check failures
+	mu              sync.RWMutex
+}
+
+// GetMetrics returns a snapshot of pool metrics
+func (m *ConnPoolMetrics) GetMetrics() map[string]int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return map[string]int64{
+		"total_gets":        m.totalGets,
+		"total_puts":        m.totalPuts,
+		"total_invalidate":  m.totalInvalidate,
+		"total_waits":       m.totalWaits,
+		"total_dialed":      m.totalDialed,
+		"total_reused":      m.totalReused,
+		"health_check_fail": m.healthCheckFail,
+	}
+}
+
+// GetReuseRate returns the connection reuse rate (0-1)
+func (m *ConnPoolMetrics) GetReuseRate() float64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	total := m.totalDialed + m.totalReused
+	if total == 0 {
+		return 0
+	}
+	return float64(m.totalReused) / float64(total)
 }
 
 // NewConnPool creates a new connection pool.
@@ -66,6 +109,7 @@ func NewConnPool(transport Transport, address string, maxIdle, maxConns int, idl
 		maxConns:    maxConns,
 		idleTimeout: idleTimeout,
 		idleConns:   make([]pooledTransportConn, 0, maxIdle),
+		metrics:     &ConnPoolMetrics{}, // Initialize metrics
 	}
 	// Initialize the condition variable for waiting on available connections.
 	pool.cond = sync.NewCond(&pool.mu)
@@ -73,6 +117,71 @@ func NewConnPool(transport Transport, address string, maxIdle, maxConns int, idl
 	// Start the background cleanup Goroutine.
 	go pool.cleanupLoop()
 	return pool
+}
+
+// Prewarm creates initial connections to warm up the pool.
+// This reduces connection establishment latency for the first requests.
+//
+// Parameters:
+//   - count: Number of connections to pre-create (capped at maxIdle)
+//
+// Returns number of successfully created connections
+func (p *ConnPool) Prewarm(count int) int {
+	if count > p.maxIdle {
+		count = p.maxIdle
+	}
+
+	created := 0
+	for i := 0; i < count; i++ {
+		conn, err := p.transport.Dial(p.address)
+		if err != nil {
+			break
+		}
+
+		p.mu.Lock()
+		if len(p.idleConns) < p.maxIdle && !p.closed {
+			p.idleConns = append(p.idleConns, pooledTransportConn{
+				conn:     conn,
+				lastUsed: time.Now(),
+			})
+			p.total++
+			created++
+		} else {
+			// Pool full or closed, close the connection
+			conn.Close()
+		}
+		p.mu.Unlock()
+	}
+
+	return created
+}
+
+// GetMetrics returns current pool metrics
+func (p *ConnPool) GetMetrics() map[string]int64 {
+	if p.metrics == nil {
+		return make(map[string]int64)
+	}
+	return p.metrics.GetMetrics()
+}
+
+// GetStats returns current pool state
+func (p *ConnPool) GetStats() map[string]interface{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	stats := make(map[string]interface{})
+	stats["address"] = p.address
+	stats["total_connections"] = p.total
+	stats["idle_connections"] = len(p.idleConns)
+	stats["max_idle"] = p.maxIdle
+	stats["max_conns"] = p.maxConns
+	stats["idle_timeout"] = p.idleTimeout.String()
+
+	if p.metrics != nil {
+		stats["reuse_rate"] = p.metrics.GetReuseRate()
+	}
+
+	return stats
 }
 
 // cleanupLoop periodically cleans up expired idle connections.
@@ -106,6 +215,13 @@ func (p *ConnPool) cleanupLoop() {
 // Get returns an active TransportConn. If the pool is exhausted, it waits until one is available.
 // This method is Context-aware, supporting cancellation/timeout while waiting.
 func (p *ConnPool) Get(ctx context.Context) (TransportConn, error) {
+	// METRICS: Record Get call
+	if p.metrics != nil {
+		p.metrics.mu.Lock()
+		p.metrics.totalGets++
+		p.metrics.mu.Unlock()
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -135,8 +251,22 @@ func (p *ConnPool) Get(ctx context.Context) (TransportConn, error) {
 					// Connection is broken, close and try next
 					_ = pc.conn.Close()
 					p.total--
+
+					// METRICS: Record health check failure
+					if p.metrics != nil {
+						p.metrics.mu.Lock()
+						p.metrics.healthCheckFail++
+						p.metrics.mu.Unlock()
+					}
 					continue
 				}
+			}
+
+			// METRICS: Record connection reuse
+			if p.metrics != nil {
+				p.metrics.mu.Lock()
+				p.metrics.totalReused++
+				p.metrics.mu.Unlock()
 			}
 
 			return pc.conn, nil // Found a healthy connection
@@ -156,10 +286,25 @@ func (p *ConnPool) Get(ctx context.Context) (TransportConn, error) {
 				p.total--
 				return nil, err
 			}
+
+			// METRICS: Record new connection
+			if p.metrics != nil {
+				p.metrics.mu.Lock()
+				p.metrics.totalDialed++
+				p.metrics.mu.Unlock()
+			}
+
 			return conn, nil
 		}
 
 		// 4. Pool exhausted (total == maxConns and no idle connections). Wait.
+		// METRICS: Record wait event
+		if p.metrics != nil {
+			p.metrics.mu.Lock()
+			p.metrics.totalWaits++
+			p.metrics.mu.Unlock()
+		}
+
 		// Check context for expiration before waiting
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -201,6 +346,13 @@ func (p *ConnPool) Get(ctx context.Context) (TransportConn, error) {
 
 // Put returns a connection back to the pool.
 func (p *ConnPool) Put(conn TransportConn) {
+	// METRICS: Record Put call
+	if p.metrics != nil {
+		p.metrics.mu.Lock()
+		p.metrics.totalPuts++
+		p.metrics.mu.Unlock()
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -225,6 +377,13 @@ func (p *ConnPool) Put(conn TransportConn) {
 // Invalidate closes a connection and decrements the total count.
 // This should be called instead of Put() when a retrieved connection is found to be broken or unusable.
 func (p *ConnPool) Invalidate(conn TransportConn) {
+	// METRICS: Record Invalidate call
+	if p.metrics != nil {
+		p.metrics.mu.Lock()
+		p.metrics.totalInvalidate++
+		p.metrics.mu.Unlock()
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 

@@ -1,5 +1,17 @@
 package storage
 
+// File: object_pool.go
+// Purpose: Object pooling for reducing allocations
+//
+// This file provides sync.Pool based object pools for frequently allocated types.
+// Reduces GC pressure and improves performance by reusing objects.
+//
+// Pooled types:
+//   - StoredItem
+//   - CacheSyncOperation
+//   - FullStateItem
+//   - Byte buffers (128B, 1KB, 10KB)
+
 import (
 	"sync"
 	"time"

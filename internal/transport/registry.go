@@ -24,8 +24,6 @@ func NewTransport(transportType string) (Transport, error) {
 	if !ok {
 		// Provide descriptive error for non-compiled transports
 		switch transportType {
-		case "udp":
-			return nil, fmt.Errorf("UDP transport not available. Compile with default tags or without -tags noudp")
 		case "gnet":
 			return nil, fmt.Errorf("gnet transport not available. Compile with default tags or without -tags nognet")
 		default:

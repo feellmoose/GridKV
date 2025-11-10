@@ -75,7 +75,10 @@ func BenchmarkMemory_LargeValues(b *testing.B) {
 
 // BenchmarkMemorySharded_SmallValues benchmarks MemorySharded with small values
 func BenchmarkMemorySharded_SmallValues(b *testing.B) {
-	storage, _ := NewShardedMemoryStorage(1024)
+	storage, _ := NewShardedMemoryStorageV2(V2Config{
+		MaxMemoryMB: 1024,
+		ShardCount:  256,
+	})
 	defer storage.Close()
 
 	value := make([]byte, 100) // 100 bytes
@@ -128,7 +131,10 @@ func BenchmarkMemory_WriteOnly(b *testing.B) {
 
 // BenchmarkMemorySharded_WriteOnly benchmarks MemorySharded write-only workload
 func BenchmarkMemorySharded_WriteOnly(b *testing.B) {
-	storage, _ := NewShardedMemoryStorage(1024)
+	storage, _ := NewShardedMemoryStorageV2(V2Config{
+		MaxMemoryMB: 1024,
+		ShardCount:  256,
+	})
 	defer storage.Close()
 
 	value := make([]byte, 500)
@@ -186,7 +192,10 @@ func BenchmarkMemory_ReadHeavy(b *testing.B) {
 
 // BenchmarkMemorySharded_ReadHeavy benchmarks MemorySharded read-heavy workload
 func BenchmarkMemorySharded_ReadHeavy(b *testing.B) {
-	storage, _ := NewShardedMemoryStorage(1024)
+	storage, _ := NewShardedMemoryStorageV2(V2Config{
+		MaxMemoryMB: 1024,
+		ShardCount:  256,
+	})
 	defer storage.Close()
 
 	// Pre-populate
@@ -306,7 +315,10 @@ func BenchmarkComparisonMatrix(b *testing.B) {
 
 		// MemorySharded (high throughput)
 		b.Run(fmt.Sprintf("MemorySharded_%s", scenario.name), func(b *testing.B) {
-			storage, _ := NewShardedMemoryStorage(2048)
+			storage, _ := NewShardedMemoryStorageV2(V2Config{
+				MaxMemoryMB: 2048,
+				ShardCount:  256,
+			})
 			defer storage.Close()
 
 			b.ResetTimer()

@@ -8,19 +8,29 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+const (
+	// GridKVPrefix is the log prefix for all GridKV messages
+	GridKVPrefix = "[gridkv] "
+
+	// Default log settings (constants to avoid allocations)
+	DefaultLogLevel  = "info"
+	DefaultLogFormat = "text"
+)
+
 var Log *Logger
 
 func init() {
 	Log = NewLogger(&LogOptions{
-		Level:  "info",
-		Format: "text",
+		Level:  DefaultLogLevel,
+		Format: DefaultLogFormat,
 	})
 }
 
 // LogOptions configures the behavior of the logging system.
 type LogOptions struct {
-	Level  string // Log level (e.g., "debug", "info", "warn", "error") default "info"
-	Format string // Format is the output format of the logs (e.g., "json", "text")
+	Level       string // Log level (e.g., "debug", "info", "warn", "error") default "info"
+	Format      string // Format is the output format of the logs (e.g., "json", "text")
+	EnableDebug bool   // Enable debug logging (zero-cost when false)
 }
 
 func Info(msg string, keyValues ...interface{}) {
@@ -74,27 +84,54 @@ func NewLogger(opts *LogOptions) *Logger {
 		}
 	}
 
+	// Add [gridkv] prefix to all log messages
 	return &Logger{
-		logger: zerolog.New(output).With().Timestamp().Logger(),
+		logger: zerolog.New(output).With().
+			Timestamp().
+			Str("prefix", "gridkv").
+			Logger(),
 	}
 }
 
 // LogDebug records a debugging message.
-// This method is designed for zero-overhead in production environments
-// where the global log level is set higher (e.g., Info, Warn, or Disabled).
+// ZERO-COST when disabled: This method is designed for zero-overhead in production.
+// When global log level is Info or higher, this function returns immediately
+// without any allocations or processing.
+//
+//go:inline
 func (l Logger) LogDebug(msg string, keyValues ...interface{}) {
-	// Crucial Performance Check: Check if Debug level is enabled before building the log event.
-	// If not enabled, the method returns immediately, avoiding memory allocation
-	// and processing of keyValues.
-	if l.logger.Debug().Enabled() {
-		// Use Fields() to support the variadic keyValues structure (key1, val1, key2, val2...)
-		l.logger.Debug().Fields(keyValues).Msg(msg)
+	// CRITICAL OPTIMIZATION: Early return if debug not enabled
+	// This is completely free - just a level comparison
+	if !l.logger.Debug().Enabled() {
+		return
 	}
+	// Only execute expensive operations if debug is enabled
+	l.logger.Debug().Fields(keyValues).Msg(msg)
 }
 
 // LogInfo records informational messages about normal application flow.
+//
+//go:inline
 func (l Logger) LogInfo(msg string, keyValues ...interface{}) {
-	l.logger.Info().Fields(keyValues).Msg(msg)
+	if l.logger.Info().Enabled() {
+		l.logger.Info().Fields(keyValues).Msg(msg)
+	}
+}
+
+// IsDebugEnabled checks if debug logging is enabled (zero-cost check)
+//
+//go:inline
+//go:nosplit
+func (l Logger) IsDebugEnabled() bool {
+	return l.logger.Debug().Enabled()
+}
+
+// IsInfoEnabled checks if info logging is enabled
+//
+//go:inline
+//go:nosplit
+func (l Logger) IsInfoEnabled() bool {
+	return l.logger.Info().Enabled()
 }
 
 // LogWarn records messages about potential issues that do not immediately stop the application.

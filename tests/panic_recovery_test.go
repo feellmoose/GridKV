@@ -10,8 +10,6 @@ import (
 	"time"
 
 	gridkv "github.com/feellmoose/gridkv"
-	"github.com/feellmoose/gridkv/internal/gossip"
-	"github.com/feellmoose/gridkv/internal/storage"
 )
 
 // TestPanicRecovery_API tests that API layer methods recover from panics
@@ -19,12 +17,12 @@ func TestPanicRecovery_API(t *testing.T) {
 	kv, err := gridkv.NewGridKV(&gridkv.GridKVOptions{
 		LocalNodeID:  "panic-test-node",
 		LocalAddress: "localhost:14999",
-		Network: &gossip.NetworkOptions{
-			Type:     gossip.TCP,
+		Network: &gridkv.NetworkOptions{
+			Type:     gridkv.TCP,
 			BindAddr: "localhost:14999",
 		},
-		Storage: &storage.StorageOptions{
-			Backend:     storage.BackendMemorySharded,
+		Storage: &gridkv.StorageOptions{
+			Backend:     gridkv.BackendMemorySharded,
 			MaxMemoryMB: 1024,
 		},
 		ReplicaCount: 1,
@@ -67,12 +65,12 @@ func TestConcurrentOperationsNoPanic(t *testing.T) {
 	kv, err := gridkv.NewGridKV(&gridkv.GridKVOptions{
 		LocalNodeID:  "concurrent-panic-test",
 		LocalAddress: "localhost:13999",
-		Network: &gossip.NetworkOptions{
-			Type:     gossip.TCP,
+		Network: &gridkv.NetworkOptions{
+			Type:     gridkv.TCP,
 			BindAddr: "localhost:13999",
 		},
-		Storage: &storage.StorageOptions{
-			Backend:     storage.BackendMemorySharded,
+		Storage: &gridkv.StorageOptions{
+			Backend:     gridkv.BackendMemorySharded,
 			MaxMemoryMB: 2048,
 		},
 		ReplicaCount: 1,
@@ -151,12 +149,12 @@ func TestEdgeCases_NoPanic(t *testing.T) {
 	kv, err := gridkv.NewGridKV(&gridkv.GridKVOptions{
 		LocalNodeID:  "edge-case-test",
 		LocalAddress: "localhost:12999",
-		Network: &gossip.NetworkOptions{
-			Type:     gossip.TCP,
+		Network: &gridkv.NetworkOptions{
+			Type:     gridkv.TCP,
 			BindAddr: "localhost:12999",
 		},
-		Storage: &storage.StorageOptions{
-			Backend:     storage.BackendMemorySharded,
+		Storage: &gridkv.StorageOptions{
+			Backend:     gridkv.BackendMemorySharded,
 			MaxMemoryMB: 1024,
 		},
 		ReplicaCount: 1,
@@ -263,12 +261,12 @@ func TestStressTest_NoPanic(t *testing.T) {
 	kv, err := gridkv.NewGridKV(&gridkv.GridKVOptions{
 		LocalNodeID:  "stress-test-node",
 		LocalAddress: "localhost:11999",
-		Network: &gossip.NetworkOptions{
-			Type:     gossip.TCP,
+		Network: &gridkv.NetworkOptions{
+			Type:     gridkv.TCP,
 			BindAddr: "localhost:11999",
 		},
-		Storage: &storage.StorageOptions{
-			Backend:     storage.BackendMemorySharded,
+		Storage: &gridkv.StorageOptions{
+			Backend:     gridkv.BackendMemorySharded,
 			MaxMemoryMB: 512, // Intentionally small to trigger memory pressure
 		},
 		ReplicaCount: 1,

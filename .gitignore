@@ -1,0 +1,6 @@
+.vscode
+.cursor
+.idea
+.env
+.venv
+target

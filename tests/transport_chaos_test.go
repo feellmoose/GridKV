@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/transport"
-	
 )
 
 // Chaos Testing: Inject failures and verify recovery
@@ -23,11 +22,10 @@ func TestTransport_ChaosInjection(t *testing.T) {
 	}
 
 	transports := []struct {
-		name string
+		name    string
 		factory func() (transport.Transport, error)
 	}{
 		{"TCP", func() (transport.Transport, error) { return transport.NewTCPTransport(), nil }},
-		{"UDP", func() (transport.Transport, error) { return transport.NewUDPTransport(), nil }},
 		{"gnet", func() (transport.Transport, error) { return transport.NewGnetTransport() }},
 	}
 
@@ -59,13 +57,13 @@ func testChaosScenarios(t *testing.T, trans transport.Transport, name string) {
 	// Handler that randomly fails
 	listener.HandleMessage(func(msg []byte) error {
 		received.Add(1)
-		
+
 		// 5% random failure to test error handling
 		if rand.Float64() < 0.05 {
 			handlerErrors.Add(1)
 			return fmt.Errorf("simulated handler error")
 		}
-		
+
 		return nil
 	})
 
@@ -83,7 +81,7 @@ func testChaosScenarios(t *testing.T, trans transport.Transport, name string) {
 
 	stopCh := make(chan struct{})
 	var wg sync.WaitGroup
-	
+
 	sent := atomic.Int64{}
 	dialErrors := atomic.Int64{}
 	writeErrors := atomic.Int64{}
@@ -112,7 +110,7 @@ func testChaosScenarios(t *testing.T, trans transport.Transport, name string) {
 				}
 
 				// Random short-lived connections (chaos!)
-				opsThisConn := 10 + rand.Intn(90)  // 10-100 ops per conn
+				opsThisConn := 10 + rand.Intn(90) // 10-100 ops per conn
 				ctx := context.Background()
 
 				for j := 0; j < opsThisConn; j++ {
@@ -125,7 +123,7 @@ func testChaosScenarios(t *testing.T, trans transport.Transport, name string) {
 
 					if err := conn.WriteDataWithContext(ctx, message); err != nil {
 						writeErrors.Add(1)
-						break  // Connection failed, create new one
+						break // Connection failed, create new one
 					}
 					sent.Add(1)
 
@@ -161,7 +159,7 @@ func testChaosScenarios(t *testing.T, trans transport.Transport, name string) {
 	// Verify fault tolerance
 	totalErrors := dialErrors.Load() + writeErrors.Load()
 	errorRate := float64(totalErrors) / float64(sent.Load()+totalErrors)
-	
+
 	t.Logf("  Error rate: %.2f%%", errorRate*100)
 
 	if sent.Load() == 0 {
@@ -181,11 +179,10 @@ func TestTransport_ConnectionChurn(t *testing.T) {
 	}
 
 	transports := []struct {
-		name string
+		name    string
 		factory func() (transport.Transport, error)
 	}{
 		{"TCP", func() (transport.Transport, error) { return transport.NewTCPTransport(), nil }},
-		{"UDP", func() (transport.Transport, error) { return transport.NewUDPTransport(), nil }},
 	}
 
 	for _, tt := range transports {
@@ -270,7 +267,7 @@ func testConnectionChurn(t *testing.T, trans transport.Transport, name string) {
 
 	// Verify churn handling
 	errorRate := float64(errors.Load()) / float64(iterations)
-	if errorRate > 0.05 {  // Allow 5% errors in high churn
+	if errorRate > 0.05 { // Allow 5% errors in high churn
 		t.Errorf("%s: Too many errors during churn: %.2f%%", name, errorRate*100)
 	}
 }
@@ -278,11 +275,10 @@ func testConnectionChurn(t *testing.T, trans transport.Transport, name string) {
 // BenchmarkTransport_Production benchmarks all transports under realistic load
 func BenchmarkTransport_Production(b *testing.B) {
 	transports := []struct {
-		name string
+		name    string
 		factory func() (transport.Transport, error)
 	}{
 		{"TCP", func() (transport.Transport, error) { return transport.NewTCPTransport(), nil }},
-		{"UDP", func() (transport.Transport, error) { return transport.NewUDPTransport(), nil }},
 		{"gnet", func() (transport.Transport, error) { return transport.NewGnetTransport() }},
 	}
 
@@ -343,4 +339,3 @@ func benchmarkProductionLoad(b *testing.B, trans transport.Transport, name strin
 
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "ops/sec")
 }
-

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	gridkv "github.com/feellmoose/gridkv"
-	"github.com/feellmoose/gridkv/internal/gossip"
 )
 
 // Shared test helper functions
@@ -43,12 +42,12 @@ func setupTestCluster(tb testing.TB, nodeCount, basePort int) []*gridkv.GridKV {
 	nodes[0], err = gridkv.NewGridKV(&gridkv.GridKVOptions{
 		LocalNodeID:  "node-0",
 		LocalAddress: fmt.Sprintf("localhost:%d", basePort),
-		Network: &gossip.NetworkOptions{
-			Type:     gossip.TCP,
+		Network: &gridkv.NetworkOptions{
+			Type:     gridkv.TCP,
 			BindAddr: fmt.Sprintf("localhost:%d", basePort),
 		},
-		Storage: &gossip.StorageOptions{
-			Backend:     gossip.Memory,
+		Storage: &gridkv.StorageOptions{
+			Backend:     gridkv.BackendMemory,
 			MaxMemoryMB: 512,
 		},
 		ReplicaCount: minInt(3, nodeCount),
@@ -66,12 +65,12 @@ func setupTestCluster(tb testing.TB, nodeCount, basePort int) []*gridkv.GridKV {
 			LocalNodeID:  fmt.Sprintf("node-%d", i),
 			LocalAddress: fmt.Sprintf("localhost:%d", basePort+i),
 			SeedAddrs:    seedAddr,
-			Network: &gossip.NetworkOptions{
-				Type:     gossip.TCP,
+			Network: &gridkv.NetworkOptions{
+				Type:     gridkv.TCP,
 				BindAddr: fmt.Sprintf("localhost:%d", basePort+i),
 			},
-			Storage: &gossip.StorageOptions{
-				Backend:     gossip.Memory,
+			Storage: &gridkv.StorageOptions{
+				Backend:     gridkv.BackendMemory,
 				MaxMemoryMB: 512,
 			},
 			ReplicaCount: minInt(3, nodeCount),

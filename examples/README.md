@@ -1,315 +1,237 @@
-# GridKV Configuration Scenario Examples
+# GridKV Examples
 
-This directory contains various high-performance configuration scenario examples for GridKV, each optimized for different use cases.
-
----
-
-## 📁 Scenario List
-
-### 1. [High Concurrency Cache](01_high_concurrency/) ⭐⭐⭐⭐⭐
-**Use Case**: High concurrent read/write, microservice cache, session storage
-
-**Performance Expectations**:
-- Concurrent Reads: 5-7M ops/s
-- Concurrent Writes: 3-4M ops/s
-- Latency: < 500ns
-
-**Configuration Highlights**:
-- MemorySharded backend (256 shards)
-- 3 replicas + ReadQuorum=1 (read performance priority)
-- Large memory configuration (16GB)
-- High-concurrency replication pool
-
----
-
-### 2. [Strong Consistency](02_strong_consistency/) ⭐⭐⭐⭐⭐
-**Use Case**: Financial transactions, order systems, inventory management
-
-**Performance Expectations**:
-- Reads: 2-3M ops/s
-- Writes: 1-2M ops/s
-- Consistency: Strong consistency
-
-**Configuration Highlights**:
-- 3 replicas + ReadQuorum=2 + WriteQuorum=2
-- Short timeout settings (fast fail)
-- Automatic read repair
-- Strict quorum reads/writes
-
----
-
-### 3. [High Availability](03_high_availability/) ⭐⭐⭐⭐
-**Use Case**: 24/7 services, critical business systems
-
-**Performance Expectations**:
-- Reads: 3-4M ops/s
-- Writes: 2-3M ops/s
-- Availability: 99.99%+
-
-**Configuration Highlights**:
-- 5 replicas (tolerates 2 node failures)
-- ReadQuorum=2, WriteQuorum=3
-- Long timeout configuration (tolerates network jitter)
-- SWIM failure detection optimization
-
----
-
-### 4. [Low Latency](04_low_latency/) ⭐⭐⭐⭐⭐
-**Use Case**: Real-time recommendations, game state, real-time bidding
-
-**Performance Expectations**:
-- P99 Latency: < 1ms
-- P50 Latency: < 200ns
-- Reads: 6-7M ops/s
-
-**Configuration Highlights**:
-- Single replica or 2 replicas
-- ReadQuorum=1 (lowest latency)
-- Memory pre-allocation
-- Disable unnecessary checks
-
----
-
-### 5. [Large Cluster](05_large_cluster/) ⭐⭐⭐⭐
-**Use Case**: 20+ node clusters, data center-level deployment
-
-**Performance Expectations**:
-- Cluster throughput: 10-50M ops/s
-- Single node: 2-3M ops/s
-- Scalability: Near-linear
-
-**Configuration Highlights**:
-- Virtual node optimization (150-200)
-- Longer Gossip intervals
-- Batch replication optimization
-- Network parameter tuning
-
----
-
-### 6. [Development Testing](06_dev_testing/) ⭐⭐⭐
-**Use Case**: Local development, unit testing, feature validation
-
-**Performance Expectations**:
-- Fast startup (< 100ms)
-- Low resource usage
-- Simple configuration
-
-**Configuration Highlights**:
-- Single replica
-- Small memory limit (512MB)
-- Short timeout
-- Simplified network configuration
+Complete examples demonstrating GridKV usage in real-world scenarios.
 
 ---
 
 ## 🚀 Quick Start
 
-### Run a Single Scenario
+### Minimal Example
+
+```go
+import gridkv "github.com/feellmoose/gridkv"
+
+// Create a GridKV instance
+kv, _ := gridkv.NewGridKV(&gridkv.GridKVOptions{
+    LocalNodeID:  "node-1",
+    LocalAddress: "localhost:8001",
+    Network:      &gridkv.NetworkOptions{Type: gridkv.TCP, BindAddr: "localhost:8001"},
+    Storage:      &gridkv.StorageOptions{Backend: gridkv.BackendMemorySharded},
+})
+defer kv.Close()
+
+// Use it
+kv.Set(context.Background(), "key", []byte("value"))
+data, _ := kv.Get(context.Background(), "key")
+```
+
+---
+
+## 📚 Example List
+
+| Example | Description | Key Features |
+|---------|-------------|--------------|
+| [01_quickstart](01_quickstart/) | Single-node setup | Basic CRUD, QuickStart |
+| [02_distributed_cluster](02_distributed_cluster/) | 3-node cluster | Multi-node, Replication |
+| [03_multi_dc](03_multi_dc/) | Multi-datacenter | Geo-distribution, WAN |
+| [04_high_performance](04_high_performance/) | Performance tuning | High throughput, Low latency |
+| [05_production_ready](05_production_ready/) | Production config | Best practices, Monitoring |
+| [08_production_pitfalls](08_production_pitfalls/) | Common mistakes | Troubleshooting, Optimization |
+| [10_adaptive_network](10_adaptive_network/) | Adaptive networking | LAN/WAN detection, Auto-tuning |
+| [11_metrics_export](11_metrics_export/) | Metrics & monitoring | Prometheus, OTLP |
+
+---
+
+## 🎯 Examples by Use Case
+
+### Session Management
+→ [01_quickstart](01_quickstart/) - Basic session storage
+→ [02_distributed_cluster](02_distributed_cluster/) - Distributed sessions across web servers
+
+### API Response Caching
+→ [04_high_performance](04_high_performance/) - High-throughput API cache
+→ [05_production_ready](05_production_ready/) - Production-grade API cache
+
+### Multi-Region Deployment
+→ [03_multi_dc](03_multi_dc/) - Cross-region data distribution
+→ [10_adaptive_network](10_adaptive_network/) - Adaptive multi-DC setup
+
+### Configuration Distribution
+→ [02_distributed_cluster](02_distributed_cluster/) - Distributed config management
+
+### Rate Limiting
+→ [04_high_performance](04_high_performance/) - High-performance counter storage
+
+---
+
+## 🏃 Running Examples
+
+### Run Single Example
 
 ```bash
-# Enter the scenario directory
-cd 01_high_concurrency
-
-# Run the example
+cd examples/01_quickstart
 go run main.go
 ```
 
-### Run All Scenarios
+### Run All Examples (Sequential)
 
 ```bash
-# In the examples directory
-./run_all.sh
+for dir in examples/*/; do
+    echo "Running: $dir"
+    (cd "$dir" && go run main.go)
+done
 ```
 
 ---
 
-## 📊 Performance Comparison
+## 📖 Example Structure
 
-| Scenario | Reads (ops/s) | Writes (ops/s) | Latency (P99) | Consistency | Rating |
-|----------|---------------|----------------|---------------|-------------|--------|
-| **High Concurrency Cache** | 5-7M | 3-4M | < 500ns | Eventual | ⭐⭐⭐⭐⭐ |
-| **Strong Consistency** | 2-3M | 1-2M | < 2ms | Strong | ⭐⭐⭐⭐⭐ |
-| **High Availability** | 3-4M | 2-3M | < 1ms | Strong | ⭐⭐⭐⭐ |
-| **Low Latency** | 6-7M | 4-5M | < 200ns | Eventual | ⭐⭐⭐⭐⭐ |
-| **Large Cluster** | 10-50M | 5-20M | < 1ms | Strong | ⭐⭐⭐⭐ |
-| **Dev Testing** | 1-2M | 500K-1M | < 5ms | Eventual | ⭐⭐⭐ |
+Each example includes:
+- `main.go` - Complete working code
+- `README.md` - Detailed explanation
+- Comments explaining key concepts
+- Real-world use case context
 
 ---
 
-## 🎯 How to Choose a Scenario
+## 🔧 Configuration Examples
 
-### Decision Flow Chart
+### Development (Simple)
 
+```go
+&gridkv.GridKVOptions{
+    LocalNodeID:  "dev-node",
+    LocalAddress: "localhost:8001",
+    Network:      &gridkv.NetworkOptions{Type: gridkv.TCP, BindAddr: ":8001"},
+    Storage:      &gridkv.StorageOptions{Backend: gridkv.BackendMemory},
+}
 ```
-Do you need strong consistency?
-├─ Yes → Financial/Order system?
-│      ├─ Yes → [Strong Consistency Scenario]
-│      └─ No → Need high availability?
-│             ├─ Yes → [High Availability Scenario]
-│             └─ No → [Strong Consistency Scenario]
-│
-└─ No → Latency requirements?
-       ├─ < 1ms → [Low Latency Scenario]
-       ├─ < 10ms → Concurrency level?
-       │          ├─ High (>100K QPS) → [High Concurrency Cache Scenario]
-       │          └─ Medium/Low → [Dev Testing Scenario]
-       │
-       └─ Not strict → Cluster size?
-                  ├─ >20 nodes → [Large Cluster Scenario]
-                  └─ <20 nodes → [High Concurrency Cache Scenario]
+
+### Production (Recommended)
+
+```go
+&gridkv.GridKVOptions{
+    LocalNodeID:  os.Getenv("NODE_ID"),
+    LocalAddress: os.Getenv("NODE_ADDR") + ":8001",
+    SeedAddrs:    strings.Split(os.Getenv("SEED_ADDRS"), ","),
+    
+    Network: &gridkv.NetworkOptions{
+        Type:     gridkv.TCP,
+        BindAddr: ":8001",
+        MaxConns: 2000,
+        MaxIdle:  200,
+    },
+    
+    Storage: &gridkv.StorageOptions{
+        Backend:     gridkv.BackendMemorySharded,
+        ShardCount:  256,
+        MaxMemoryMB: 2048,
+    },
+    
+    ReplicaCount: 3,
+    WriteQuorum:  2,
+    ReadQuorum:   2,
+}
+```
+
+### High-Performance (Maximum Throughput)
+
+```go
+&gridkv.GridKVOptions{
+    LocalNodeID:  "perf-node",
+    LocalAddress: "localhost:8001",
+    
+    Network: &gridkv.NetworkOptions{
+        Type:     gridkv.GNET,  // High-performance (Linux/macOS)
+        BindAddr: ":8001",
+        MaxConns: 10000,
+    },
+    
+    Storage: &gridkv.StorageOptions{
+        Backend:     gridkv.BackendMemorySharded,
+        ShardCount:  256,  // Maximum concurrency
+        MaxMemoryMB: 8192,
+    },
+    
+    ReadQuorum: 1,  // Fast reads
+}
 ```
 
 ---
 
-## 💡 Configuration Tuning Guide
+## 💡 Best Practices
 
-### Key Parameter Explanations
+### 1. Always Use Defer for Cleanup
 
-#### 1. Replica Configuration
 ```go
-ReplicaCount: 3,    // Number of replicas
-WriteQuorum:  2,    // How many replicas must ack writes
-ReadQuorum:   2,    // How many replicas to read for comparison
+kv, err := gridkv.NewGridKV(opts)
+if err != nil {
+    log.Fatal(err)
+}
+defer kv.Close()  // ✅ Always cleanup
 ```
 
-**Rules**:
-- `WriteQuorum + ReadQuorum > ReplicaCount` → Strong consistency
-- `ReadQuorum = 1` → Highest read performance
-- `WriteQuorum = ReplicaCount` → Highest data safety
+### 2. Use Context with Timeout
 
-#### 2. Storage Backend
 ```go
-storage.BackendMemory        // Single lock, simple
-storage.BackendMemorySharded // Multiple locks, high performance (recommended)
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+err := kv.Set(ctx, key, value)
 ```
 
-**Performance Comparison**:
-- Memory: ~800K-1M ops/s
-- MemorySharded: ~1M-1.5M ops/s (+15-20%)
+### 3. Handle Errors Properly
 
-#### 3. Network Configuration
 ```go
-MaxConns:     2000,  // Maximum connections
-MaxIdle:      200,   // Idle connections
-ReadTimeout:  5s,    // Read timeout
-WriteTimeout: 5s,    // Write timeout
+value, err := kv.Get(ctx, key)
+if err != nil {
+    log.Printf("Get failed: %v", err)
+    return
+}
 ```
 
-**Tuning Recommendations**:
-- High concurrency: MaxConns=2000+, MaxIdle=200+
-- Low latency: Short timeout (1-2s)
-- High availability: Long timeout (5-10s)
+### 4. Configure for Your Use Case
 
-#### 4. Virtual Nodes
-```go
-VirtualNodes: 150,  // Consistent hashing virtual nodes
-```
-
-**Rules**:
-- Small cluster (<10 nodes): 100-150
-- Large cluster (>20 nodes): 150-200
-- Very large cluster (>50 nodes): 200-300
-
-#### 5. Replication Configuration
-```go
-MaxReplicators:     16,  // Replication goroutine pool size
-ReplicationTimeout: 2s,  // Replication timeout
-```
-
-**Tuning Recommendations**:
-- High concurrent writes: MaxReplicators = CPU cores × 2
-- Low latency: Short timeout (1-2s)
+- **Session storage**: N=3, W=2, R=1 (fast reads)
+- **Critical data**: N=5, W=3, R=3 (strong consistency)
+- **Cache layer**: N=3, W=1, R=1 (low latency)
 
 ---
 
-## 🔍 Performance Tuning Tips
+## 🔍 Troubleshooting
 
-### 1. Read Performance Optimization
+### Example Won't Start
 
-**Method 1**: Lower ReadQuorum
+Check:
+1. Port not in use: `lsof -i :8001`
+2. Firewall allows port
+3. Correct Go version: `go version` (need 1.23+)
+
+### Can't Connect to Seed Nodes
+
+Check:
+1. Seed nodes are running
+2. Network connectivity: `ping <seed_addr>`
+3. SeedAddrs format: `"host:port"` not `"http://host:port"`
+
+### High Memory Usage
+
+Adjust:
 ```go
-ReadQuorum: 1,  // Read from only 1 replica (fastest)
+Storage: &gridkv.StorageOptions{
+    MaxMemoryMB: 1024,  // Reduce limit
+}
 ```
-Effect: 2-3x read performance improvement
-
-**Method 2**: Use MemorySharded
-```go
-Backend: storage.BackendMemorySharded,
-```
-Effect: 15-20% read performance improvement
-
-### 2. Write Performance Optimization
-
-**Method 1**: Lower replica count
-```go
-ReplicaCount: 1,  // Single replica (fastest)
-WriteQuorum:  1,
-```
-Effect: 3-5x write performance improvement
-
-**Method 2**: Increase replication pool
-```go
-MaxReplicators: runtime.NumCPU() * 2,
-```
-Effect: 50-100% concurrent write improvement
-
-### 3. Latency Optimization
-
-**Method 1**: Short timeout
-```go
-ReadTimeout:  1 * time.Second,
-WriteTimeout: 1 * time.Second,
-```
-Effect: 50% P99 latency reduction
-
-**Method 2**: Single replica + ReadQuorum=1
-```go
-ReplicaCount: 1,
-ReadQuorum:   1,
-```
-Effect: Latency reduced to < 500ns
 
 ---
 
-## ⚠️ Considerations
+## 📚 Learn More
 
-### Performance vs Consistency Trade-offs
-
-| Configuration | Performance | Consistency | Availability |
-|--------------|-------------|-------------|--------------|
-| Single replica + R=1 | ⭐⭐⭐⭐⭐ | ❌ No guarantee | ❌ Low |
-| 3 replicas + R=1,W=1 | ⭐⭐⭐⭐ | ❌ Eventual | ⭐⭐⭐ |
-| 3 replicas + R=2,W=2 | ⭐⭐⭐ | ✅ Strong | ⭐⭐⭐⭐ |
-| 5 replicas + R=3,W=3 | ⭐⭐ | ✅ Strong | ⭐⭐⭐⭐⭐ |
-
-### Common Pitfalls
-
-1. **Too many replicas**
-   - Problem: ReplicaCount=10
-   - Impact: 10x write performance degradation
-   - Recommendation: Usually 3-5 replicas are sufficient
-
-2. **Too short timeout**
-   - Problem: Timeout=100ms
-   - Impact: Many failures due to network jitter
-   - Recommendation: At least 1 second or more
-
-3. **Mismatched Quorum**
-   - Problem: R=1, W=1 (3 replicas)
-   - Impact: Cannot guarantee consistency
-   - Recommendation: Ensure R+W > N
+- [Main README](../README.md) - Project overview
+- [API Reference](../docs/API_REFERENCE.md) - Complete API docs
+- [Deployment Guide](../docs/DEPLOYMENT_GUIDE.md) - Production deployment
 
 ---
 
-## 📚 Related Documentation
-
-- [Performance Test Report](../FINAL_PERFORMANCE_REPORT.md)
-- [Configuration Parameters](../docs/CONFIGURATION.md)
-- [Best Practices](../docs/BEST_PRACTICES.md)
-- [Troubleshooting](../docs/TROUBLESHOOTING.md)
-
----
-
-**GridKV** - High-performance distributed KV storage, built for modern applications
-
-GitHub: https://github.com/feellmoose/gridkv
+**GridKV** - Go-Native Distributed Cache  
+*Examples updated for v3.1*
