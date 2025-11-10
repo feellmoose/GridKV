@@ -659,15 +659,6 @@ MIT License - see [LICENSE](LICENSE)
 
 ---
 
-## Project Status
-
-**Version**: v3.1  
-**Status**: Production Ready  
-**Performance**: 9.7/10  
-**Rating**: 9.9/10 ⭐⭐⭐⭐⭐
-
----
-
 <div align="center">
 
 **GridKV** - Go-Native Embedded Distributed Cache

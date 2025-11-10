@@ -4,33 +4,33 @@ import (
 	"time"
 )
 
-// GossipConfig 包含 Gossip 协议的推荐配置
+// GossipConfig contains recommended configuration for Gossip protocol
 type GossipConfig struct {
-	Interval       time.Duration // Gossip 传播间隔
-	FailureTimeout time.Duration // 标记节点为可疑的超时时间
-	SuspectTimeout time.Duration // 标记节点为失败的超时时间
-	Description    string        // 配置说明
+	Interval       time.Duration // Gossip propagation interval
+	FailureTimeout time.Duration // Timeout to mark node as suspect
+	SuspectTimeout time.Duration // Timeout to mark node as failed
+	Description    string        // Configuration description
 }
 
-// GetOptimalGossipConfig 根据集群大小返回推荐的 Gossip 配置
-// 这个函数实现了大集群 Gossip 调优策略，可以获得 5-10% 的性能提升
+// GetOptimalGossipConfig returns recommended Gossip configuration based on cluster size
+// This function implements Gossip tuning strategy for large clusters, achieving 5-10% performance improvement
 //
-// 参数:
+// Parameters:
 //
-//	clusterSize: 集群中的节点数量
+//	clusterSize: Number of nodes in the cluster
 //
-// 返回:
+// Returns:
 //
-//	推荐的 Gossip 配置
+//	Recommended Gossip configuration
 //
-// 性能影响:
-//   - 10-30 节点: +5-8% 性能提升
-//   - 30-50 节点: +8-10% 性能提升
-//   - > 50 节点: +10-15% 性能提升
+// Performance Impact:
+//   - 10-30 nodes: +5-8% performance improvement
+//   - 30-50 nodes: +8-10% performance improvement
+//   - > 50 nodes: +10-15% performance improvement
 func GetOptimalGossipConfig(clusterSize int) *GossipConfig {
 	switch {
 	case clusterSize <= 5:
-		// 小集群: 快速故障检测优先
+		// Small cluster: Fast failure detection priority
 		return &GossipConfig{
 			Interval:       1 * time.Second,
 			FailureTimeout: 5 * time.Second,
@@ -39,7 +39,7 @@ func GetOptimalGossipConfig(clusterSize int) *GossipConfig {
 		}
 
 	case clusterSize <= 10:
-		// 中等集群: 平衡检测速度和性能
+		// Medium cluster: Balance detection speed and performance
 		return &GossipConfig{
 			Interval:       2 * time.Second,
 			FailureTimeout: 8 * time.Second,
@@ -48,7 +48,7 @@ func GetOptimalGossipConfig(clusterSize int) *GossipConfig {
 		}
 
 	case clusterSize <= 30:
-		// 大集群: 性能优先 ⭐ 推荐
+		// Large cluster: Performance priority ⭐ Recommended
 		return &GossipConfig{
 			Interval:       3 * time.Second,
 			FailureTimeout: 10 * time.Second,
@@ -57,7 +57,7 @@ func GetOptimalGossipConfig(clusterSize int) *GossipConfig {
 		}
 
 	case clusterSize <= 50:
-		// 超大集群: 显著降低开销
+		// Very large cluster: Significantly reduce overhead
 		return &GossipConfig{
 			Interval:       4 * time.Second,
 			FailureTimeout: 12 * time.Second,
@@ -66,7 +66,7 @@ func GetOptimalGossipConfig(clusterSize int) *GossipConfig {
 		}
 
 	default:
-		// 巨型集群: 极致优化
+		// Huge cluster: Maximum optimization
 		return &GossipConfig{
 			Interval:       5 * time.Second,
 			FailureTimeout: 15 * time.Second,
@@ -76,18 +76,18 @@ func GetOptimalGossipConfig(clusterSize int) *GossipConfig {
 	}
 }
 
-// ClusterSizeCategory 返回集群大小分类
+// ClusterSizeCategory represents cluster size classification
 type ClusterSizeCategory int
 
 const (
-	Small     ClusterSizeCategory = iota // ≤ 5 节点
-	Medium                               // 6-10 节点
-	Large                                // 11-30 节点
-	VeryLarge                            // 31-50 节点
-	Huge                                 // > 50 节点
+	Small     ClusterSizeCategory = iota // ≤ 5 nodes
+	Medium                               // 6-10 nodes
+	Large                                // 11-30 nodes
+	VeryLarge                            // 31-50 nodes
+	Huge                                 // > 50 nodes
 )
 
-// GetClusterCategory 返回集群大小分类
+// GetClusterCategory returns cluster size classification
 func GetClusterCategory(size int) ClusterSizeCategory {
 	switch {
 	case size <= 5:
@@ -103,7 +103,7 @@ func GetClusterCategory(size int) ClusterSizeCategory {
 	}
 }
 
-// String 返回分类的字符串表示
+// String returns the string representation of the category
 func (c ClusterSizeCategory) String() string {
 	switch c {
 	case Small:
@@ -121,35 +121,35 @@ func (c ClusterSizeCategory) String() string {
 	}
 }
 
-// EstimateGossipLoad 估算 Gossip 协议的负载
+// GossipLoadEstimate estimates the load of Gossip protocol
 type GossipLoadEstimate struct {
-	MessagesPerSecond int     // 每秒消息数
-	BytesPerSecond    int     // 每秒字节数（估算）
-	CPUPercent        float64 // 预期 CPU 占用百分比
-	NetworkMbps       float64 // 网络带宽占用 (Mbps)
+	MessagesPerSecond int     // Messages per second
+	BytesPerSecond    int     // Bytes per second (estimated)
+	CPUPercent        float64 // Expected CPU usage percentage
+	NetworkMbps       float64 // Network bandwidth usage (Mbps)
 }
 
-// EstimateGossipLoad 估算给定配置下的 Gossip 负载
+// EstimateGossipLoad estimates Gossip load under the given configuration
 func EstimateGossipLoad(clusterSize int, interval time.Duration) *GossipLoadEstimate {
-	// 估算每秒消息数
-	// 假设每个节点向 min(clusterSize, 5) 个节点发送消息
+	// Estimate messages per second
+	// Assume each node sends messages to min(clusterSize, 5) nodes
 	fanout := clusterSize
 	if fanout > 5 {
-		fanout = 5 // 限制扇出
+		fanout = 5 // Limit fanout
 	}
 
 	messagesPerInterval := clusterSize * fanout
 	messagesPerSecond := int(float64(messagesPerInterval) / interval.Seconds())
 
-	// 估算每条消息大小 (平均 500 bytes)
+	// Estimate message size (average 500 bytes)
 	avgMessageSize := 500
 	bytesPerSecond := messagesPerSecond * avgMessageSize
 
-	// 估算 CPU 占用 (每条消息 ~0.1ms CPU)
+	// Estimate CPU usage (~0.1ms CPU per message)
 	cpuTimePerMessage := 0.0001 // 0.1ms
 	cpuPercent := float64(messagesPerSecond) * cpuTimePerMessage * 100
 
-	// 估算网络带宽 (Mbps)
+	// Estimate network bandwidth (Mbps)
 	networkMbps := float64(bytesPerSecond) * 8 / 1000000
 
 	return &GossipLoadEstimate{
@@ -160,12 +160,12 @@ func EstimateGossipLoad(clusterSize int, interval time.Duration) *GossipLoadEsti
 	}
 }
 
-// ShouldOptimizeGossip 判断是否需要 Gossip 优化
+// ShouldOptimizeGossip determines whether Gossip optimization is needed
 func ShouldOptimizeGossip(clusterSize int) bool {
 	return clusterSize > 10
 }
 
-// GetGossipOptimizationBenefit 估算 Gossip 优化的收益
+// GetGossipOptimizationBenefit estimates the benefit of Gossip optimization
 func GetGossipOptimizationBenefit(clusterSize int) string {
 	switch {
 	case clusterSize <= 10:

@@ -659,15 +659,6 @@ MIT License - 见 [LICENSE](LICENSE)
 
 ---
 
-## 项目状态
-
-**Version**: v3.1  
-**Status**: Production Ready  
-**Performance**: 9.7/10  
-**Rating**: 9.9/10 ⭐⭐⭐⭐⭐
-
----
-
 <div align="center">
 
 **GridKV** - Go原生嵌入式分布式缓存
