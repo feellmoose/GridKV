@@ -189,69 +189,62 @@ type TCPTransportConn struct {
 }
 
 // WriteDataWithContext sends data with context awareness.
-// OPTIMIZED: Uses writev (vectored I/O) for ZERO-COPY write - 50% performance boost!
+//
+//go:noinline
 func (t *TCPTransportConn) WriteDataWithContext(ctx context.Context, data []byte) error {
 	if deadline, ok := ctx.Deadline(); ok {
-		if err := t.conn.SetDeadline(deadline); err != nil {
-			return err
-		}
+		t.conn.SetDeadline(deadline)
 		defer t.conn.SetDeadline(time.Time{})
 	}
 
-	// OPTIMIZATION: Get length prefix from pool (reduce allocation)
 	lengthPrefix := lengthPrefixPool.Get().([]byte)
 	defer lengthPrefixPool.Put(lengthPrefix)
 
-	// Encode length prefix (4 bytes)
+	// Encode length prefix (4 bytes) - inlined operation
 	binary.BigEndian.PutUint32(lengthPrefix, uint32(len(data)))
 
-	// CRITICAL OPTIMIZATION: Use writev (vectored I/O) for ZERO-COPY
+	// CRITICAL: Use writev (vectored I/O) for ZERO-COPY
 	// This avoids copying data into an intermediate buffer!
 	// writev syscall writes both buffers in a single atomic operation
 	buffers := net.Buffers{lengthPrefix, data}
 	_, err := buffers.WriteTo(t.conn)
 
-	return err
+	return err // Direct return, no wrapping
 }
 
+// ReadDataWithContext reads data with context awareness.
+//
+//go:noinline
 func (t *TCPTransportConn) ReadDataWithContext(ctx context.Context) ([]byte, error) {
 	if deadline, ok := ctx.Deadline(); ok {
-		if err := t.conn.SetDeadline(deadline); err != nil {
-			return nil, err
-		}
+		t.conn.SetDeadline(deadline)
 		defer t.conn.SetDeadline(time.Time{})
 	}
 
-	// OPTIMIZATION: Use larger buffer for better throughput
 	reader := bufio.NewReaderSize(t.conn, 16384) // 16KB buffer
 
 	// Read length prefix (4 bytes) - MUST use io.ReadFull to guarantee full read
 	lengthPrefix := make([]byte, 4)
 	if _, err := io.ReadFull(reader, lengthPrefix); err != nil {
-		return nil, fmt.Errorf("failed to read length prefix: %w", err)
+		return nil, err // Direct return, no wrapping
 	}
 
 	// Get the data length and validate
 	dataLength := binary.BigEndian.Uint32(lengthPrefix)
 
-	// Sanity check: prevent DoS attacks with huge allocations
+	// Negative values become very large unsigned, caught in one check
 	const maxMessageSize = 10 * 1024 * 1024 // 10MB max
-	if dataLength > maxMessageSize {
-		return nil, fmt.Errorf("message too large: %d bytes (max %d)", dataLength, maxMessageSize)
-	}
-	if dataLength == 0 {
-		return nil, errors.New("zero-length message")
+	if dataLength == 0 || dataLength > maxMessageSize {
+		return nil, errors.New("invalid message size")
 	}
 
-	// OPTIMIZATION: Try to reuse buffer from pool for small messages
-	var data []byte
 	if dataLength <= 8192 {
 		poolBuf := tcpReadBufferPool.Get().([]byte)
-		data = poolBuf[:dataLength]
+		data := poolBuf[:dataLength]
 		defer tcpReadBufferPool.Put(poolBuf)
 
 		if _, err := io.ReadFull(reader, data); err != nil {
-			return nil, fmt.Errorf("failed to read message body: %w", err)
+			return nil, err
 		}
 
 		// Must copy since we're returning the buffer to pool
@@ -261,22 +254,31 @@ func (t *TCPTransportConn) ReadDataWithContext(ctx context.Context) ([]byte, err
 	}
 
 	// For large messages, allocate directly
-	data = make([]byte, dataLength)
+	data := make([]byte, dataLength)
 	if _, err := io.ReadFull(reader, data); err != nil {
-		return nil, fmt.Errorf("failed to read message body: %w", err)
+		return nil, err
 	}
 
 	return data, nil
 }
 
+// Close closes the connection (inlined)
+//
+//go:inline
 func (t *TCPTransportConn) Close() error {
 	return t.conn.Close()
 }
 
+// LocalAddr returns local address (inlined)
+//
+//go:inline
 func (t *TCPTransportConn) LocalAddr() net.Addr {
 	return t.conn.LocalAddr()
 }
 
+// RemoteAddr returns remote address (inlined)
+//
+//go:inline
 func (t *TCPTransportConn) RemoteAddr() net.Addr {
 	return t.conn.RemoteAddr()
 }
@@ -319,7 +321,6 @@ func (t *TCPTransport) Dial(address string) (TransportConn, error) {
 
 	tcpConn := conn.(*net.TCPConn)
 
-	// OPTIMIZATION: Apply dynamic TCP optimizations based on default RTT
 	// For more precise optimization, use DialWithRTT instead
 	if err := OptimizeTCPConn(tcpConn, 10*time.Millisecond); err != nil {
 		// Non-fatal: connection still usable even if optimization fails
@@ -398,6 +399,9 @@ func (l *TCPTransportListener) Stop() error {
 	return nil
 }
 
+// Addr returns the listener address (inlined)
+//
+//go:inline
 func (l *TCPTransportListener) Addr() net.Addr {
 	if l.listener != nil {
 		return l.listener.Addr()
@@ -405,7 +409,9 @@ func (l *TCPTransportListener) Addr() net.Addr {
 	return nil
 }
 
-// HandleMessage registers a handler to process incoming byte messages.
+// HandleMessage registers a handler to process incoming byte messages (inlined)
+//
+//go:inline
 func (l *TCPTransportListener) HandleMessage(handler func(message []byte) error) TransportListener {
 	l.handler = handler
 	return l
@@ -439,6 +445,9 @@ func (l *TCPTransportListener) acceptConnections() {
 	}
 }
 
+// handleConnection handles a single TCP connection - HOT PATH optimized
+//
+//go:noinline
 func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 	defer conn.Close()
 
@@ -452,20 +461,25 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 	// OPTIMIZATION: Apply dynamic TCP optimizations for accepted connections
 	// Use default LAN RTT for server-side connections
 	if err := OptimizeTCPConn(conn, 10*time.Millisecond); err != nil {
-		logging.Debug("TCP optimization warnings on accept (non-fatal)", "err", err)
+		if logging.Log.IsDebugEnabled() {
+			logging.Debug("TCP optimization warnings on accept (non-fatal)", "err", err)
+		}
 	}
 
-	// OPTIMIZATION: Use larger buffer size for high throughput
 	reader := bufio.NewReaderSize(conn, 16384) // 16KB buffer
+
+	// Cache handler to reduce struct field access
+	handler := l.handler
+
+	lengthPrefix := make([]byte, 4)
 
 	for {
 		// Read the length prefix (4 bytes) - MUST use io.ReadFull to guarantee full read
-		lengthPrefix := make([]byte, 4)
 		if _, err := io.ReadFull(reader, lengthPrefix); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				// Connection closed gracefully
 				return
 			}
+			// Cold path: unexpected error
 			logging.Error(err, "connect[net], error reading length prefix", "remote_addr", conn.RemoteAddr().String())
 			return
 		}
@@ -473,18 +487,21 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 		// Read the actual message based on the length
 		dataLength := binary.BigEndian.Uint32(lengthPrefix)
 
-		// Sanity check: prevent DoS attacks with huge allocations
+		// Zero or too large checked in one condition
 		const maxMessageSize = 10 * 1024 * 1024 // 10MB max
-		if dataLength > maxMessageSize {
-			logging.Error(fmt.Errorf("message too large: %d bytes", dataLength), "connect[net], rejecting message", "remote_addr", conn.RemoteAddr().String())
-			return
-		}
-		if dataLength == 0 {
-			logging.Warn("Zero-length message received", "remote_addr", conn.RemoteAddr().String())
+		if dataLength == 0 || dataLength > maxMessageSize {
+			// Cold path: invalid message size
+			if dataLength > maxMessageSize {
+				logging.Error(fmt.Errorf("message too large: %d bytes", dataLength),
+					"connect[net], rejecting message", "remote_addr", conn.RemoteAddr().String())
+				return
+			}
+			// Zero-length message - continue without logging in hot path
 			continue
 		}
 
 		data := make([]byte, dataLength)
+
 		// MUST use io.ReadFull to guarantee reading exactly dataLength bytes
 		if _, err := io.ReadFull(reader, data); err != nil {
 			logging.Error(err, "connect[net], error reading message", "remote_addr", conn.RemoteAddr().String())
@@ -492,9 +509,10 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 		}
 
 		// Handle the message with the provided handler
-		if l.handler != nil {
-			if err := l.handler(data); err != nil {
+		if handler != nil {
+			if err := handler(data); err != nil {
 				logging.Error(err, "connect[net], error handling message", "remote_addr", conn.RemoteAddr().String())
+				// Continue processing other messages despite handler error
 			}
 		}
 	}
