@@ -5,10 +5,115 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/feellmoose/gridkv/internal/storage"
 	"github.com/feellmoose/gridkv/internal/utils/logging"
 )
+
+// replicationBatch holds batched operations for a target node
+type replicationBatch struct {
+	ops     []*CacheSyncOperation
+	timer   *time.Timer
+	mutex   sync.Mutex
+	target  string
+	manager *GossipManager
+}
+
+const (
+	batchSizeThreshold = 50                    // Flush when batch reaches this size
+	batchTimeout       = 10 * time.Millisecond // Flush after this timeout
+)
+
+// addOperation adds an operation to the batch
+func (rb *replicationBatch) addOperation(op *CacheSyncOperation) {
+	rb.mutex.Lock()
+	rb.ops = append(rb.ops, op)
+	shouldFlush := len(rb.ops) >= batchSizeThreshold
+
+	// Stop timer if we're flushing
+	var ops []*CacheSyncOperation
+	if shouldFlush {
+		if rb.timer != nil {
+			rb.timer.Stop()
+			rb.timer = nil
+		}
+		ops = make([]*CacheSyncOperation, len(rb.ops))
+		copy(ops, rb.ops)
+		rb.ops = rb.ops[:0] // Clear batch
+	} else if rb.timer == nil {
+		// Start timer for first operation
+		rb.timer = time.AfterFunc(batchTimeout, func() {
+			rb.mutex.Lock()
+			if len(rb.ops) > 0 {
+				ops := make([]*CacheSyncOperation, len(rb.ops))
+				copy(ops, rb.ops)
+				rb.ops = rb.ops[:0]
+				if rb.timer != nil {
+					rb.timer.Stop()
+					rb.timer = nil
+				}
+				rb.mutex.Unlock()
+				rb.sendBatchedMessage(ops)
+			} else {
+				rb.mutex.Unlock()
+			}
+		})
+	}
+	rb.mutex.Unlock()
+
+	// Send outside lock to avoid holding mutex during network I/O
+	if shouldFlush {
+		rb.sendBatchedMessage(ops)
+	}
+}
+
+// sendBatchedMessage sends a batched message (called without holding mutex)
+func (rb *replicationBatch) sendBatchedMessage(ops []*CacheSyncOperation) {
+	if len(ops) == 0 {
+		return
+	}
+
+	msg := &GossipMessage{
+		Type:   GossipMessageType_MESSAGE_TYPE_CACHE_SYNC,
+		Sender: rb.manager.localNodeID,
+		Hlc:    rb.manager.hlc.Now(),
+		Payload: &GossipMessage_CacheSyncPayload{
+			CacheSyncPayload: &SyncMessage{
+				SyncType: &SyncMessage_IncrementalSync{
+					IncrementalSync: &IncrementalSyncPayload{
+						Operations: ops,
+					},
+				},
+			},
+		},
+	}
+	rb.manager.signMessageCanonical(msg)
+
+	// Send asynchronously
+	go func() {
+		if err := rb.manager.network.SendWithTimeout(rb.target, msg, rb.manager.replicationTimeout); err != nil {
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("Failed to send batched replication", "target", rb.target, "ops", len(ops), "err", err)
+			}
+		}
+	}()
+}
+
+// flush forces immediate flush of the batch
+func (rb *replicationBatch) flush() {
+	rb.mutex.Lock()
+	ops := make([]*CacheSyncOperation, len(rb.ops))
+	copy(ops, rb.ops)
+	rb.ops = rb.ops[:0]
+	if rb.timer != nil {
+		rb.timer.Stop()
+		rb.timer = nil
+	}
+	rb.mutex.Unlock()
+
+	rb.sendBatchedMessage(ops)
+}
 
 // Set performs a distributed write operation with quorum-based replication.
 //
@@ -280,13 +385,54 @@ func (gm *GossipManager) forwardDelete(key string, version int64, coordinatorID 
 	return gm.network.SendWithTimeout(n.Address, msg, gm.replicationTimeout)
 }
 
+// getOrCreateBatch gets or creates a batch for the target address
+func (gm *GossipManager) getOrCreateBatch(targetAddr string) *replicationBatch {
+	gm.batchMutex.Lock()
+	defer gm.batchMutex.Unlock()
+
+	batch, ok := gm.batchBuffer[targetAddr]
+	if !ok {
+		batch = &replicationBatch{
+			target:  targetAddr,
+			manager: gm,
+			ops:     make([]*CacheSyncOperation, 0, batchSizeThreshold),
+		}
+		gm.batchBuffer[targetAddr] = batch
+	}
+	return batch
+}
+
+// flushBatchForTarget flushes the batch for a specific target
+func (gm *GossipManager) flushBatchForTarget(targetAddr string) {
+	gm.batchMutex.Lock()
+	batch, ok := gm.batchBuffer[targetAddr]
+	gm.batchMutex.Unlock()
+
+	if ok {
+		batch.flush()
+	}
+}
+
+// flushAllBatches flushes all pending batches (used when quorum is needed)
+func (gm *GossipManager) flushAllBatches() {
+	gm.batchMutex.Lock()
+	batches := make([]*replicationBatch, 0, len(gm.batchBuffer))
+	for _, batch := range gm.batchBuffer {
+		batches = append(batches, batch)
+	}
+	gm.batchMutex.Unlock()
+
+	for _, batch := range batches {
+		batch.flush()
+	}
+}
+
 // replicateToNodes replicates a write to multiple nodes with quorum.
 func (gm *GossipManager) replicateToNodes(ctx context.Context, key string, item *storage.StoredItem, replicaIDs []string) error {
 	if len(replicaIDs) == 0 {
 		return nil // No replicas to write to
 	}
 
-	opID := gm.generateOpID()
 	protoOp := &CacheSyncOperation{
 		Key:           key,
 		ClientVersion: item.Version,
@@ -295,23 +441,6 @@ func (gm *GossipManager) replicateToNodes(ctx context.Context, key string, item 
 			SetData: storageItemToProto(item),
 		},
 	}
-
-	msg := &GossipMessage{
-		Type:   GossipMessageType_MESSAGE_TYPE_CACHE_SYNC,
-		Sender: gm.localNodeID,
-		OpId:   opID,
-		Hlc:    gm.hlc.Now(),
-		Payload: &GossipMessage_CacheSyncPayload{
-			CacheSyncPayload: &SyncMessage{
-				SyncType: &SyncMessage_IncrementalSync{
-					IncrementalSync: &IncrementalSyncPayload{
-						Operations: []*CacheSyncOperation{protoOp},
-					},
-				},
-			},
-		},
-	}
-	gm.signMessageCanonical(msg)
 
 	// OPTIMIZATION: Collect alive replica targets with minimal lock time
 	// Pre-allocate slice with exact capacity to avoid reallocation
@@ -350,6 +479,29 @@ func (gm *GossipManager) replicateToNodes(ctx context.Context, key string, item 
 				"key", key, "required", required, "targets", len(targets))
 		}
 	}
+
+	// OPTIMIZATION: Flush all pending batches before sending quorum-required operation
+	// This ensures we don't wait for batched operations when quorum is needed
+	gm.flushAllBatches()
+
+	// Create message with OpId for ACK tracking
+	opID := gm.generateOpID()
+	msg := &GossipMessage{
+		Type:   GossipMessageType_MESSAGE_TYPE_CACHE_SYNC,
+		Sender: gm.localNodeID,
+		OpId:   opID,
+		Hlc:    gm.hlc.Now(),
+		Payload: &GossipMessage_CacheSyncPayload{
+			CacheSyncPayload: &SyncMessage{
+				SyncType: &SyncMessage_IncrementalSync{
+					IncrementalSync: &IncrementalSyncPayload{
+						Operations: []*CacheSyncOperation{protoOp},
+					},
+				},
+			},
+		},
+	}
+	gm.signMessageCanonical(msg)
 
 	// OPTIMIZATION: Use goroutine pool for bounded concurrency with pre-allocated channel
 	// Buffer size equals number of targets for zero-blocking writes

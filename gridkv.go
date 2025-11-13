@@ -44,6 +44,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/gossip"
@@ -142,6 +143,8 @@ type GridKV struct {
 	network  gossip.Network         // Network transport
 	hashRing *gossip.ConsistentHash // Data distribution ring
 	ttl      time.Duration          // Default TTL for items (0 = no expiration)
+
+	stopOnce sync.Once
 }
 
 // NewGridKV creates and initializes a new GridKV distributed cache instance.
@@ -237,7 +240,7 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 		opts.Network.MaxConns = 1000
 	}
 	if opts.Network.Timeout == 0 {
-		opts.Network.Timeout = 5 * time.Second
+		opts.Network.Timeout = 30 * time.Second // Increased from 5s for better connection stability
 	}
 	if opts.Network.ReadTimeout == 0 {
 		opts.Network.ReadTimeout = 5 * time.Second
@@ -904,7 +907,9 @@ func (g *GridKV) Close() error {
 	var errs []error
 
 	if g.gm != nil {
-		g.gm.Stop()
+		g.stopOnce.Do(func() {
+			g.gm.Stop()
+		})
 	}
 
 	if g.network != nil {
@@ -925,6 +930,36 @@ func (g *GridKV) Close() error {
 
 	logging.Info("GridKV closed successfully")
 	return nil
+}
+
+// StopGossip stops the gossip manager without closing other components.
+// Useful for diagnostics or tests where message processing should pause.
+func (g *GridKV) StopGossip() {
+	if g.gm == nil {
+		return
+	}
+	g.stopOnce.Do(func() {
+		g.gm.Stop()
+	})
+}
+
+// InjectGossipMessage sends a gossip message directly to the local gossip manager.
+// Primarily intended for testing and diagnostics.
+func (g *GridKV) InjectGossipMessage(msg *gossip.GossipMessage) {
+	if g.gm == nil {
+		return
+	}
+	g.gm.SimulateReceive(msg)
+}
+
+// MessageStats returns aggregated gossip message statistics.
+// total: Total messages received (critical + queued attempts)
+// dropped: Messages dropped due to queue saturation or validation failures.
+func (g *GridKV) MessageStats() (total, dropped int64) {
+	if g.gm == nil {
+		return 0, 0
+	}
+	return g.gm.MessageStats()
 }
 
 // GridKVOptions is the configuration for a GridKV instance.

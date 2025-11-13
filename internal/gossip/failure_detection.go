@@ -72,6 +72,14 @@ func (gm *GossipManager) updateNode(nodeID, address string, newState NodeState, 
 	// Apply ring changes outside lock
 	if remove {
 		gm.hashRing.Remove(nodeID)
+		// Clean up batch buffer for this node's address
+		if existing != nil && existing.Address != "" {
+			gm.flushBatchForTarget(existing.Address)
+			// Remove batch from buffer
+			gm.batchMutex.Lock()
+			delete(gm.batchBuffer, existing.Address)
+			gm.batchMutex.Unlock()
+		}
 		logging.Error(errors.New("MEMBER DEAD"), "removed from ring", "node", nodeID)
 	}
 	if add {
@@ -183,15 +191,35 @@ func (gm *GossipManager) runFailureDetection() {
 	}
 	gm.mu.Unlock()
 
-	// Remove dead nodes from hash ring
+	// Remove dead nodes from hash ring and clean up batches
 	for _, id := range toMarkDead {
 		gm.hashRing.Remove(id)
+		// Clean up batch buffer for this node
+		gm.mu.RLock()
+		if node, ok := gm.liveNodes[id]; ok && node.Address != "" {
+			addr := node.Address
+			gm.mu.RUnlock()
+			gm.flushBatchForTarget(addr)
+			gm.batchMutex.Lock()
+			delete(gm.batchBuffer, addr)
+			gm.batchMutex.Unlock()
+		} else {
+			gm.mu.RUnlock()
+		}
 	}
 
 	// Clean up dead nodes from memory
 	if len(toRemove) > 0 {
 		gm.mu.Lock()
 		for _, id := range toRemove {
+			if node, ok := gm.liveNodes[id]; ok && node.Address != "" {
+				addr := node.Address
+				gm.mu.Unlock()
+				gm.batchMutex.Lock()
+				delete(gm.batchBuffer, addr)
+				gm.batchMutex.Unlock()
+				gm.mu.Lock()
+			}
 			delete(gm.liveNodes, id)
 		}
 		gm.mu.Unlock()

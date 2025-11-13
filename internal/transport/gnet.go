@@ -103,7 +103,7 @@ func (t *GnetTransportConn) WriteDataWithContext(ctx context.Context, data []byt
 	}
 
 	totalLen := 4 + dataLen
-	
+
 	var buf []byte
 	var pooledBuf *[]byte
 
@@ -285,7 +285,7 @@ func (l *GnetTransportListener) Start() error {
 		gnetOpts := []gnet.Option{
 			gnet.WithMulticore(opts.Multicore),
 			gnet.WithReusePort(opts.ReusePort),
-			gnet.WithTCPKeepAlive(30 * time.Second),
+			gnet.WithTCPKeepAlive(60 * time.Second), // Increased from 30s for better connection stability
 			gnet.WithTCPNoDelay(gnet.TCPNoDelay),
 			gnet.WithLoadBalancing(gnet.LeastConnections), // OPTIMIZATION: LeastConnections performs better than RoundRobin
 			gnet.WithReadBufferCap(opts.ReadBufferCap),
@@ -402,7 +402,7 @@ func (es *GnetTransportEventEngine) OnClose(conn gnet.Conn, err error) (action g
 	}
 
 	if err != nil {
-		logging.Warn("gnet connection closed with error", "err", err, "remote_addr", conn.RemoteAddr().String())
+		logging.Debug("gnet connection closed with error", "err", err, "remote_addr", conn.RemoteAddr().String())
 	} else if logging.Log.IsDebugEnabled() {
 		logging.Debug("gnet connection closed", "remote_addr", conn.RemoteAddr().String())
 	}

@@ -77,6 +77,10 @@ type GossipManager struct {
 	stopCh  chan struct{}       // Shutdown signal
 	wg      sync.WaitGroup      // Wait group for graceful shutdown
 
+	// Message statistics (atomic counters for diagnostics)
+	messagesTotal   atomic.Int64
+	messagesDropped atomic.Int64
+
 	// Configuration
 	failureTimeout time.Duration
 	suspectTimeout time.Duration
@@ -109,6 +113,10 @@ type GossipManager struct {
 
 	// Goroutine pool for replication workers (OPTIMIZATION)
 	replicationPool *ants.Pool
+
+	// Replication batching (OPTIMIZATION)
+	batchBuffer map[string]*replicationBatch // Per-target batching
+	batchMutex  sync.Mutex                   // Protects batchBuffer
 
 	clusterReady   atomic.Bool  // Cached readiness status
 	lastReadyCheck atomic.Int64 // Last time readiness was checked (Unix nano)
@@ -184,7 +192,7 @@ func NewGossipManager(opts *GossipOptions, hashRing *ConsistentHash, network Net
 		hashRing:           hashRing,
 		store:              store,
 		network:            network,
-		inputCh:            make(chan *GossipMessage, 256),
+		inputCh:            make(chan *GossipMessage, 1024), // Increased from 256 for better burst handling
 		stopCh:             make(chan struct{}),
 		failureTimeout:     opts.FailureTimeout,
 		suspectTimeout:     opts.SuspectTimeout,
@@ -201,6 +209,7 @@ func NewGossipManager(opts *GossipOptions, hashRing *ConsistentHash, network Net
 		keypair:            keypair,
 		peerPubkeys:        peerPubkeys,
 		disableAuth:        opts.DisableAuth,
+		batchBuffer:        make(map[string]*replicationBatch),
 	}
 
 	// Add local node to liveNodes and hash ring
@@ -315,17 +324,61 @@ func (gm *GossipManager) Stop() {
 	logging.Debug("Gossip Manager stopped", "node", gm.localNodeID)
 }
 
+// isCriticalMessage checks if a message type requires immediate processing.
+// Critical messages bypass the input queue to ensure zero latency and guaranteed delivery.
+//
+//go:inline
+func isCriticalMessage(msgType GossipMessageType) bool {
+	switch msgType {
+	case CLUSTER_SYNC, CONNECT, PROBE_REQUEST, PROBE_RESPONSE:
+		return true
+	default:
+		return false
+	}
+}
+
 // SimulateReceive enqueues a message for processing.
+// Critical messages are processed directly to bypass the queue.
 // This is the main entry point for incoming messages.
 //
 // Parameters:
 //   - msg: The message to process
 func (gm *GossipManager) SimulateReceive(msg *GossipMessage) {
+	if msg == nil {
+		return
+	}
+
+	// Track incoming attempt
+	gm.messagesTotal.Add(1)
+
+	// Critical messages: direct processing (bypass queue)
+	if isCriticalMessage(msg.Type) {
+		// Verify signature before processing (no lock needed for verification)
+		if ok := gm.verifyMessageCanonical(msg); ok {
+			// Process directly - handlers will manage their own locks
+			gm.processGossipMessage(msg)
+		} else {
+			logging.Warn("Dropped critical msg: invalid signature", "sender", msg.Sender, "type", msg.Type)
+			gm.messagesDropped.Add(1)
+		}
+		return
+	}
+
+	// Data messages: queue to inputCh
 	select {
 	case gm.inputCh <- msg:
+		// Enqueued successfully
 	default:
 		logging.Warn("Dropped gossip message: input full", "type", msg.Type, "sender", msg.Sender)
+		gm.messagesDropped.Add(1)
 	}
+}
+
+// MessageStats returns aggregated gossip message statistics.
+// total: Total messages received (critical + queued attempts)
+// dropped: Messages dropped due to queue saturation or validation failures.
+func (gm *GossipManager) MessageStats() (total, dropped int64) {
+	return gm.messagesTotal.Load(), gm.messagesDropped.Load()
 }
 
 // processLoop is the main event loop that processes messages and runs periodic tasks.

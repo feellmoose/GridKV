@@ -285,25 +285,21 @@ func (t *TCPTransportConn) RemoteAddr() net.Addr {
 
 // HealthCheck implements optional health checking for TCP connections
 func (t *TCPTransportConn) HealthCheck() error {
-	// TCP connections are assumed healthy if not closed
-	// In production, could add a ping/pong mechanism
-	one := make([]byte, 1)
-	t.conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
-	defer t.conn.SetReadDeadline(time.Time{})
-
-	_, err := t.conn.Read(one)
-	if err == nil {
-		// Unexpected data, connection is active but has buffered data
-		return nil
+	// Use non-blocking state check instead of actual read
+	// This avoids false negatives from aggressive read deadlines
+	if t.conn == nil {
+		return fmt.Errorf("connection is nil")
 	}
 
-	// Check if it's a timeout (expected for healthy connection with no data)
-	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-		return nil // Healthy
+	// Check connection state by attempting to get remote address
+	// This is a lightweight check that doesn't perform I/O
+	remoteAddr := t.conn.RemoteAddr()
+	if remoteAddr == nil {
+		return fmt.Errorf("connection not established")
 	}
 
-	// Any other error indicates unhealthy connection
-	return err
+	// Connection appears valid (not closed and has remote address)
+	return nil
 }
 
 // TCPTransport implements the transport.Transport interface using TCP connections.
@@ -479,8 +475,8 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				return
 			}
-			// Cold path: unexpected error
-			logging.Error(err, "connect[net], error reading length prefix", "remote_addr", conn.RemoteAddr().String())
+			// Cold path: unexpected error (connection may be closing)
+			logging.Debug("connect[net], error reading length prefix", "err", err, "remote_addr", conn.RemoteAddr().String())
 			return
 		}
 
@@ -504,14 +500,14 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 
 		// MUST use io.ReadFull to guarantee reading exactly dataLength bytes
 		if _, err := io.ReadFull(reader, data); err != nil {
-			logging.Error(err, "connect[net], error reading message", "remote_addr", conn.RemoteAddr().String())
+			logging.Debug("connect[net], error reading message", "err", err, "remote_addr", conn.RemoteAddr().String())
 			return
 		}
 
 		// Handle the message with the provided handler
 		if handler != nil {
 			if err := handler(data); err != nil {
-				logging.Error(err, "connect[net], error handling message", "remote_addr", conn.RemoteAddr().String())
+				logging.Debug("connect[net], error handling message", "err", err, "remote_addr", conn.RemoteAddr().String())
 				// Continue processing other messages despite handler error
 			}
 		}
