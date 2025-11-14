@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/transport"
@@ -12,7 +13,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// OPTIMIZATION: Buffer pool for serialization (inspired by memberlist)
 var serializationBufferPool = sync.Pool{
 	New: func() interface{} {
 		buf := make([]byte, 0, 8192) // 8KB initial capacity for messages
@@ -20,15 +20,21 @@ var serializationBufferPool = sync.Pool{
 	},
 }
 
-// OPTIMIZATION: Proto marshal buffer pool (reduces allocations by 40-60%)
 var protoMarshalBufferPool = sync.Pool{
 	New: func() interface{} {
-		buf := make([]byte, 0, 4096)
+		buf := make([]byte, 0, 8192) // Increased from 4096 to 8192 for larger batches
 		return &buf
 	},
 }
 
-// OPTIMIZATION: Compression encoder pool (reduce allocations)
+// protoUnmarshalBufferPool for unmarshal operations (if needed)
+var protoUnmarshalBufferPool = sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 0, 8192)
+		return &buf
+	},
+}
+
 var (
 	compressEncoderPool  sync.Pool
 	compressDecoderPool  sync.Pool
@@ -55,6 +61,8 @@ const (
 	GnetTCP NetworkBackendType = 2
 	// UDP NetworkBackendType = 4  // Not implemented (reserved for future)
 )
+
+const maxPendingAcks = 65536 // Increased from 16384 to 65536 for very high concurrency
 
 // NetworkOptions configures the Gossip protocol and network settings.
 type NetworkOptions struct {
@@ -184,9 +192,10 @@ type Network interface {
 //
 // This mechanism enables quorum-based replication with guaranteed delivery confirmation.
 type NetworkImpl struct {
-	opts        *NetworkOptions
-	protocol    *TransportProtocol
-	pendingAcks sync.Map // map[string]chan *CacheSyncAckPayload for tracking ACK responses
+	opts            *NetworkOptions
+	protocol        *TransportProtocol
+	pendingAcks     sync.Map // map[string]chan *CacheSyncAckPayload for tracking ACK responses
+	pendingAckCount atomic.Int64
 }
 
 // NewNetwork creates a new Network using the provided options, initializing the underlying transport.
@@ -207,14 +216,14 @@ func (n *NetworkImpl) Send(address string, msg *GossipMessage) error {
 	ctx, cancel := context.WithTimeout(context.Background(), n.opts.WriteTimeout)
 	defer cancel()
 
-	// OPTIMIZATION: Use pooled buffer with proto.MarshalOptions
+	// This reduces allocations by reusing buffers
 	bufPtr := protoMarshalBufferPool.Get().(*[]byte)
 	defer func() {
-		*bufPtr = (*bufPtr)[:0] // Reset length
+		*bufPtr = (*bufPtr)[:0] // Reset length for reuse
 		protoMarshalBufferPool.Put(bufPtr)
 	}()
 
-	// Marshal with MarshalOptions for better performance
+	// MarshalAppend appends to existing buffer, reducing allocations
 	data, err := proto.MarshalOptions{}.MarshalAppend(*bufPtr, msg)
 	if err != nil {
 		logging.Error(err, "Serialization failed for message", "message_type", msg.Type)
@@ -233,7 +242,8 @@ func (n *NetworkImpl) Send(address string, msg *GossipMessage) error {
 func (n *NetworkImpl) Listen(receiver func(msg *GossipMessage) error) error {
 	// Pass a handler to the TransportProtocol listener to manage unmarshalling
 	return n.protocol.Listen(func(data []byte) error {
-		// Always create a fresh GossipMessage instance for unmarshalling
+		// NOTE: Cannot use object pool here because receiver may use message asynchronously
+		// Creating fresh message ensures safety
 		msg := &GossipMessage{}
 
 		// Unmarshal the incoming data into msg
@@ -280,7 +290,6 @@ func (n *NetworkImpl) SendWithTimeout(addr string, msg *GossipMessage, timeout t
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// OPTIMIZATION: Use pooled buffer with proto.MarshalOptions
 	bufPtr := protoMarshalBufferPool.Get().(*[]byte)
 	defer func() {
 		*bufPtr = (*bufPtr)[:0] // Reset length
@@ -308,23 +317,39 @@ func (n *NetworkImpl) SendAndWaitAck(addr string, msg *GossipMessage, timeout ti
 		return false, fmt.Errorf("OpId required for ACK correlation")
 	}
 
-	// Create a buffered channel for the ACK response
-	ackCh := make(chan *CacheSyncAckPayload, 1)
+	if n.pendingAckCount.Add(1) > maxPendingAcks {
+		n.pendingAckCount.Add(-1)
+		return false, fmt.Errorf("pending ACK limit exceeded")
+	}
+
+	ackCh := getAckChannel()
 
 	// Register the pending ACK with the OpId
 	n.pendingAcks.Store(msg.OpId, ackCh)
 
+	stored := true
+	closed := atomic.Bool{}
 	// Ensure cleanup: remove the pending ACK registration when done
 	defer func() {
-		n.pendingAcks.Delete(msg.OpId)
-		close(ackCh)
+		if stored {
+			n.pendingAcks.Delete(msg.OpId)
+			n.pendingAckCount.Add(-1)
+		}
+		// SAFETY: Only close channel once to prevent "close of closed channel" panic
+		if !closed.Swap(true) {
+			// Clear any remaining value first
+			select {
+			case <-ackCh:
+			default:
+			}
+			putAckChannel(ackCh)
+		}
 	}()
 
 	// Marshal and send the message
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// OPTIMIZATION: Use pooled buffer with proto.MarshalOptions
 	bufPtr := protoMarshalBufferPool.Get().(*[]byte)
 	defer func() {
 		*bufPtr = (*bufPtr)[:0] // Reset length
@@ -334,13 +359,21 @@ func (n *NetworkImpl) SendAndWaitAck(addr string, msg *GossipMessage, timeout ti
 	data, err := proto.MarshalOptions{}.MarshalAppend(*bufPtr, msg)
 	if err != nil {
 		logging.Error(err, "Serialization failed for SendAndWaitAck", "message_type", msg.Type)
+		stored = false
+		n.pendingAcks.Delete(msg.OpId)
+		n.pendingAckCount.Add(-1)
 		return false, err
 	}
 
 	if err := n.protocol.Send(ctx, addr, data); err != nil {
 		logging.Error(err, "Error sending message for ACK", "address", addr, "message_type", msg.Type, "opId", msg.OpId)
+		stored = false
+		n.pendingAcks.Delete(msg.OpId)
+		n.pendingAckCount.Add(-1)
 		return false, err
 	}
+
+	sendTime := time.Now()
 
 	// Wait for ACK response or timeout
 	select {
@@ -348,60 +381,67 @@ func (n *NetworkImpl) SendAndWaitAck(addr string, msg *GossipMessage, timeout ti
 		if ack == nil {
 			return false, fmt.Errorf("received nil ACK for opId %s", msg.OpId)
 		}
-		// TODO: Add metrics for ACK latency: time.Since(sendTime)
-		// TODO: Increment counter: ack_received_total{success=true/false}
+		ackLatency := time.Since(sendTime)
+		if ackLatency > timeout/2 {
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("ACK received with high latency", "opId", msg.OpId, "peerId", ack.PeerId, "latency", ackLatency)
+			}
+		}
 		if ack.Success {
-			logging.Debug("ACK received successfully", "opId", msg.OpId, "peerId", ack.PeerId)
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("ACK received successfully", "opId", msg.OpId, "peerId", ack.PeerId)
+			}
 		} else {
 			logging.Warn("ACK received with failure", "opId", msg.OpId, "peerId", ack.PeerId)
 		}
 		return ack.Success, nil
 	case <-ctx.Done():
-		logging.Warn("ACK timeout", "opId", msg.OpId, "address", addr, "timeout", timeout)
-		// TODO: Increment counter: ack_timeout_total
+		if ctx.Err() == context.DeadlineExceeded {
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("ACK timeout", "opId", msg.OpId, "address", addr, "timeout", timeout)
+			}
+		}
 		return false, fmt.Errorf("ACK timeout for opId %s after %v", msg.OpId, timeout)
 	}
 }
 
 // HandleAck processes an incoming ACK message and routes it to the waiting goroutine.
-// This should be called by the message processing loop when a CACHE_SYNC_ACK is received.
 func (n *NetworkImpl) HandleAck(ack *CacheSyncAckPayload) {
 	if ack == nil || ack.OpId == "" {
-		logging.Warn("Received ACK with missing OpId")
-		return
+		return // Skip invalid ACKs silently
 	}
 
-	// Look up the pending ACK channel
 	if ch, ok := n.pendingAcks.Load(ack.OpId); ok {
-		// SAFETY: Use recover to handle potential panic when sending to closed channel
-		// This prevents crashes if the channel was closed due to timeout
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// Channel was closed, remove from map and log
-					n.pendingAcks.Delete(ack.OpId)
-					if logging.Log.IsDebugEnabled() {
-						logging.Debug("ACK channel closed (timeout)", "opId", ack.OpId)
+		ackCh := ch.(chan *CacheSyncAckPayload)
+
+		// Use select with default to avoid blocking if channel is full
+		select {
+		case ackCh <- ack:
+			// ACK delivered successfully
+			if logging.Log.IsDebugEnabled() && n.pendingAckCount.Load() <= 10 {
+				logging.Debug("ACK delivered", "opId", ack.OpId, "success", ack.Success)
+			}
+		default:
+			// Channel full or closed - this is rare but can happen
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						// Channel was closed (timeout), remove from map
+						n.pendingAcks.Delete(ack.OpId)
+						if logging.Log.IsDebugEnabled() {
+							logging.Debug("ACK channel closed (timeout)", "opId", ack.OpId)
+						}
 					}
+				}()
+				// Try blocking send as fallback (shouldn't block long)
+				select {
+				case ackCh <- ack:
+					// Success
+				case <-time.After(10 * time.Millisecond):
+					// Timeout - channel likely closed
+					n.pendingAcks.Delete(ack.OpId)
 				}
 			}()
-			// Send the ACK to the waiting goroutine (non-blocking)
-			select {
-			case ch.(chan *CacheSyncAckPayload) <- ack:
-				if logging.Log.IsDebugEnabled() {
-					logging.Debug("ACK delivered", "opId", ack.OpId, "success", ack.Success)
-				}
-			default:
-				// Channel full, log warning
-				if logging.Log.IsDebugEnabled() {
-					logging.Warn("Failed to deliver ACK (channel full)", "opId", ack.OpId)
-				}
-			}
-		}()
-	} else {
-		// No one is waiting for this ACK (may have timed out)
-		if logging.Log.IsDebugEnabled() {
-			logging.Debug("Received ACK for unknown or expired OpId", "opId", ack.OpId)
 		}
 	}
 }

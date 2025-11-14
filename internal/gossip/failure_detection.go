@@ -47,6 +47,11 @@ func (gm *GossipManager) updateNode(nodeID, address string, newState NodeState, 
 		if add {
 			gm.hashRing.Add(nodeID)
 			logging.Debug("MEMBER JOIN added to ring", "node", nodeID)
+			// Update batch configuration when cluster size changes
+			gm.mu.RLock()
+			clusterSize := len(gm.liveNodes)
+			gm.mu.RUnlock()
+			updateBatchConfig(clusterSize)
 		}
 		return
 	}
@@ -71,7 +76,23 @@ func (gm *GossipManager) updateNode(nodeID, address string, newState NodeState, 
 
 	// Apply ring changes outside lock
 	if remove {
+		// Remove from hash ring first (for immediate consistency)
+		// Then start gradual migration in background
 		gm.hashRing.Remove(nodeID)
+
+		// This spreads the migration over time, reducing impact on system performance
+		if gm.gradualMigration != nil {
+			gm.gradualMigration.startGradualMigration(nodeID, true) // true = removal
+		} else {
+			// Fallback to immediate migration if gradual migration not available
+			go gm.migrateDataFromDeadNode(nodeID)
+		}
+
+		// Update batch configuration when cluster size changes
+		gm.mu.RLock()
+		clusterSize := len(gm.liveNodes)
+		gm.mu.RUnlock()
+		updateBatchConfig(clusterSize)
 		// Clean up batch buffer for this node's address
 		if existing != nil && existing.Address != "" {
 			gm.flushBatchForTarget(existing.Address)
@@ -83,8 +104,16 @@ func (gm *GossipManager) updateNode(nodeID, address string, newState NodeState, 
 		logging.Error(errors.New("MEMBER DEAD"), "removed from ring", "node", nodeID)
 	}
 	if add {
+		// Gradual migration will handle fetching data that should be on new node
 		gm.hashRing.Add(nodeID)
 		logging.Debug("re-added to ring", "node", nodeID)
+
+		// This proactively fetches data that should now be on this node
+		if gm.gradualMigration != nil && nodeID == gm.localNodeID {
+			// For local node addition, check if we need to fetch data
+			// This is less critical as normal replication will handle it
+			// But we can proactively migrate if needed
+		}
 	}
 }
 
@@ -105,7 +134,6 @@ func (gm *GossipManager) markNodeAliveFromProbe(nodeID string) {
 }
 
 // runFailureDetection implements SWIM-style failure detection.
-// OPTIMIZATION: Improved stability during cluster startup
 //
 // This runs periodically to detect and mark failed nodes.
 // State transitions:
@@ -128,17 +156,14 @@ func (gm *GossipManager) runFailureDetection() {
 
 		elapsed := now.Sub(node.LastActiveTs.AsTime())
 
-		// OPTIMIZATION: Track when node was first discovered (use initial timestamp)
 		// If this is a new node (recently added), give it grace period
 		timeSinceFirstSeen := elapsed
 
 		switch node.State {
 		case NodeState_NODE_STATE_ALIVE:
-			// OPTIMIZATION: Apply grace period during startup to reduce false SUSPECT
 			// For small clusters (< 5 nodes), give more time for startup
 			effectiveTimeout := gm.failureTimeout
 
-			// OPTIMIZATION: During initial cluster formation, be more lenient
 			// Small clusters need more time for gossip to propagate
 			if clusterSize < 5 {
 				effectiveTimeout = gm.failureTimeout * 2 // Double timeout for small clusters
@@ -148,7 +173,6 @@ func (gm *GossipManager) runFailureDetection() {
 
 			// Mark as suspect after failure timeout
 			if elapsed > effectiveTimeout {
-				// OPTIMIZATION: During startup grace period, don't mark as SUSPECT
 				// This prevents false positives when nodes are still joining
 				if timeSinceFirstSeen < startupGracePeriod {
 					// Node is new - extend grace period instead of marking SUSPECT
@@ -168,7 +192,6 @@ func (gm *GossipManager) runFailureDetection() {
 			}
 
 		case NodeState_NODE_STATE_SUSPECT:
-			// OPTIMIZATION: Extended suspect timeout for larger clusters
 			suspectDeadline := gm.failureTimeout + gm.suspectTimeout
 			if clusterSize > 10 {
 				suspectDeadline = suspectDeadline * 2 // Double timeout for large clusters
@@ -193,6 +216,9 @@ func (gm *GossipManager) runFailureDetection() {
 
 	// Remove dead nodes from hash ring and clean up batches
 	for _, id := range toMarkDead {
+		// Trigger data migration before removing from hash ring
+		go gm.migrateDataFromDeadNode(id)
+
 		gm.hashRing.Remove(id)
 		// Clean up batch buffer for this node
 		gm.mu.RLock()

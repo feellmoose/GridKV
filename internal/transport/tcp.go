@@ -15,7 +15,6 @@ import (
 	"github.com/feellmoose/gridkv/internal/utils/logging"
 )
 
-// OPTIMIZATION: Buffer pools for write operations to reduce allocations
 var (
 	// Length prefix buffer pool (4 bytes)
 	lengthPrefixPool = sync.Pool{
@@ -454,7 +453,6 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 		}
 	}()
 
-	// OPTIMIZATION: Apply dynamic TCP optimizations for accepted connections
 	// Use default LAN RTT for server-side connections
 	if err := OptimizeTCPConn(conn, 10*time.Millisecond); err != nil {
 		if logging.Log.IsDebugEnabled() {

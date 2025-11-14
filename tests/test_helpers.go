@@ -40,8 +40,12 @@ func setupTestCluster(tb testing.TB, nodeCount, basePort int) []*gridkv.GridKV {
 	// Create seed node
 	var err error
 	nodes[0], err = gridkv.NewGridKV(&gridkv.GridKVOptions{
-		LocalNodeID:  "node-0",
-		LocalAddress: fmt.Sprintf("localhost:%d", basePort),
+		LocalNodeID:        "node-0",
+		LocalAddress:       fmt.Sprintf("localhost:%d", basePort),
+		FailureTimeout:     2 * time.Second,
+		SuspectTimeout:     4 * time.Second,
+		GossipInterval:     200 * time.Millisecond,
+		StartupGracePeriod: 1 * time.Second,
 		Network: &gridkv.NetworkOptions{
 			Type:     gridkv.TCP,
 			BindAddr: fmt.Sprintf("localhost:%d", basePort),
@@ -62,9 +66,13 @@ func setupTestCluster(tb testing.TB, nodeCount, basePort int) []*gridkv.GridKV {
 	seedAddr := []string{fmt.Sprintf("localhost:%d", basePort)}
 	for i := 1; i < nodeCount; i++ {
 		nodes[i], err = gridkv.NewGridKV(&gridkv.GridKVOptions{
-			LocalNodeID:  fmt.Sprintf("node-%d", i),
-			LocalAddress: fmt.Sprintf("localhost:%d", basePort+i),
-			SeedAddrs:    seedAddr,
+			LocalNodeID:        fmt.Sprintf("node-%d", i),
+			LocalAddress:       fmt.Sprintf("localhost:%d", basePort+i),
+			SeedAddrs:          seedAddr,
+			FailureTimeout:     2 * time.Second,
+			SuspectTimeout:     4 * time.Second,
+			GossipInterval:     200 * time.Millisecond,
+			StartupGracePeriod: 1 * time.Second,
 			Network: &gridkv.NetworkOptions{
 				Type:     gridkv.TCP,
 				BindAddr: fmt.Sprintf("localhost:%d", basePort+i),
@@ -91,6 +99,19 @@ func cleanupTestCluster(nodes []*gridkv.GridKV) {
 			node.Close()
 		}
 	}
+}
+
+func waitForHealthyNodes(tb testing.TB, node *gridkv.GridKV, expected int, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status := node.GetReplicaStatus()
+		if status.HealthyNodes == expected {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	status := node.GetReplicaStatus()
+	tb.Fatalf("timed out waiting for %d healthy nodes (have %d)", expected, status.HealthyNodes)
 }
 
 func minInt(a, b int) int {

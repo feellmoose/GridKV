@@ -6,7 +6,6 @@ import (
 	st "github.com/feellmoose/gridkv/internal/storage"
 )
 
-// OPTIMIZATION: Merged storage interface - re-export NON-CONFLICTING types from storage package
 // This eliminates the adapter layer and provides direct access to optimized implementation
 // NOTE: StoredItem is defined in proto, so we don't re-export it here
 
@@ -27,7 +26,6 @@ const (
 // The interface methods use st.StoredItem which is the storage version
 
 // KVStore defines the unified interface for distributed key-value storage.
-// OPTIMIZATION: BadgerStorage implements this directly - NO ADAPTER OVERHEAD!
 type KVStore interface {
 	// Basic storage operations
 	Set(key string, item *st.StoredItem) error
@@ -43,6 +41,5 @@ type KVStore interface {
 	ApplyIncrementalSync(operations []*CacheSyncOperation) error
 	ApplyFullSyncSnapshot(snapshot []*FullStateItem, snapshotTS time.Time) error
 
-	// OPTIMIZATION: Monitoring and stats
 	Stats() st.StorageStats
 }

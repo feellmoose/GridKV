@@ -185,7 +185,6 @@ func (c *ConsistentHash) Add(name string) {
 	}
 	c.nodes[name] = true
 
-	// OPTIMIZATION: Pre-allocate capacity for all new virtual nodes
 	newKeys := make([]uint32, 0, len(c.keys)+c.replicas)
 
 	// Collect all hashes for this node first
@@ -205,7 +204,6 @@ func (c *ConsistentHash) Add(name string) {
 		return hashes[i] < hashes[j]
 	})
 
-	// OPTIMIZATION: Merge sorted arrays in O(n) instead of O(n log n) sort
 	i, j := 0, 0
 	for i < len(c.keys) && j < len(hashes) {
 		if c.keys[i] < hashes[j] {
@@ -272,7 +270,6 @@ func (c *ConsistentHash) Remove(name string) {
 	}
 	delete(c.nodes, name)
 
-	// OPTIMIZATION: Build set of hashes to remove
 	toRemove := make(map[uint32]bool, c.replicas)
 	for i := 0; i < c.replicas; i++ {
 		key := strconv.Itoa(i) + name
@@ -283,7 +280,6 @@ func (c *ConsistentHash) Remove(name string) {
 		toRemove[hash] = true
 	}
 
-	// OPTIMIZATION: Filter keys in-place to avoid allocation
 	// This is O(n) instead of O(n log n) rebuild+sort
 	newLen := 0
 	for i := 0; i < len(c.keys); i++ {
@@ -347,11 +343,8 @@ func (c *ConsistentHash) Get(key string) string {
 	// Calculate the hash value of the key.
 	hash := c.hashFunc([]byte(key))
 
-	// Use Go's standard library sort.Search for binary lookup.
-	// Find the index of the first virtual node hash value that is greater than or equal to 'hash'.
-	i := sort.Search(len(c.keys), func(j int) bool {
-		return c.keys[j] >= hash
-	})
+	// This avoids function call overhead in the hot path
+	i := fastBinarySearch(c.keys, hash)
 
 	// Wrap-around logic: If i equals the length of the keys list, the key's hash is greater than all virtual node hashes,
 	// so it should wrap back to the start of the ring, keys[0].
