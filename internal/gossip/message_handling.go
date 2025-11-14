@@ -3,7 +3,6 @@ package gossip
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/storage"
@@ -105,13 +104,19 @@ func (gm *GossipManager) handleConnect(msg *GossipMessage) {
 
 		// Send response back to sender immediately
 		// Use shorter timeout for faster exchange
-		go func() {
-			if err := gm.network.SendWithTimeout(p.ConnectPayload.Address, responseMsg, 300*time.Millisecond); err != nil {
-				logging.Debug("Failed to send CONNECT response", "target", p.ConnectPayload.NodeId, "error", err)
+		// Use inboundPool to prevent goroutine leak
+		addr := p.ConnectPayload.Address
+		nodeId := p.ConnectPayload.NodeId
+		if err := gm.inboundPool.Submit(func() {
+			if err := gm.network.SendWithTimeout(addr, responseMsg, 300*time.Millisecond); err != nil {
+				logging.Debug("Failed to send CONNECT response", "target", nodeId, "error", err)
 			} else {
-				logging.Debug("Sent CONNECT response with public key", "target", p.ConnectPayload.NodeId)
+				logging.Debug("Sent CONNECT response with public key", "target", nodeId)
 			}
-		}()
+		}); err != nil {
+			// Pool full - log and drop to prevent blocking
+			logging.Debug("Failed to submit CONNECT response to pool", "target", nodeId, "error", err)
+		}
 	}
 }
 
@@ -232,7 +237,8 @@ func (gm *GossipManager) handleCacheSync(msg *GossipMessage) {
 		opId := msg.OpId
 
 		// This ensures ACK sending doesn't wait for any locks or processing
-		go func() {
+		// Use inboundPool to prevent goroutine leak
+		if err := gm.inboundPool.Submit(func() {
 			// Cache peer address to avoid repeated lookups
 			gm.mu.RLock()
 			peer, peerOk := gm.liveNodes[senderID]
@@ -268,7 +274,12 @@ func (gm *GossipManager) handleCacheSync(msg *GossipMessage) {
 				}
 				putGossipMessage(ackMsg)
 			}
-		}()
+		}); err != nil {
+			// Pool full - log and drop to prevent blocking
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("Failed to submit ACK to pool", "opId", opId, "error", err)
+			}
+		}
 	}
 
 	// This improves ACK latency and overall throughput
@@ -300,12 +311,10 @@ func (gm *GossipManager) handleCacheSync(msg *GossipMessage) {
 	}
 
 	// Multiple operations or forwarding needed - process concurrently
-	var opWg sync.WaitGroup
-	opWg.Add(len(ops))
+	// Use inboundPool to prevent goroutine leak
 	for _, op := range ops {
-		go func(operation *CacheSyncOperation) {
-			defer opWg.Done()
-
+		operation := op
+		if err := gm.inboundPool.Submit(func() {
 			if operation.Type == OperationType_OP_SET {
 				item := protoItemToStorage(operation.GetSetData(), operation.ClientVersion)
 				// CRITICAL: Check version before overwriting to ensure higher version wins
@@ -335,8 +344,10 @@ func (gm *GossipManager) handleCacheSync(msg *GossipMessage) {
 					if err := gm.replicationPool.Submit(func() {
 						gm.replicateForwardedSet(keyCopy, itemCopy, senderCopy)
 					}); err != nil {
-						// This prevents blocking message processing even when pool is full
-						go gm.replicateForwardedSet(operation.Key, itemCopy, msg.Sender)
+						// Pool full - log and drop to prevent blocking
+						if logging.Log.IsDebugEnabled() {
+							logging.Debug("Failed to submit forwarded replication to pool", "key", keyCopy, "error", err)
+						}
 					}
 				}
 			} else if operation.Type == OperationType_OP_DELETE {
@@ -350,17 +361,20 @@ func (gm *GossipManager) handleCacheSync(msg *GossipMessage) {
 					if err := gm.replicationPool.Submit(func() {
 						gm.replicateForwardedDelete(keyCopy, versionCopy, senderCopy)
 					}); err != nil {
-						go gm.replicateForwardedDelete(operation.Key, operation.ClientVersion, msg.Sender)
+						// Pool full - log and drop to prevent blocking
+						if logging.Log.IsDebugEnabled() {
+							logging.Debug("Failed to submit forwarded delete to pool", "key", keyCopy, "error", err)
+						}
 					}
 				}
 			}
-		}(op)
+		}); err != nil {
+			// Pool full - log and drop to prevent blocking
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("Failed to submit cache sync operation to pool", "key", operation.Key, "error", err)
+			}
+		}
 	}
-	// This allows message processing to return immediately, improving throughput
-	// Operations will complete in background
-	go func() {
-		opWg.Wait()
-	}()
 }
 
 // handleCacheSyncAck processes acknowledgment for cache sync operations.
