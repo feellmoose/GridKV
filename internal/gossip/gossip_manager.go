@@ -118,6 +118,9 @@ type GossipManager struct {
 	replicationPool *ants.Pool
 	inboundPool     *ants.Pool
 
+	// Fallback goroutine limiter - prevents unlimited goroutine creation when pools are full
+	fallbackSemaphore chan struct{}
+
 	batchBuffer map[string]*replicationBatch // Per-target batching (keyed by target addr)
 	batchMutex  sync.Mutex                   // Protects batchBuffer
 
@@ -297,6 +300,20 @@ func NewGossipManager(opts *GossipOptions, hashRing *ConsistentHash, network Net
 		return nil, fmt.Errorf("failed to create inbound pool: %w", err)
 	}
 	gm.inboundPool = inboundPool
+
+	// Initialize fallback semaphore to limit goroutine creation when pools are full
+	// Limit to MaxReplicators * 4 concurrent fallback goroutines (capped at 500)
+	fallbackLimit := 100
+	if opts.MaxReplicators > 0 {
+		fallbackLimit = opts.MaxReplicators * 4
+		if fallbackLimit < 100 {
+			fallbackLimit = 100
+		}
+		if fallbackLimit > 500 {
+			fallbackLimit = 500 // Cap at 500 to prevent excessive goroutines
+		}
+	}
+	gm.fallbackSemaphore = make(chan struct{}, fallbackLimit)
 
 	return gm, nil
 }
@@ -479,6 +496,12 @@ func (gm *GossipManager) SimulateReceive(msg *GossipMessage) {
 			// Enqueued successfully
 			// Timeout - process directly to avoid dropping critical data messages
 			// Shorter timeout ensures faster ACK sending
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("Input queue full for CACHE_SYNC, processing directly", "sender", msg.Sender)
+			}
+			gm.processInboundMessage(msg)
+		default:
+			// Queue full - process directly to avoid dropping critical data messages
 			if logging.Log.IsDebugEnabled() {
 				logging.Debug("Input queue full for CACHE_SYNC, processing directly", "sender", msg.Sender)
 			}

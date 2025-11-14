@@ -127,21 +127,20 @@ func (gm *GossipManager) handleConnect(msg *GossipMessage) {
 				}
 			}); err != nil {
 				// Both pools full - send directly with timeout to prevent blocking
-				go func() {
-					ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-					defer cancel()
-					done := make(chan struct{})
+				// CRITICAL: Use semaphore to limit concurrent fallback goroutines
+				select {
+				case gm.fallbackSemaphore <- struct{}{}:
 					go func() {
-						defer close(done)
+						defer func() { <-gm.fallbackSemaphore }()
 						_ = gm.network.SendWithTimeout(addr, responseMsg, 300*time.Millisecond)
 					}()
-					select {
-					case <-done:
-						// Send completed, exit immediately
-					case <-ctx.Done():
-						// Timeout reached, exit
+				default:
+					// Semaphore full - drop message to prevent resource exhaustion
+					// This is acceptable as CONNECT responses can be retried
+					if logging.Log.IsDebugEnabled() {
+						logging.Debug("Dropped CONNECT response: all pools and semaphore full", "target", nodeId)
 					}
-				}()
+				}
 			}
 		}
 	}
@@ -329,12 +328,11 @@ func (gm *GossipManager) handleCacheSync(msg *GossipMessage) {
 				}
 			}); err != nil {
 				// Both pools full - send directly with timeout to prevent blocking
-				go func() {
-					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-					defer cancel()
-					done := make(chan struct{})
+				// CRITICAL: Use semaphore to limit concurrent fallback goroutines
+				select {
+				case gm.fallbackSemaphore <- struct{}{}:
 					go func() {
-						defer close(done)
+						defer func() { <-gm.fallbackSemaphore }()
 						gm.mu.RLock()
 						peer, peerOk := gm.liveNodes[senderID]
 						peerAddr := ""
@@ -357,13 +355,13 @@ func (gm *GossipManager) handleCacheSync(msg *GossipMessage) {
 							putGossipMessage(ackMsg)
 						}
 					}()
-					select {
-					case <-done:
-						// Send completed, exit immediately
-					case <-ctx.Done():
-						// Timeout reached, exit
+				default:
+					// Semaphore full - drop ACK to prevent resource exhaustion
+					// This may cause quorum timeout, but prevents system crash
+					if logging.Log.IsDebugEnabled() {
+						logging.Debug("Dropped ACK: all pools and semaphore full", "opId", opId)
 					}
-				}()
+				}
 			}
 		}
 	}
