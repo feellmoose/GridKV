@@ -103,19 +103,46 @@ func (gm *GossipManager) handleConnect(msg *GossipMessage) {
 		}
 
 		// Send response back to sender immediately
-		// Use shorter timeout for faster exchange
-		// Use inboundPool to prevent goroutine leak
+		// CRITICAL: Use replicationPool to prevent drops and limit concurrency
+		// CONNECT responses are critical for cluster formation and must not be dropped
 		addr := p.ConnectPayload.Address
 		nodeId := p.ConnectPayload.NodeId
-		if err := gm.inboundPool.Submit(func() {
+		if err := gm.replicationPool.Submit(func() {
 			if err := gm.network.SendWithTimeout(addr, responseMsg, 300*time.Millisecond); err != nil {
-				logging.Debug("Failed to send CONNECT response", "target", nodeId, "error", err)
+				if logging.Log.IsDebugEnabled() {
+					logging.Debug("Failed to send CONNECT response", "target", nodeId, "error", err)
+				}
 			} else {
-				logging.Debug("Sent CONNECT response with public key", "target", nodeId)
+				if logging.Log.IsDebugEnabled() {
+					logging.Debug("Sent CONNECT response with public key", "target", nodeId)
+				}
 			}
 		}); err != nil {
-			// Pool full - log and drop to prevent blocking
-			logging.Debug("Failed to submit CONNECT response to pool", "target", nodeId, "error", err)
+			// Pool full - use inboundPool as fallback
+			if err := gm.inboundPool.Submit(func() {
+				if err := gm.network.SendWithTimeout(addr, responseMsg, 300*time.Millisecond); err != nil {
+					if logging.Log.IsDebugEnabled() {
+						logging.Debug("Failed to send CONNECT response", "target", nodeId, "error", err)
+					}
+				}
+			}); err != nil {
+				// Both pools full - send directly with timeout to prevent blocking
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+					defer cancel()
+					done := make(chan struct{})
+					go func() {
+						defer close(done)
+						_ = gm.network.SendWithTimeout(addr, responseMsg, 300*time.Millisecond)
+					}()
+					select {
+					case <-done:
+						// Send completed, exit immediately
+					case <-ctx.Done():
+						// Timeout reached, exit
+					}
+				}()
+			}
 		}
 	}
 }
@@ -237,8 +264,9 @@ func (gm *GossipManager) handleCacheSync(msg *GossipMessage) {
 		opId := msg.OpId
 
 		// This ensures ACK sending doesn't wait for any locks or processing
-		// Use inboundPool to prevent goroutine leak
-		if err := gm.inboundPool.Submit(func() {
+		// CRITICAL: Use replicationPool to prevent drops and limit concurrency
+		// ACKs are time-sensitive and must not be dropped or delayed
+		if err := gm.replicationPool.Submit(func() {
 			// Cache peer address to avoid repeated lookups
 			gm.mu.RLock()
 			peer, peerOk := gm.liveNodes[senderID]
@@ -275,9 +303,67 @@ func (gm *GossipManager) handleCacheSync(msg *GossipMessage) {
 				putGossipMessage(ackMsg)
 			}
 		}); err != nil {
-			// Pool full - log and drop to prevent blocking
-			if logging.Log.IsDebugEnabled() {
-				logging.Debug("Failed to submit ACK to pool", "opId", opId, "error", err)
+			// Pool full - use inboundPool as fallback
+			if err := gm.inboundPool.Submit(func() {
+				gm.mu.RLock()
+				peer, peerOk := gm.liveNodes[senderID]
+				peerAddr := ""
+				if peerOk && peer != nil {
+					peerAddr = peer.Address
+				}
+				gm.mu.RUnlock()
+
+				if peerOk && peerAddr != "" {
+					ackMsg := getGossipMessage()
+					ackMsg.Type = GossipMessageType_MESSAGE_TYPE_CACHE_SYNC_ACK
+					ackMsg.Sender = gm.localNodeID
+					ackMsg.Payload = &GossipMessage_CacheSyncAckPayload{
+						CacheSyncAckPayload: &CacheSyncAckPayload{
+							OpId:    opId,
+							PeerId:  gm.localNodeID,
+							Success: true,
+						},
+					}
+					_ = gm.network.SendWithTimeout(peerAddr, ackMsg, 1*time.Second)
+					putGossipMessage(ackMsg)
+				}
+			}); err != nil {
+				// Both pools full - send directly with timeout to prevent blocking
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					defer cancel()
+					done := make(chan struct{})
+					go func() {
+						defer close(done)
+						gm.mu.RLock()
+						peer, peerOk := gm.liveNodes[senderID]
+						peerAddr := ""
+						if peerOk && peer != nil {
+							peerAddr = peer.Address
+						}
+						gm.mu.RUnlock()
+						if peerOk && peerAddr != "" {
+							ackMsg := getGossipMessage()
+							ackMsg.Type = GossipMessageType_MESSAGE_TYPE_CACHE_SYNC_ACK
+							ackMsg.Sender = gm.localNodeID
+							ackMsg.Payload = &GossipMessage_CacheSyncAckPayload{
+								CacheSyncAckPayload: &CacheSyncAckPayload{
+									OpId:    opId,
+									PeerId:  gm.localNodeID,
+									Success: true,
+								},
+							}
+							_ = gm.network.SendWithTimeout(peerAddr, ackMsg, 1*time.Second)
+							putGossipMessage(ackMsg)
+						}
+					}()
+					select {
+					case <-done:
+						// Send completed, exit immediately
+					case <-ctx.Done():
+						// Timeout reached, exit
+					}
+				}()
 			}
 		}
 	}
