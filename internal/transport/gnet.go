@@ -28,11 +28,11 @@ type GnetTransport struct {
 }
 
 func NewGnetTransport() (*GnetTransport, error) {
-	// Create client with event loops to avoid load balancer panics
 	client, err := gnet.NewClient(
 		&gnet.BuiltinEventEngine{},
-		gnet.WithMulticore(true),                // Enable multi-core
-		gnet.WithLoadBalancing(gnet.RoundRobin), // RoundRobin for client
+		gnet.WithMulticore(true),              // Enable multi-core
+		gnet.WithTCPNoDelay(gnet.TCPNoDelay),  // Disable Nagle's algorithm for lower latency
+		gnet.WithTCPKeepAlive(60*time.Second), // Keep connections alive
 	)
 	if err != nil {
 		return nil, fmt.Errorf("gnet client init failed: %w", err)
@@ -84,13 +84,14 @@ func (t *GnetTransport) Dial(address string) (TransportConn, error) {
 }
 
 func (t *GnetTransport) Listen(address string) (TransportListener, error) {
-	return NewGnetTransportListener(address)
+	// This provides better throughput for high-concurrency scenarios
+	return NewGnetTransportListenerWithOptions(address, HighPerformanceGnetListenerOptions())
 }
 
 type GnetTransportConn struct {
 	conn           gnet.Conn
 	metrics        *GnetMetrics
-	metricsEnabled atomic.Bool // OPTIMIZATION: Cache metrics check
+	metricsEnabled atomic.Bool
 }
 
 // WriteDataWithContext writes data with context support
@@ -208,17 +209,29 @@ type GnetListenerOptions struct {
 	LockOSThread bool
 }
 
-// DefaultGnetListenerOptions returns optimized default settings
+// DefaultGnetListenerOptions returns optimized default settings for high performance
 func DefaultGnetListenerOptions() *GnetListenerOptions {
+	return &GnetListenerOptions{
+		Multicore:     true,
+		NumEventLoop:  0,     // Auto-detect (will use runtime.NumCPU())
+		ReusePort:     true,  // Enable SO_REUSEPORT for better load distribution
+		EdgeTriggered: false, // Conservative default (enable on Linux for better performance)
+		LockOSThread:  false, // Disable for better goroutine scheduling
+	}
+}
+
+// HighPerformanceGnetListenerOptions returns optimized settings for maximum performance
+// Use this for high-concurrency scenarios with >1000 ops/sec
+func HighPerformanceGnetListenerOptions() *GnetListenerOptions {
 	return &GnetListenerOptions{
 		Multicore:        true,
 		NumEventLoop:     0, // Auto-detect
 		ReusePort:        true,
-		ReadBufferCap:    65536,   // 64KB
-		WriteBufferCap:   65536,   // 64KB
-		SocketRecvBuffer: 2097152, // 2MB
-		SocketSendBuffer: 2097152, // 2MB
-		EdgeTriggered:    false,   // Conservative default
+		ReadBufferCap:    262144,  // 256KB for very high throughput
+		WriteBufferCap:   262144,  // 256KB for very high throughput
+		SocketRecvBuffer: 8388608, // 8MB for maximum throughput
+		SocketSendBuffer: 8388608, // 8MB for maximum throughput
+		EdgeTriggered:    false,   // Keep false for compatibility (enable on Linux if needed)
 		LockOSThread:     false,
 	}
 }
@@ -287,7 +300,6 @@ func (l *GnetTransportListener) Start() error {
 			gnet.WithReusePort(opts.ReusePort),
 			gnet.WithTCPKeepAlive(60 * time.Second), // Increased from 30s for better connection stability
 			gnet.WithTCPNoDelay(gnet.TCPNoDelay),
-			gnet.WithLoadBalancing(gnet.LeastConnections), // OPTIMIZATION: LeastConnections performs better than RoundRobin
 			gnet.WithReadBufferCap(opts.ReadBufferCap),
 			gnet.WithWriteBufferCap(opts.WriteBufferCap),
 		}
@@ -419,8 +431,8 @@ func (es *GnetTransportEventEngine) OnTraffic(conn gnet.Conn) (action gnet.Actio
 		return gnet.None
 	}
 
-	// This amortizes event loop overhead across multiple messages
-	const maxBatch = 32
+	// Larger batches reduce event loop overhead and improve throughput
+	const maxBatch = 64 // Increased from 32 for better throughput
 	var processed int
 
 	for processed < maxBatch {

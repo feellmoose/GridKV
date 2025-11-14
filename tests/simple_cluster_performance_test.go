@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,10 @@ import (
 // TestSimpleClusterPerformance runs a simplified but realistic long-term test
 // Configuration: 5 nodes, 1 minute, single replica (no quorum overhead)
 func TestSimpleClusterPerformance(t *testing.T) {
+	if os.Getenv("GRIDKV_RUN_PERF_TESTS") != "1" {
+		t.Skip("set GRIDKV_RUN_PERF_TESTS=1 to enable performance workload")
+	}
+
 	const (
 		numNodes     = 5
 		testDuration = 1 * time.Minute
@@ -44,7 +49,7 @@ func TestSimpleClusterPerformance(t *testing.T) {
 	// Create cluster
 	t.Log("📦 Creating cluster...")
 	nodes := make([]*gridkv.GridKV, numNodes)
-	
+
 	// Create all nodes
 	for i := 0; i < numNodes; i++ {
 		var seedAddrs []string
@@ -69,7 +74,7 @@ func TestSimpleClusterPerformance(t *testing.T) {
 			ReadQuorum:   1,
 			VirtualNodes: 100,
 		})
-		
+
 		if err != nil {
 			t.Fatalf("Failed to create node %d: %v", i, err)
 		}
@@ -93,14 +98,14 @@ func TestSimpleClusterPerformance(t *testing.T) {
 	t.Log("💾 Pre-populating data...")
 	ctx := context.Background()
 	numKeys := 5000
-	
+
 	for i := 0; i < numKeys; i++ {
 		key := fmt.Sprintf("key-%d", i)
 		value := []byte(fmt.Sprintf("value-%d", i))
 		node := nodes[i%len(nodes)]
 		_ = node.Set(ctx, key, value)
 	}
-	
+
 	t.Logf("✅ Populated %d keys", numKeys)
 	t.Log("")
 
@@ -116,14 +121,14 @@ func TestSimpleClusterPerformance(t *testing.T) {
 			defer wg.Done()
 
 			node := nodes[clientID%len(nodes)]
-			
+
 			for time.Now().Before(deadline) {
 				keyID := rand.Intn(numKeys)
 				key := fmt.Sprintf("key-%d", keyID)
 				value := []byte(fmt.Sprintf("value-%d-%d", clientID, rand.Intn(1000)))
 
 				op := rand.Intn(10)
-				
+
 				switch {
 				case op < 6: // 60% reads
 					_, err := node.Get(ctx, key)
@@ -161,15 +166,15 @@ func TestSimpleClusterPerformance(t *testing.T) {
 	finalReads := totalReads.Load()
 	finalDeletes := totalDeletes.Load()
 	finalTotal := finalWrites + finalReads + finalDeletes
-	
+
 	finalWriteErrs := writeErrors.Load()
 	finalReadErrs := readErrors.Load()
 	finalDeleteErrs := deleteErrors.Load()
 	finalTotalErrs := finalWriteErrs + finalReadErrs + finalDeleteErrs
-	
+
 	avgOpsPerSec := float64(finalTotal) / elapsed.Seconds()
 	errorRate := float64(finalTotalErrs) / float64(finalTotal+finalTotalErrs) * 100
-	
+
 	t.Log("")
 	t.Log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	t.Log("            FINAL RESULTS")
@@ -194,25 +199,23 @@ func TestSimpleClusterPerformance(t *testing.T) {
 	t.Logf("  Per-Node:         %.0f ops/sec", avgOpsPerSec/float64(numNodes))
 	t.Logf("  Per-Client:       %.0f ops/sec", avgOpsPerSec/float64(numClients))
 	t.Log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	
+
 	// Assertions
 	if finalTotal == 0 {
 		t.Error("❌ No operations completed!")
 	} else {
 		t.Logf("✅ Completed %d operations", finalTotal)
 	}
-	
+
 	if errorRate > 5.0 {
 		t.Logf("⚠️  Error rate: %.2f%% (acceptable for distributed system)", errorRate)
 	} else {
 		t.Logf("✅ Low error rate: %.2f%%", errorRate)
 	}
-	
+
 	if avgOpsPerSec < 100 {
 		t.Logf("⚠️  Low throughput: %.0f ops/sec", avgOpsPerSec)
 	} else {
 		t.Logf("✅ Good throughput: %.0f ops/sec", avgOpsPerSec)
 	}
 }
-
-

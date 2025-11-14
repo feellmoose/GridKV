@@ -10,7 +10,6 @@ import (
 	"github.com/feellmoose/gridkv/internal/utils/logging"
 )
 
-// Object pools for gossip synchronization (OPTIMIZATION)
 var (
 	// NodeInfo slice pool for cluster sync
 	nodeInfoSlicePool = sync.Pool{
@@ -25,7 +24,6 @@ var (
 //
 // This is the core of the gossip protocol for membership dissemination.
 func (gm *GossipManager) gossipPeriodically() {
-	// Fast path: skip if no peers (OPTIMIZATION)
 	gm.mu.RLock()
 	peerCount := len(gm.liveNodes) - 1 // Exclude self
 	gm.mu.RUnlock()
@@ -34,13 +32,14 @@ func (gm *GossipManager) gossipPeriodically() {
 		return // No peers to gossip with
 	}
 
-	// OPTIMIZATION: During startup, gossip to multiple peers for faster convergence
 	gm.mu.RLock()
 	membersPtr := nodeInfoSlicePool.Get().(*[]*NodeInfo)
 	members := (*membersPtr)[:0] // Reset to zero length
 
 	for _, n := range gm.liveNodes {
-		// Reuse NodeInfo objects instead of creating new ones (OPTIMIZATION)
+		if n == nil {
+			continue
+		}
 		members = append(members, &NodeInfo{
 			NodeId:       n.NodeId,
 			Address:      n.Address,
@@ -51,9 +50,13 @@ func (gm *GossipManager) gossipPeriodically() {
 	}
 	gm.mu.RUnlock()
 
-	// OPTIMIZATION: For small clusters, gossip to multiple peers simultaneously
 	// This accelerates cluster convergence during startup
 	gossipTargets := gm.getGossipTargets(peerCount)
+
+	if len(gossipTargets) == 0 {
+		nodeInfoSlicePool.Put(membersPtr)
+		return
+	}
 
 	// Create cluster sync message once (shared for all targets)
 	syncMsg := &GossipMessage{
@@ -72,7 +75,7 @@ func (gm *GossipManager) gossipPeriodically() {
 		wg.Add(1)
 		go func(t string) {
 			defer wg.Done()
-			if peer, ok := gm.getNode(t); ok {
+			if peer, ok := gm.getNode(t); ok && peer != nil && gm.network != nil {
 				// Use shorter timeout for faster gossip
 				gm.network.SendWithTimeout(peer.Address, syncMsg, 300*time.Millisecond)
 			}
@@ -83,14 +86,12 @@ func (gm *GossipManager) gossipPeriodically() {
 	// Return pooled slice
 	nodeInfoSlicePool.Put(membersPtr)
 
-	// Batch cache gossip with cluster gossip to first target (OPTIMIZATION)
 	if len(gossipTargets) > 0 {
 		gm.gossipCachePeriodically(gossipTargets[0])
 	}
 }
 
 // getGossipTargets returns targets for gossip based on cluster size.
-// OPTIMIZATION: For small clusters, gossip to multiple peers for faster convergence.
 func (gm *GossipManager) getGossipTargets(peerCount int) []string {
 	gm.mu.RLock()
 	defer gm.mu.RUnlock()
@@ -122,8 +123,26 @@ func (gm *GossipManager) getGossipTargets(peerCount int) []string {
 			targets = append(targets, ids[idx])
 			ids[idx], ids[len(ids)-1-i] = ids[len(ids)-1-i], ids[idx]
 		}
+	} else if peerCount <= 30 {
+		// Large cluster: gossip to 1-2 random peers (reduced frequency)
+		count := 1
+		if peerCount > 20 {
+			count = 1 // Very large clusters: only 1 peer
+		}
+		ids := make([]string, 0, len(gm.liveNodes))
+		for id := range gm.liveNodes {
+			if id != gm.localNodeID {
+				ids = append(ids, id)
+			}
+		}
+		// Select random peers
+		for i := 0; i < count && i < len(ids); i++ {
+			idx := rand.Intn(len(ids) - i)
+			targets = append(targets, ids[idx])
+			ids[idx], ids[len(ids)-1-i] = ids[len(ids)-1-i], ids[idx]
+		}
 	} else {
-		// Large cluster: gossip to 1 random peer (standard gossip)
+		// Very large cluster (>30 nodes): gossip to 1 random peer only
 		target := gm.getRandomPeerID("")
 		if target != "" {
 			targets = append(targets, target)
@@ -138,22 +157,22 @@ func (gm *GossipManager) getGossipTargets(peerCount int) []string {
 // Parameters:
 //   - targetNodeID: The node to send cache updates to
 func (gm *GossipManager) gossipCachePeriodically(targetNodeID string) {
-	if gm.store == nil {
+	if gm.store == nil || gm.network == nil {
 		return
 	}
 
 	items, err := gm.store.GetSyncBuffer()
 	if err != nil {
-		logging.Error(err, "get sync buffer failed")
+		if logging.Log.IsDebugEnabled() {
+			logging.Debug("get sync buffer failed", "err", err)
+		}
 		return
 	}
 
-	// Fast path: skip if nothing to sync (OPTIMIZATION)
 	if len(items) == 0 {
 		return
 	}
 
-	// Adaptive batching - size adjusts based on message rate (OPTIMIZATION)
 	maxOpsPerBatch := gm.getAdaptiveBatchSize()
 
 	for i := 0; i < len(items); i += maxOpsPerBatch {
@@ -181,14 +200,12 @@ func (gm *GossipManager) gossipCachePeriodically(targetNodeID string) {
 
 		if peer, ok := gm.getNode(targetNodeID); ok {
 			gm.network.SendWithTimeout(peer.Address, msg, 500*time.Millisecond)
-			// Track message rate for adaptive batching (OPTIMIZATION)
 			gm.msgRateCounter.Add(1)
 		}
 	}
 }
 
 // getAdaptiveBatchSize calculates optimal batch size based on message rate.
-// OPTIMIZATION: Inspired by TCP congestion control.
 //
 // Returns:
 //   - int: Recommended batch size

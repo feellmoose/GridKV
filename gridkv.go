@@ -330,6 +330,7 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 		ReplicationTimeout: opts.ReplicationTimeout,
 		ReadTimeout:        opts.ReadTimeout,
 		DisableAuth:        opts.DisableAuth,
+		StartupGracePeriod: opts.StartupGracePeriod,
 	}
 
 	// Create gossip manager
@@ -952,6 +953,14 @@ func (g *GridKV) InjectGossipMessage(msg *gossip.GossipMessage) {
 	g.gm.SimulateReceive(msg)
 }
 
+// ForceRemoveNode immediately marks a peer as dead. Intended for tests and diagnostics.
+func (g *GridKV) ForceRemoveNode(nodeID string) {
+	if g.gm == nil {
+		return
+	}
+	g.gm.ForceRemoveNode(nodeID)
+}
+
 // MessageStats returns aggregated gossip message statistics.
 // total: Total messages received (critical + queued attempts)
 // dropped: Messages dropped due to queue saturation or validation failures.
@@ -1008,9 +1017,10 @@ type GridKVOptions struct {
 
 	// Failure Detection
 	// OPTIMIZATION: Increased timeouts to reduce false positives during cluster formation
-	FailureTimeout time.Duration // Timeout before marking node as suspect (default: 15s, increased from 5s)
-	SuspectTimeout time.Duration // Timeout before marking suspect node as dead (default: 30s, increased from 10s)
-	GossipInterval time.Duration // Interval for gossip protocol (default: 500ms, faster convergence)
+	FailureTimeout     time.Duration // Timeout before marking node as suspect (default: 15s, increased from 5s)
+	SuspectTimeout     time.Duration // Timeout before marking suspect node as dead (default: 30s, increased from 10s)
+	GossipInterval     time.Duration // Interval for gossip protocol (default: 500ms, faster convergence)
+	StartupGracePeriod time.Duration // Grace period before failure detector marks nodes suspect
 
 	// Multi-Datacenter
 	DataCenter string // Datacenter identifier for topology-aware operations (optional)

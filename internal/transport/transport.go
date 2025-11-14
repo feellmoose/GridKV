@@ -55,8 +55,9 @@ type ConnPool struct {
 	idleConns []pooledTransportConn
 	total     int // Total number of connections, both idle and in-use
 	closed    bool
+	stopCh    chan struct{} // Signal channel to stop cleanupLoop
+	stopOnce  sync.Once     // Ensure stopCh is only closed once
 
-	// OPTIMIZATION: Pool metrics for monitoring and tuning
 	metrics *ConnPoolMetrics
 }
 
@@ -109,6 +110,7 @@ func NewConnPool(transport Transport, address string, maxIdle, maxConns int, idl
 		maxConns:    maxConns,
 		idleTimeout: idleTimeout,
 		idleConns:   make([]pooledTransportConn, 0, maxIdle),
+		stopCh:      make(chan struct{}),
 		metrics:     &ConnPoolMetrics{}, // Initialize metrics
 	}
 	// Initialize the condition variable for waiting on available connections.
@@ -189,26 +191,34 @@ func (p *ConnPool) cleanupLoop() {
 	ticker := time.NewTicker(p.idleTimeout / 2)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		p.mu.Lock()
-		if p.closed {
+	for {
+		select {
+		case <-ticker.C:
+			p.mu.Lock()
+			if p.closed {
+				p.mu.Unlock()
+				return
+			}
+			now := time.Now()
+			// Use slice trick for efficient in-place cleanup
+			active := p.idleConns[:0]
+			for _, pc := range p.idleConns {
+				if now.Sub(pc.lastUsed) < p.idleTimeout {
+					active = append(active, pc)
+				} else {
+					// Close the expired connection and decrement the total count.
+					_ = pc.conn.Close()
+					p.total--
+				}
+			}
+			p.idleConns = active
 			p.mu.Unlock()
-			return
-		}
-		now := time.Now()
-		// Use slice trick for efficient in-place cleanup
-		active := p.idleConns[:0]
-		for _, pc := range p.idleConns {
-			if now.Sub(pc.lastUsed) < p.idleTimeout {
-				active = append(active, pc)
-			} else {
-				// Close the expired connection and decrement the total count.
-				_ = pc.conn.Close()
-				p.total--
+		case _, ok := <-p.stopCh:
+			// Stop signal received (channel closed), exit immediately
+			if !ok {
+				return
 			}
 		}
-		p.idleConns = active
-		p.mu.Unlock()
 	}
 }
 
@@ -245,7 +255,6 @@ func (p *ConnPool) Get(ctx context.Context) (TransportConn, error) {
 				continue // Try the next one
 			}
 
-			// OPTIMIZATION: Health check if supported
 			if healthChecker, ok := pc.conn.(HealthCheckable); ok {
 				if err := healthChecker.HealthCheck(); err != nil {
 					// Connection is broken, close and try next
@@ -399,9 +408,8 @@ func (p *ConnPool) Invalidate(conn TransportConn) {
 // Close closes all connections in the pool and stops the cleanup routine.
 func (p *ConnPool) Close() error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.closed {
+		p.mu.Unlock()
 		return nil
 	}
 	p.closed = true // Signal cleanupLoop to exit
@@ -415,5 +423,13 @@ func (p *ConnPool) Close() error {
 	}
 	p.idleConns = nil
 	p.total = 0
+	p.mu.Unlock()
+
+	// Signal cleanupLoop to exit immediately by closing the channel
+	// This ensures all waiting goroutines receive the signal
+	// Use sync.Once to prevent closing the channel multiple times
+	p.stopOnce.Do(func() {
+		close(p.stopCh)
+	})
 	return nil
 }
