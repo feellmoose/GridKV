@@ -477,10 +477,24 @@ func (p *ConnPool) Get(ctx context.Context) (TransportConn, error) {
 				return nil, errors.New("connection pool exhausted: max connections reached")
 			}
 
-			p.cond.Wait()
+			// Wait with timeout by periodically checking
+			// We can't use cond.Wait with timeout directly, so we use a short wait interval
+			waitInterval := 50 * time.Millisecond
+			if remaining < waitInterval {
+				waitInterval = remaining
+			}
 
+			// Unlock, wait, then re-lock
+			p.mu.Unlock()
+			time.Sleep(waitInterval)
+			p.mu.Lock()
+
+			// Check if we should continue waiting
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
+			}
+			if time.Now().After(waitDeadline) {
+				return nil, errors.New("connection pool exhausted: max connections reached")
 			}
 		}
 
@@ -510,6 +524,17 @@ func (p *ConnPool) Put(conn TransportConn) {
 		p.total--
 		p.cond.Signal() // Notify a waiter that total count has decreased (allowing new Dial attempts)
 		return
+	}
+
+	// Check connection health before adding to pool
+	if healthChecker, ok := conn.(HealthCheckable); ok {
+		if err := healthChecker.HealthCheck(); err != nil {
+			// Connection is unhealthy, close it and don't add to pool
+			_ = conn.Close()
+			p.total--
+			p.cond.Signal()
+			return
+		}
 	}
 
 	// Add connection to the pool and update its last used time.

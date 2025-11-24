@@ -15,6 +15,9 @@ import (
 
 // TestProductionFunctionalityCorrectness tests correctness under various environments
 func TestProductionFunctionalityCorrectness(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping functionality test in short mode")
+	}
 	testCases := []struct {
 		name      string
 		envConfig *TestEnvironmentConfig
@@ -303,6 +306,9 @@ func testCorrectnessScenario(t *testing.T, config *TestEnvironmentConfig, testDu
 
 // TestProductionOperationRatio tests different operation ratios
 func TestProductionOperationRatio(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping operation ratio test in short mode")
+	}
 	testCases := []struct {
 		name           string
 		writeRatio     int
@@ -545,6 +551,9 @@ func testOperationRatioScenario(t *testing.T, config *TestEnvironmentConfig, wri
 
 // TestProductionCoreOperations tests basic KV operations
 func TestProductionCoreOperations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping core operations test in short mode")
+	}
 	config := &TestEnvironmentConfig{
 		NetworkProfile: network.ProfileLAN,
 		NetworkType:    gridkv.TCP,
@@ -620,6 +629,9 @@ func TestProductionCoreOperations(t *testing.T) {
 
 // TestProductionDataLossProbability tests data loss under various failure scenarios
 func TestProductionDataLossProbability(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping data loss test in short mode")
+	}
 	config := &TestEnvironmentConfig{
 		NetworkProfile: network.ProfileLAN,
 		NetworkType:    gridkv.TCP,
@@ -915,6 +927,9 @@ func TestProductionConsistencyConvergence(t *testing.T) {
 
 // TestProductionCriticalMessageDelivery tests critical message delivery under load
 func TestProductionCriticalMessageDelivery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping critical message delivery test in short mode")
+	}
 	config := &TestEnvironmentConfig{
 		NetworkProfile: network.ProfileLAN,
 		NetworkType:    gridkv.TCP,

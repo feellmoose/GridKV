@@ -16,6 +16,9 @@ import (
 
 // TestStressPressure tests system under various pressure scenarios
 func TestStressPressure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping stress test in short mode")
+	}
 	testCases := []struct {
 		name           string
 		envConfig      *TestEnvironmentConfig
@@ -200,6 +203,9 @@ func testStressScenario(t *testing.T, config *TestEnvironmentConfig, concurrentO
 
 // TestStressGoroutineLeak tests for goroutine leaks under stress
 func TestStressGoroutineLeak(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping goroutine leak test in short mode")
+	}
 	testCases := []struct {
 		name            string
 		envConfig       *TestEnvironmentConfig
@@ -446,6 +452,9 @@ func TestStressMemoryLeak(t *testing.T) {
 
 // TestStressPerformanceOperations tests write/read/delete performance separately
 func TestStressPerformanceOperations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping performance operations test in short mode")
+	}
 	config := &TestEnvironmentConfig{
 		NetworkProfile: network.ProfileLAN,
 		NetworkType:    gridkv.TCP,
@@ -569,6 +578,9 @@ func TestStressPerformanceOperations(t *testing.T) {
 
 // TestStressBatchOperations tests batch write/delete performance
 func TestStressBatchOperations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping batch operations test in short mode")
+	}
 	config := &TestEnvironmentConfig{
 		NetworkProfile: network.ProfileLAN,
 		NetworkType:    gridkv.TCP,
@@ -663,6 +675,9 @@ func TestStressBatchOperations(t *testing.T) {
 
 // TestStressAsyncRead tests asynchronous read operations performance
 func TestStressAsyncRead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping async read test in short mode")
+	}
 	config := &TestEnvironmentConfig{
 		NetworkProfile: network.ProfileLAN,
 		NetworkType:    gridkv.TCP,

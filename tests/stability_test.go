@@ -15,6 +15,9 @@ import (
 
 // TestStabilityExtremeLatency tests system stability under extreme network latency
 func TestStabilityExtremeLatency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping extreme latency test in short mode")
+	}
 	testCases := []struct {
 		name           string
 		envConfig      *TestEnvironmentConfig
@@ -157,6 +160,9 @@ func testExtremeLatencyScenario(t *testing.T, config *TestEnvironmentConfig, tes
 
 // TestStabilityNodeFailures tests system stability when nodes fail
 func TestStabilityNodeFailures(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping node failures test in short mode")
+	}
 	testCases := []struct {
 		name           string
 		envConfig      *TestEnvironmentConfig
@@ -389,6 +395,9 @@ func testNodeFailureScenario(t *testing.T, config *TestEnvironmentConfig, failur
 
 // TestStabilitySuddenShutdown tests system when majority of nodes shut down suddenly
 func TestStabilitySuddenShutdown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping sudden shutdown test in short mode")
+	}
 	testCases := []struct {
 		name           string
 		envConfig      *TestEnvironmentConfig

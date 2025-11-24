@@ -307,6 +307,14 @@ func (t *TCPTransportConn) HealthCheck() error {
 		return fmt.Errorf("connection not established")
 	}
 
+	// Try to set a write deadline to detect if connection is closed
+	// This is a non-blocking operation that will fail if connection is closed
+	if err := t.conn.SetWriteDeadline(time.Now().Add(1 * time.Nanosecond)); err != nil {
+		return fmt.Errorf("connection closed: %w", err)
+	}
+	// Reset deadline immediately
+	t.conn.SetWriteDeadline(time.Time{})
+
 	// Connection appears valid (not closed and has remote address)
 	return nil
 }
