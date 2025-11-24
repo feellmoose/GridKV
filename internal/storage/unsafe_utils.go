@@ -1,29 +1,26 @@
 package storage
 
 // File: unsafe_utils.go
-// Purpose: Unsafe optimizations for performance-critical operations
+// Purpose: Unsafe utilities for performance-critical operations
 //
 // This file provides unsafe utility functions that eliminate allocations
-// and improve performance in hot paths. Use with caution.
+// in hot paths. Use with caution.
 //
 // Performance benefits:
-//   - StringToBytes: -1 allocation
-//   - BytesToString: -1 allocation
-//   - FastCloneBytes: Optimized copy
+//   - StringToBytes: Zero allocation conversion
+//   - BytesToString: Zero allocation conversion
+//   - FastCloneBytes: Fast copy
 
 import (
-	"reflect"
 	"unsafe"
 )
 
-// Unsafe optimizations for hot paths.
-// These functions use unsafe pointer operations to eliminate allocations
-// and improve performance. Use with caution and only in performance-critical code.
+// Unsafe utilities for hot paths using pointer operations to eliminate allocations.
+// Use with caution and only in performance-critical code.
 //
 // Performance gains:
 // - StringToBytes: Zero allocation (vs 1 allocation)
 // - BytesToString: Zero allocation (vs 1 allocation)
-// - FastTypeAssert: Faster than type assertion
 
 // StringToBytes converts string to []byte without allocation.
 // ⚠️ WARNING: The returned []byte shares memory with the string.
@@ -79,7 +76,6 @@ func CopyBytes(dst, src []byte) int {
 }
 
 // FastCloneBytes creates a new byte slice with the same content.
-// Optimized for performance-critical paths.
 //
 //go:inline
 func FastCloneBytes(src []byte) []byte {
@@ -95,14 +91,16 @@ func FastCloneBytes(src []byte) []byte {
 	return dst
 }
 
-// GetStringHeader returns the underlying string header for advanced operations.
+// GetStringHeader returns the underlying string data pointer for advanced operations.
 // This should only be used by experts who understand the implications.
-func GetStringHeader(s string) reflect.StringHeader {
-	return *(*reflect.StringHeader)(unsafe.Pointer(&s))
+// Deprecated: Use unsafe.StringData() directly instead.
+func GetStringHeader(s string) unsafe.Pointer {
+	return unsafe.Pointer(unsafe.StringData(s))
 }
 
-// GetSliceHeader returns the underlying slice header for advanced operations.
+// GetSliceHeader returns the underlying slice data pointer for advanced operations.
 // This should only be used by experts who understand the implications.
-func GetSliceHeader(s []byte) reflect.SliceHeader {
-	return *(*reflect.SliceHeader)(unsafe.Pointer(&s))
+// Deprecated: Use unsafe.SliceData() directly instead.
+func GetSliceHeader(s []byte) unsafe.Pointer {
+	return unsafe.Pointer(unsafe.SliceData(s))
 }

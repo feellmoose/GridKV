@@ -1,7 +1,7 @@
 // Package storage provides pluggable storage backends for GridKV.
 //
-// This package defines the Storage interface and implements two in-memory backends:
-//   - Memory: Simple in-memory map (development/testing)
+// This package defines the Storage interface and implements in-memory backends:
+//   - Memory: Simple in-memory map with compression (development/testing)
 //   - MemorySharded: Sharded in-memory for high concurrency (production, recommended)
 //
 // All storage backends must implement the Storage interface and provide:
@@ -10,17 +10,24 @@
 //   - Atomic operations where possible
 //   - Efficient concurrent access (minimal lock contention)
 //
-// Performance targets:
-//   - Get: < 1µs (memory), < 100µs (persistent)
-//   - Set: < 2µs (memory), < 200µs (persistent)
-//   - Delete: < 2µs (memory), < 200µs (persistent)
+// Performance:
+//   - Memory: 600-700K ops/s (compression enabled, LRU eviction)
+//   - MemorySharded: 1-2M+ ops/s (256 shards, lock-free per shard)
 //
-// Backend selection guide:
-//   - Memory: Simple, low throughput (600-700K ops/s), development/testing
-//   - MemorySharded: High throughput (1-2M+ ops/s), recommended for production
+// Features:
+//   - Object pooling for reduced allocations
+//   - Zero-copy read operations (GetNoCopy)
+//   - Batch operations (BatchGet/BatchSet)
+//   - Gossip synchronization support
+//   - TTL and expiration handling
+//
+// Backend selection:
+//   - Memory: Development, testing, low concurrency scenarios
+//   - MemorySharded: Production deployments, high throughput requirements
 package storage
 
 import (
+	"errors"
 	"time"
 )
 
@@ -42,7 +49,7 @@ type StoredItem struct {
 	ExpireAt time.Time
 
 	// Version is the Hybrid Logical Clock timestamp.
-	// Used for: Conflict resolution in quorum reads/writes.
+	// Used for: Conflict resolution during eventual consistency reconciliation.
 	// Higher version wins in case of conflicts.
 	Version int64
 
@@ -381,4 +388,40 @@ func NextPowerOf2(n uint64) uint64 {
 	n |= n >> 16
 	n |= n >> 32
 	return n + 1
+}
+
+// Pre-allocated error objects to avoid allocations in hot path.
+// This optimization reduces allocation count by 1-2 per operation.
+var (
+	// Common errors
+	ErrItemNotFound        = errors.New("item not found")
+	ErrVersionMismatch     = errors.New("version mismatch")
+	ErrItemExpired         = errors.New("item has expired")
+	ErrMemoryLimitExceeded = errors.New("memory limit exceeded")
+
+	// Validation errors
+	errEmptyKey        = errors.New("empty key not allowed")
+	errNilItem         = errors.New("nil item not allowed")
+	errBackendNotFound = errors.New("storage backend not found")
+)
+
+// GossipSyncOp interface is satisfied by gossip.CacheSyncOperation (proto type)
+type GossipSyncOp interface {
+	GetKey() string
+	GetClientVersion() int64
+	GetType() int32 // OperationType enum
+	GetSetData() GossipStoredItem
+}
+
+// GossipStoredItem interface is satisfied by gossip.StoredItem (proto type)
+type GossipStoredItem interface {
+	GetExpireAt() uint64
+	GetValue() []byte
+}
+
+// GossipFullStateItem interface is satisfied by gossip.FullStateItem (proto type)
+type GossipFullStateItem interface {
+	GetKey() string
+	GetVersion() int64
+	GetItemData() GossipStoredItem
 }

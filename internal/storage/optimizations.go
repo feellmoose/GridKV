@@ -1,15 +1,13 @@
 package storage
 
 // File: optimizations.go
-// Purpose: Performance optimization utilities
+// Purpose: Performance utilities
 //
-// This file provides various optimization tools:
+// This file provides utilities for reducing GC pressure:
 //   - ValueBufferPool: Size-specific buffer pooling
 //   - HotKeyCache: Local hot key caching with TTL
-//   - GC optimization utilities
+//   - GC tuning utilities
 //   - System configuration recommendations
-//
-// These tools help reduce GC pressure and improve overall performance.
 
 import (
 	"fmt"
@@ -20,8 +18,7 @@ import (
 )
 
 // ValueBufferPool provides pooled buffers for value storage to reduce GC pressure.
-// This implements the optimization recommendation from the performance roadmap:
-// "Use sync.Pool to cache value buffers and reduce GC frequency"
+// Uses sync.Pool to cache value buffers and reduce GC frequency.
 type ValueBufferPool struct {
 	pools map[int]*sync.Pool // Size-specific pools
 	sizes []int              // Common buffer sizes
@@ -92,7 +89,6 @@ func PutValueBuffer(buf *[]byte) {
 }
 
 // OptimizationConfig provides recommended configuration based on system resources.
-// This implements the optimization roadmap recommendations.
 type OptimizationConfig struct {
 	// Memory settings (70% of available RAM)
 	MaxMemoryMB int64
@@ -108,8 +104,7 @@ type OptimizationConfig struct {
 	GOGCPercent int
 }
 
-// GetRecommendedConfig returns optimized configuration based on system resources.
-// Implements the performance roadmap:
+// GetRecommendedConfig returns recommended configuration based on system resources.
 // - MaxMemoryMB: 70% of physical memory
 // - ShardCount: CPU cores * 2-4x (default 4x)
 // - MaxConnections: CPU cores * 2
@@ -137,7 +132,7 @@ func GetRecommendedConfig() *OptimizationConfig {
 }
 
 // ApplyGCOptimizations applies recommended GC settings for production use.
-// From roadmap: "Set GOGC=200 to reduce GC frequency"
+// Sets GOGC=200 to reduce GC frequency.
 func ApplyGCOptimizations() int {
 	previousGOGC := debug.SetGCPercent(200)
 	return previousGOGC
@@ -155,7 +150,7 @@ const (
 )
 
 // HotKeyCache provides local caching for frequently accessed keys.
-// From roadmap: "Cache hot keys locally with TTL 100ms"
+// Caches hot keys locally with TTL 100ms.
 type HotKeyCache struct {
 	cache   *sync.Map
 	ttl     int64 // nanoseconds
@@ -230,7 +225,7 @@ func (c *HotKeyCache) Disable() {
 }
 
 // GetShardedKey generates a sharded key name for hot key distribution.
-// From roadmap: "Split hot keys into multiple sub-keys with hash suffix"
+// Splits hot keys into multiple sub-keys with hash suffix.
 // Example: "user:1000" becomes "user:1000:shard:3"
 func GetShardedKey(originalKey string, shardID, shardCount int) string {
 	if shardCount <= 1 {

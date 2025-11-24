@@ -1,3 +1,19 @@
+// Package transport provides pluggable network transport layer for GridKV.
+//
+// This package defines interfaces and implementations for network communication
+// between GridKV nodes. Supports multiple transport protocols:
+//   - TCP: Reliable transport (default, recommended)
+//   - QUIC: High-performance UDP-based transport with reliability
+//   - GNET: Event-driven transport (Linux/macOS only)
+//   - UDP: High-performance UDP transport
+//
+// Features:
+//   - Connection pooling for efficient resource usage
+//   - Automatic connection health checking
+//   - Configurable timeouts and retry logic
+//   - Transport-agnostic interface for easy protocol switching
+//
+// Thread-safety: All implementations are safe for concurrent access.
 package transport
 
 import (
@@ -5,6 +21,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -54,51 +71,41 @@ type ConnPool struct {
 	cond      *sync.Cond // Used to wake up Goroutines waiting for a connection in Get()
 	idleConns []pooledTransportConn
 	total     int // Total number of connections, both idle and in-use
+	inUse     int // Number of connections currently in use
 	closed    bool
-	stopCh    chan struct{} // Signal channel to stop cleanupLoop
-	stopOnce  sync.Once     // Ensure stopCh is only closed once
-
-	metrics *ConnPoolMetrics
+	metrics   *ConnPoolMetrics
 }
 
-// ConnPoolMetrics tracks connection pool statistics for monitoring
 type ConnPoolMetrics struct {
-	totalGets       int64 // Total Get() calls
-	totalPuts       int64 // Total Put() calls
-	totalInvalidate int64 // Total Invalidate() calls
-	totalWaits      int64 // Number of times Get() had to wait
-	totalDialed     int64 // Total new connections created
-	totalReused     int64 // Total connections reused from pool
-	healthCheckFail int64 // Total health check failures
-	mu              sync.RWMutex
+	totalGets       atomic.Int64
+	totalPuts       atomic.Int64
+	totalInvalidate atomic.Int64
+	totalWaits      atomic.Int64
+	totalDialed     atomic.Int64
+	totalReused     atomic.Int64
+	healthCheckFail atomic.Int64
 }
 
-// GetMetrics returns a snapshot of pool metrics
 func (m *ConnPoolMetrics) GetMetrics() map[string]int64 {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	return map[string]int64{
-		"total_gets":        m.totalGets,
-		"total_puts":        m.totalPuts,
-		"total_invalidate":  m.totalInvalidate,
-		"total_waits":       m.totalWaits,
-		"total_dialed":      m.totalDialed,
-		"total_reused":      m.totalReused,
-		"health_check_fail": m.healthCheckFail,
+		"total_gets":        m.totalGets.Load(),
+		"total_puts":        m.totalPuts.Load(),
+		"total_invalidate":  m.totalInvalidate.Load(),
+		"total_waits":       m.totalWaits.Load(),
+		"total_dialed":      m.totalDialed.Load(),
+		"total_reused":      m.totalReused.Load(),
+		"health_check_fail": m.healthCheckFail.Load(),
 	}
 }
 
-// GetReuseRate returns the connection reuse rate (0-1)
 func (m *ConnPoolMetrics) GetReuseRate() float64 {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	total := m.totalDialed + m.totalReused
+	totalDialed := m.totalDialed.Load()
+	totalReused := m.totalReused.Load()
+	total := totalDialed + totalReused
 	if total == 0 {
 		return 0
 	}
-	return float64(m.totalReused) / float64(total)
+	return float64(totalReused) / float64(total)
 }
 
 // NewConnPool creates a new connection pool.
@@ -110,19 +117,17 @@ func NewConnPool(transport Transport, address string, maxIdle, maxConns int, idl
 		maxConns:    maxConns,
 		idleTimeout: idleTimeout,
 		idleConns:   make([]pooledTransportConn, 0, maxIdle),
-		stopCh:      make(chan struct{}),
 		metrics:     &ConnPoolMetrics{}, // Initialize metrics
 	}
 	// Initialize the condition variable for waiting on available connections.
 	pool.cond = sync.NewCond(&pool.mu)
-
-	// Start the background cleanup Goroutine.
-	go pool.cleanupLoop()
+	globalPoolCleaner.register(pool)
 	return pool
 }
 
 // Prewarm creates initial connections to warm up the pool.
 // This reduces connection establishment latency for the first requests.
+// Enhanced: parallel prewarming for faster initialization
 //
 // Parameters:
 //   - count: Number of connections to pre-create (capped at maxIdle)
@@ -132,27 +137,63 @@ func (p *ConnPool) Prewarm(count int) int {
 	if count > p.maxIdle {
 		count = p.maxIdle
 	}
+	if count <= 0 {
+		return 0
+	}
 
-	created := 0
+	// Parallel prewarming for faster initialization (max 10 concurrent)
+	maxConcurrent := 10
+	if count < maxConcurrent {
+		maxConcurrent = count
+	}
+
+	type result struct {
+		conn TransportConn
+		err  error
+	}
+	results := make(chan result, count)
+
+	// Create connections in parallel
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxConcurrent)
 	for i := 0; i < count; i++ {
-		conn, err := p.transport.Dial(p.address)
-		if err != nil {
-			break
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}        // Acquire semaphore
+			defer func() { <-sem }() // Release semaphore
 
-		p.mu.Lock()
-		if len(p.idleConns) < p.maxIdle && !p.closed {
+			conn, err := p.transport.Dial(p.address)
+			results <- result{conn: conn, err: err}
+		}()
+	}
+
+	// Wait for all dials to complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect successful connections
+	created := 0
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for res := range results {
+		if res.err != nil {
+			continue
+		}
+		if len(p.idleConns) < p.maxIdle && !p.closed && p.total < p.maxConns {
 			p.idleConns = append(p.idleConns, pooledTransportConn{
-				conn:     conn,
+				conn:     res.conn,
 				lastUsed: time.Now(),
 			})
 			p.total++
 			created++
 		} else {
 			// Pool full or closed, close the connection
-			conn.Close()
+			res.conn.Close()
 		}
-		p.mu.Unlock()
 	}
 
 	return created
@@ -175,61 +216,171 @@ func (p *ConnPool) GetStats() map[string]interface{} {
 	stats["address"] = p.address
 	stats["total_connections"] = p.total
 	stats["idle_connections"] = len(p.idleConns)
+	stats["in_use_connections"] = p.inUse
 	stats["max_idle"] = p.maxIdle
 	stats["max_conns"] = p.maxConns
 	stats["idle_timeout"] = p.idleTimeout.String()
 
+	// Calculate utilization rate
+	utilizationRate := 0.0
+	if p.maxConns > 0 {
+		utilizationRate = float64(p.total) / float64(p.maxConns)
+	}
+	stats["utilization_rate"] = utilizationRate
+
+	// Calculate availability rate
+	availabilityRate := 0.0
+	if p.maxConns > 0 {
+		available := p.maxConns - p.total + len(p.idleConns)
+		availabilityRate = float64(available) / float64(p.maxConns)
+	}
+	stats["availability_rate"] = availabilityRate
+
 	if p.metrics != nil {
 		stats["reuse_rate"] = p.metrics.GetReuseRate()
+		// Calculate saturation rate: (total_waits / total_gets) indicates pool pressure
+		metrics := p.metrics.GetMetrics()
+		totalGets := metrics["total_gets"]
+		totalWaits := metrics["total_waits"]
+		if totalGets > 0 {
+			stats["saturation_rate"] = float64(totalWaits) / float64(totalGets)
+		} else {
+			stats["saturation_rate"] = 0.0
+		}
 	}
 
 	return stats
 }
 
-// cleanupLoop periodically cleans up expired idle connections.
-func (p *ConnPool) cleanupLoop() {
-	ticker := time.NewTicker(p.idleTimeout / 2)
-	defer ticker.Stop()
+// AdjustPoolSize dynamically adjusts pool size based on usage
+// Returns true if adjustment was made
+func (p *ConnPool) AdjustPoolSize() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	for {
-		select {
-		case <-ticker.C:
-			p.mu.Lock()
-			if p.closed {
-				p.mu.Unlock()
-				return
+	if p.closed {
+		return false
+	}
+
+	stats := p.getStatsUnlocked()
+	utilizationRate := stats["utilization_rate"].(float64)
+	saturationRate := stats["saturation_rate"].(float64)
+
+	// Increase pool size if utilization > 80% and saturation > 10%
+	if utilizationRate > 0.8 && saturationRate > 0.1 && p.maxConns < 2000 {
+		// Increase by 25% but cap at 2000
+		newMaxConns := int(float64(p.maxConns) * 1.25)
+		if newMaxConns > 2000 {
+			newMaxConns = 2000
+		}
+		if newMaxConns > p.maxConns {
+			p.maxConns = newMaxConns
+			// Also increase maxIdle proportionally
+			newMaxIdle := int(float64(p.maxIdle) * 1.25)
+			if newMaxIdle > 500 {
+				newMaxIdle = 500
 			}
-			now := time.Now()
-			// Use slice trick for efficient in-place cleanup
-			active := p.idleConns[:0]
-			for _, pc := range p.idleConns {
-				if now.Sub(pc.lastUsed) < p.idleTimeout {
-					active = append(active, pc)
-				} else {
-					// Close the expired connection and decrement the total count.
-					_ = pc.conn.Close()
-					p.total--
-				}
+			if newMaxIdle > p.maxIdle {
+				p.maxIdle = newMaxIdle
 			}
-			p.idleConns = active
-			p.mu.Unlock()
-		case _, ok := <-p.stopCh:
-			// Stop signal received (channel closed), exit immediately
-			if !ok {
-				return
-			}
+			return true
 		}
 	}
+
+	// Decrease pool size if utilization < 50% for extended period
+	if utilizationRate < 0.5 && saturationRate < 0.01 {
+		// Decrease by 10% but keep minimum
+		minConns := 10
+		newMaxConns := int(float64(p.maxConns) * 0.9)
+		if newMaxConns < minConns {
+			newMaxConns = minConns
+		}
+		if newMaxConns < p.maxConns && p.maxConns > minConns {
+			p.maxConns = newMaxConns
+			// Also decrease maxIdle proportionally
+			newMaxIdle := int(float64(p.maxIdle) * 0.9)
+			if newMaxIdle < 5 {
+				newMaxIdle = 5
+			}
+			if newMaxIdle < p.maxIdle && p.maxIdle > 5 {
+				p.maxIdle = newMaxIdle
+			}
+			return true
+		}
+	}
+
+	return false
 }
 
-// Get returns an active TransportConn. If the pool is exhausted, it waits until one is available.
-// This method is Context-aware, supporting cancellation/timeout while waiting.
-func (p *ConnPool) Get(ctx context.Context) (TransportConn, error) {
-	// METRICS: Record Get call
+// getStatsUnlocked returns stats without locking (caller must hold lock)
+func (p *ConnPool) getStatsUnlocked() map[string]interface{} {
+	stats := make(map[string]interface{})
+
+	utilizationRate := 0.0
+	if p.maxConns > 0 {
+		utilizationRate = float64(p.total) / float64(p.maxConns)
+	}
+	stats["utilization_rate"] = utilizationRate
+
+	saturationRate := 0.0
 	if p.metrics != nil {
-		p.metrics.mu.Lock()
-		p.metrics.totalGets++
-		p.metrics.mu.Unlock()
+		metrics := p.metrics.GetMetrics()
+		totalGets := metrics["total_gets"]
+		totalWaits := metrics["total_waits"]
+		if totalGets > 0 {
+			saturationRate = float64(totalWaits) / float64(totalGets)
+		}
+	}
+	stats["saturation_rate"] = saturationRate
+
+	return stats
+}
+
+func (p *ConnPool) cleanupExpired(now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed || len(p.idleConns) == 0 {
+		return
+	}
+
+	active := p.idleConns[:0]
+	for _, pc := range p.idleConns {
+		// Check if connection is too old
+		if now.Sub(pc.lastUsed) > p.idleTimeout*2 {
+			_ = pc.conn.Close()
+			p.total--
+			if p.metrics != nil {
+				p.metrics.healthCheckFail.Add(1)
+			}
+			continue
+		}
+
+		if healthCheckable, ok := pc.conn.(HealthCheckable); ok {
+			if err := healthCheckable.HealthCheck(); err != nil {
+				_ = pc.conn.Close()
+				p.total--
+				if p.metrics != nil {
+					p.metrics.healthCheckFail.Add(1)
+				}
+				continue
+			}
+		}
+
+		// Keep connection if not expired
+		if now.Sub(pc.lastUsed) < p.idleTimeout {
+			active = append(active, pc)
+		} else {
+			_ = pc.conn.Close()
+			p.total--
+		}
+	}
+	p.idleConns = active
+}
+
+func (p *ConnPool) Get(ctx context.Context) (TransportConn, error) {
+	if p.metrics != nil {
+		p.metrics.totalGets.Add(1)
 	}
 
 	p.mu.Lock()
@@ -257,27 +408,20 @@ func (p *ConnPool) Get(ctx context.Context) (TransportConn, error) {
 
 			if healthChecker, ok := pc.conn.(HealthCheckable); ok {
 				if err := healthChecker.HealthCheck(); err != nil {
-					// Connection is broken, close and try next
 					_ = pc.conn.Close()
 					p.total--
-
-					// METRICS: Record health check failure
 					if p.metrics != nil {
-						p.metrics.mu.Lock()
-						p.metrics.healthCheckFail++
-						p.metrics.mu.Unlock()
+						p.metrics.healthCheckFail.Add(1)
 					}
 					continue
 				}
 			}
 
-			// METRICS: Record connection reuse
 			if p.metrics != nil {
-				p.metrics.mu.Lock()
-				p.metrics.totalReused++
-				p.metrics.mu.Unlock()
+				p.metrics.totalReused.Add(1)
 			}
 
+			p.inUse++           // Track connection in use
 			return pc.conn, nil // Found a healthy connection
 		}
 
@@ -296,74 +440,69 @@ func (p *ConnPool) Get(ctx context.Context) (TransportConn, error) {
 				return nil, err
 			}
 
-			// METRICS: Record new connection
 			if p.metrics != nil {
-				p.metrics.mu.Lock()
-				p.metrics.totalDialed++
-				p.metrics.mu.Unlock()
+				p.metrics.totalDialed.Add(1)
 			}
 
+			p.inUse++ // Track connection in use
 			return conn, nil
 		}
 
-		// 4. Pool exhausted (total == maxConns and no idle connections). Wait.
-		// METRICS: Record wait event
 		if p.metrics != nil {
-			p.metrics.mu.Lock()
-			p.metrics.totalWaits++
-			p.metrics.mu.Unlock()
+			p.metrics.totalWaits.Add(1)
 		}
 
-		// Check context for expiration before waiting
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 
-		// CRITICAL FIX: Use a goroutine to wake up on context cancellation
-		// without this, the goroutine would wait forever even if context is cancelled
-		waitDone := make(chan struct{})
-		go func() {
-			<-ctx.Done()
-			select {
-			case <-waitDone:
-				// Wait finished normally, do nothing
-			default:
-				p.mu.Lock()
-				p.cond.Broadcast() // Wake up all waiters
-				p.mu.Unlock()
+		maxWait := 100 * time.Millisecond
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return nil, ctx.Err()
 			}
-		}()
-
-		// Block the current Goroutine using Cond.Wait() until a Signal or Broadcast is received
-		p.cond.Wait()
-
-		// Signal the context watcher to exit
-		select {
-		case <-waitDone:
-			// Already closed
-		default:
-			close(waitDone)
+			if remaining < maxWait {
+				maxWait = remaining
+			}
 		}
 
-		// Check context again after waking up
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		waitDeadline := time.Now().Add(maxWait)
+		for p.total >= p.maxConns && !p.closed {
+			remaining := time.Until(waitDeadline)
+			if remaining <= 0 {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				return nil, errors.New("connection pool exhausted: max connections reached")
+			}
+
+			p.cond.Wait()
+
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 		}
-		// The loop restarts after being signaled
+
+		if p.closed {
+			return nil, errors.New("connection pool closed")
+		}
+		continue
 	}
 }
 
-// Put returns a connection back to the pool.
 func (p *ConnPool) Put(conn TransportConn) {
-	// METRICS: Record Put call
 	if p.metrics != nil {
-		p.metrics.mu.Lock()
-		p.metrics.totalPuts++
-		p.metrics.mu.Unlock()
+		p.metrics.totalPuts.Add(1)
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Decrement in-use count
+	if p.inUse > 0 {
+		p.inUse--
+	}
 
 	// If the pool is closed or the idle list is full, close the connection and decrement the total count.
 	if p.closed || len(p.idleConns) >= p.maxIdle {
@@ -383,20 +522,19 @@ func (p *ConnPool) Put(conn TransportConn) {
 	p.cond.Signal()
 }
 
-// Invalidate closes a connection and decrements the total count.
-// This should be called instead of Put() when a retrieved connection is found to be broken or unusable.
 func (p *ConnPool) Invalidate(conn TransportConn) {
-	// METRICS: Record Invalidate call
 	if p.metrics != nil {
-		p.metrics.mu.Lock()
-		p.metrics.totalInvalidate++
-		p.metrics.mu.Unlock()
+		p.metrics.totalInvalidate.Add(1)
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	_ = conn.Close()
+	// Decrement in-use count
+	if p.inUse > 0 {
+		p.inUse--
+	}
 	// Decrement total count to free up space for a new connection.
 	if p.total > 0 {
 		p.total--
@@ -413,6 +551,7 @@ func (p *ConnPool) Close() error {
 		return nil
 	}
 	p.closed = true // Signal cleanupLoop to exit
+	globalPoolCleaner.unregister(p)
 
 	// Wake up all waiting Goroutines so they can see p.closed = true and return an error
 	p.cond.Broadcast()
@@ -422,14 +561,32 @@ func (p *ConnPool) Close() error {
 		_ = pc.conn.Close()
 	}
 	p.idleConns = nil
-	p.total = 0
 	p.mu.Unlock()
 
-	// Signal cleanupLoop to exit immediately by closing the channel
-	// This ensures all waiting goroutines receive the signal
-	// Use sync.Once to prevent closing the channel multiple times
-	p.stopOnce.Do(func() {
-		close(p.stopCh)
-	})
+	// Wait briefly for in-use connections to be returned (short timeout to avoid blocking)
+	p.mu.Lock()
+	maxWaitTime := 500 * time.Millisecond // Increased for better cleanup
+	deadline := time.Now().Add(maxWaitTime)
+	iterations := 0
+	maxIterations := 10 // Max 10 iterations (500ms total)
+	for p.inUse > 0 && time.Now().Before(deadline) && iterations < maxIterations {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		p.mu.Unlock()
+		time.Sleep(50 * time.Millisecond) // Poll every 50ms
+		iterations++
+		p.mu.Lock()
+	}
+
+	// Reset counters - remaining connections will be closed when Put/Invalidate is called
+	if p.inUse > 0 {
+		// Some connections still in use, but we've marked pool as closed
+		// They will be cleaned up when Put/Invalidate is called
+		p.inUse = 0
+	}
+	p.mu.Unlock()
+
 	return nil
 }

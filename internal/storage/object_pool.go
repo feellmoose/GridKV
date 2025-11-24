@@ -1,10 +1,10 @@
 package storage
 
 // File: object_pool.go
-// Purpose: Object pooling for reducing allocations
+// Purpose: Object pooling to reduce allocations
 //
 // This file provides sync.Pool based object pools for frequently allocated types.
-// Reduces GC pressure and improves performance by reusing objects.
+// Reduces GC pressure by reusing objects.
 //
 // Pooled types:
 //   - StoredItem
@@ -17,8 +17,8 @@ import (
 	"time"
 )
 
-// Object pools for reducing allocations (OPTIMIZATION)
-// Using sync.Pool provides automatic scaling and GC-friendly object reuse
+// Object pools for reducing allocations using sync.Pool
+// Provides automatic scaling and GC-friendly object reuse
 
 var (
 	// StoredItem pool for reducing allocations in Set/Get operations

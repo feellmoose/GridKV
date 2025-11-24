@@ -76,9 +76,9 @@ type MetricsExporter struct {
 	mu sync.RWMutex
 
 	// Metric storage (all use atomic operations for lock-free updates)
-	counters   map[string]*atomic.Int64 // Counter metrics
-	gauges     map[string]*atomic.Int64 // Gauge metrics
-	histograms map[string]*Histogram    // Histogram metrics
+	counters map[string]*atomic.Int64 // Counter metrics
+	gauges   map[string]*atomic.Int64 // Gauge metrics
+	// histograms map[string]*Histogram    // Histogram metrics (reserved for future use)
 
 	// Metadata (protected by mu, modified only during registration)
 	labels map[string]map[string]string // metric name -> label key-values
@@ -117,9 +117,9 @@ type ExportFunc func(metrics []Metric) error
 // NewMetricsExporter creates a new OTLP-compatible metrics exporter
 func NewMetricsExporter(namespace string, exportFunc ExportFunc) *MetricsExporter {
 	return &MetricsExporter{
-		counters:   make(map[string]*atomic.Int64),
-		gauges:     make(map[string]*atomic.Int64),
-		histograms: make(map[string]*Histogram),
+		counters: make(map[string]*atomic.Int64),
+		gauges:   make(map[string]*atomic.Int64),
+		// histograms: make(map[string]*Histogram), // Reserved for future use
 		labels:     make(map[string]map[string]string),
 		help:       make(map[string]string),
 		units:      make(map[string]string),
@@ -265,7 +265,9 @@ func (e *MetricsExporter) Export(ctx context.Context) error {
 	return nil
 }
 
-// Histogram tracks value distribution
+// Histogram tracks value distribution.
+// NOTE: Currently unused but reserved for future latency percentile improvements.
+// See METRICS_EVALUATION.md for details.
 type Histogram struct {
 	mu     sync.RWMutex
 	count  int64

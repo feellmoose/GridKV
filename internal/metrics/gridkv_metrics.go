@@ -6,7 +6,7 @@
 //
 // Features:
 //   - Zero-allocation metrics collection (atomic operations)
-//   - 27 pre-defined GridKV metrics
+//   - 23 pre-defined GridKV metrics
 //   - Compatible with Prometheus, Grafana, Datadog, New Relic, etc.
 //   - <1% performance overhead
 //
@@ -29,15 +29,16 @@ import (
 
 // GridKVMetrics provides pre-defined metrics for GridKV monitoring.
 //
-// Contains 27 standard metrics across 7 categories:
+// Contains 26 core metrics across 9 categories:
 //   - Cluster health (4 metrics)
-//   - Request statistics (3 metrics)
+//   - Request statistics (4 metrics)
 //   - Operation counters (3 metrics)
 //   - Replication status (3 metrics)
-//   - Gossip protocol (3 metrics)
-//   - Network I/O (3 metrics)
+//   - Gossip protocol (2 metrics)
+//   - Network I/O (2 metrics)
 //   - Storage stats (2 metrics)
 //   - Performance (3 metrics)
+//   - Pipeline health (3 metrics)
 //
 // All metrics use atomic operations for zero-allocation updates.
 //
@@ -83,7 +84,7 @@ type GridKVMetrics struct {
 func NewGridKVMetrics(exportFunc ExportFunc) *GridKVMetrics {
 	exporter := NewMetricsExporter("gridkv", exportFunc)
 
-	// Register all 27 GridKV metrics
+	// Register all 26 GridKV metrics
 	registerGridKVMetrics(exporter)
 
 	return &GridKVMetrics{
@@ -91,47 +92,57 @@ func NewGridKVMetrics(exportFunc ExportFunc) *GridKVMetrics {
 	}
 }
 
-// registerGridKVMetrics registers all standard GridKV metrics
+// registerGridKVMetrics registers core GridKV metrics (optimized for key indicators)
 func registerGridKVMetrics(e *MetricsExporter) {
-	// Cluster metrics
+	// Core cluster health (4 metrics)
 	e.RegisterGauge("cluster_nodes_total", "Total number of nodes in cluster", "nodes", nil)
 	e.RegisterGauge("cluster_nodes_alive", "Number of alive nodes", "nodes", nil)
 	e.RegisterGauge("cluster_nodes_suspect", "Number of suspect nodes", "nodes", nil)
 	e.RegisterGauge("cluster_nodes_dead", "Number of dead nodes", "nodes", nil)
 
-	// Request metrics
+	// Core request metrics (4 metrics)
 	e.RegisterCounter("requests_total", "Total number of requests", "requests", nil)
 	e.RegisterCounter("requests_success", "Successful requests", "requests", nil)
 	e.RegisterCounter("requests_errors", "Failed requests", "requests", nil)
+	e.RegisterCounter("requests_timeout", "Request timeouts", "requests", nil)
 
-	// Operation metrics
+	// Core operation metrics (3 metrics)
 	e.RegisterCounter("operations_set", "Set operations", "operations", nil)
 	e.RegisterCounter("operations_get", "Get operations", "operations", nil)
 	e.RegisterCounter("operations_delete", "Delete operations", "operations", nil)
 
-	// Replication metrics
+	// Core replication metrics (3 metrics)
 	e.RegisterCounter("replication_total", "Total replications", "replications", nil)
 	e.RegisterCounter("replication_success", "Successful replications", "replications", nil)
 	e.RegisterCounter("replication_failures", "Failed replications", "replications", nil)
 
-	// Gossip metrics
+	// Core gossip metrics (2 metrics)
 	e.RegisterCounter("gossip_messages_sent", "Gossip messages sent", "messages", nil)
 	e.RegisterCounter("gossip_messages_received", "Gossip messages received", "messages", nil)
-	e.RegisterCounter("gossip_messages_dropped", "Dropped gossip messages", "messages", nil)
 
-	// Network metrics
+	// Core network metrics (2 metrics)
 	e.RegisterCounter("network_bytes_sent", "Network bytes sent", "bytes", nil)
 	e.RegisterCounter("network_bytes_received", "Network bytes received", "bytes", nil)
-	e.RegisterCounter("network_errors", "Network errors", "errors", nil)
 
-	// Storage metrics
+	// Core storage metrics (2 metrics)
 	e.RegisterGauge("storage_keys_total", "Total keys in storage", "keys", nil)
 	e.RegisterGauge("storage_size_bytes", "Storage size in bytes", "bytes", nil)
 
-	// Performance metrics
-	e.RegisterGauge("latency_p50_ns", "P50 latency", "nanoseconds", nil)
-	e.RegisterGauge("latency_p95_ns", "P95 latency", "nanoseconds", nil)
-	e.RegisterGauge("latency_p99_ns", "P99 latency", "nanoseconds", nil)
+	// Core performance metrics (3 metrics)
+	e.RegisterGauge("latency_p50_ns", "P50 latency in nanoseconds", "nanoseconds", nil)
+	e.RegisterGauge("latency_p95_ns", "P95 latency in nanoseconds", "nanoseconds", nil)
+	e.RegisterGauge("latency_p99_ns", "P99 latency in nanoseconds", "nanoseconds", nil)
+
+	// Pipeline metrics (3 metrics - critical for replication health)
+	e.RegisterCounter("pipeline_operations_total", "Total operations enqueued to pipelines", "operations", nil)
+	e.RegisterCounter("pipeline_operations_dropped", "Operations dropped due to pipeline saturation", "operations", nil)
+	e.RegisterGauge("pipeline_active_count", "Number of active replication pipelines", "pipelines", nil)
+
+	// Read batch metrics (4 metrics - optimized from 10)
+	e.RegisterCounter("read_batch_requests_total", "Total read requests processed in batches", "requests", nil)
+	e.RegisterCounter("read_batch_batches_sent", "Total batch read requests sent", "batches", nil)
+	e.RegisterGauge("read_batch_pending_requests", "Current pending read requests in batches", "requests", nil)
+	e.RegisterCounter("read_batch_errors", "Batch read processing errors", "errors", nil)
 }
 
 // Cluster Metrics (Gauges)
@@ -163,6 +174,20 @@ func (m *GridKVMetrics) SetClusterNodesAlive(count int64) {
 	m.exporter.SetGauge("cluster_nodes_alive", count)
 }
 
+// SetClusterNodesSuspect updates the number of suspect nodes.
+//
+//go:inline
+func (m *GridKVMetrics) SetClusterNodesSuspect(count int64) {
+	m.exporter.SetGauge("cluster_nodes_suspect", count)
+}
+
+// SetClusterNodesDead updates the number of dead nodes.
+//
+//go:inline
+func (m *GridKVMetrics) SetClusterNodesDead(count int64) {
+	m.exporter.SetGauge("cluster_nodes_dead", count)
+}
+
 // Request Metrics (Counters)
 // Track total request volume and success/error rates.
 
@@ -190,7 +215,7 @@ func (m *GridKVMetrics) IncrementRequestsSuccess() {
 
 // IncrementRequestsErrors increments the failed request counter.
 //
-// Call this when request fails (timeout, quorum not met, etc.)
+// Call this when request fails (timeout, replication failure, etc.)
 //
 // Alert if: rate(requests_errors[5m]) / rate(requests_total[5m]) > 0.05 (5% error rate)
 //
@@ -199,6 +224,17 @@ func (m *GridKVMetrics) IncrementRequestsSuccess() {
 //go:inline
 func (m *GridKVMetrics) IncrementRequestsErrors() {
 	m.exporter.IncrementCounter("requests_errors")
+}
+
+// IncrementRequestsTimeout increments the request timeout counter.
+//
+// Call this when request times out.
+//
+// Performance: ~10ns (atomic increment)
+//
+//go:inline
+func (m *GridKVMetrics) IncrementRequestsTimeout() {
+	m.exporter.IncrementCounter("requests_timeout")
 }
 
 // Operation Metrics
@@ -247,6 +283,22 @@ func (m *GridKVMetrics) IncrementGossipReceived() {
 	m.exporter.IncrementCounter("gossip_messages_received")
 }
 
+// Network Metrics
+
+// AddNetworkBytesSent adds bytes to the network bytes sent counter.
+//
+//go:inline
+func (m *GridKVMetrics) AddNetworkBytesSent(bytes int64) {
+	m.exporter.AddCounter("network_bytes_sent", bytes)
+}
+
+// AddNetworkBytesReceived adds bytes to the network bytes received counter.
+//
+//go:inline
+func (m *GridKVMetrics) AddNetworkBytesReceived(bytes int64) {
+	m.exporter.AddCounter("network_bytes_received", bytes)
+}
+
 // Storage Metrics
 
 func (m *GridKVMetrics) SetStorageKeys(count int64) {
@@ -269,6 +321,59 @@ func (m *GridKVMetrics) SetLatencyP95(nanos int64) {
 
 func (m *GridKVMetrics) SetLatencyP99(nanos int64) {
 	m.exporter.SetGauge("latency_p99_ns", nanos)
+}
+
+// Pipeline Metrics (critical for replication health)
+
+// IncrementPipelineOperationsTotal increments total operations enqueued.
+//
+//go:inline
+func (m *GridKVMetrics) IncrementPipelineOperationsTotal() {
+	m.exporter.IncrementCounter("pipeline_operations_total")
+}
+
+// IncrementPipelineOperationsDropped increments dropped operations.
+//
+//go:inline
+func (m *GridKVMetrics) IncrementPipelineOperationsDropped() {
+	m.exporter.IncrementCounter("pipeline_operations_dropped")
+}
+
+// SetPipelineActiveCount sets the number of active pipelines.
+//
+//go:inline
+func (m *GridKVMetrics) SetPipelineActiveCount(count int64) {
+	m.exporter.SetGauge("pipeline_active_count", count)
+}
+
+// Read Batch Processing Metrics (optimized)
+
+// AddReadBatchRequestsTotal adds a value to the total read requests processed in batches.
+//
+//go:inline
+func (m *GridKVMetrics) AddReadBatchRequestsTotal(value int64) {
+	m.exporter.AddCounter("read_batch_requests_total", value)
+}
+
+// IncrementReadBatchBatchesSent increments the total batch read requests sent.
+//
+//go:inline
+func (m *GridKVMetrics) IncrementReadBatchBatchesSent() {
+	m.exporter.IncrementCounter("read_batch_batches_sent")
+}
+
+// IncrementReadBatchErrors increments batch read processing errors.
+//
+//go:inline
+func (m *GridKVMetrics) IncrementReadBatchErrors() {
+	m.exporter.IncrementCounter("read_batch_errors")
+}
+
+// SetReadBatchPendingRequests sets the current pending read requests in batches.
+//
+//go:inline
+func (m *GridKVMetrics) SetReadBatchPendingRequests(count int64) {
+	m.exporter.SetGauge("read_batch_pending_requests", count)
 }
 
 // Export collects all metrics and sends them to the configured export function.

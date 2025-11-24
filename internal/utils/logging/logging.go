@@ -1,3 +1,16 @@
+// Package logging provides structured logging for GridKV.
+//
+// This package provides a logging interface built on zerolog for high-performance
+// structured logging. Supports both text and JSON formats with zero-allocation
+// debug logging paths.
+//
+// Features:
+//   - Structured logging with key-value pairs
+//   - Multiple log levels (debug, info, warn, error)
+//   - Zero-allocation debug paths when disabled
+//   - JSON and text output formats
+//
+// Thread-safety: All logging functions are safe for concurrent access.
 package logging
 
 import (
@@ -100,7 +113,7 @@ func NewLogger(opts *LogOptions) *Logger {
 //
 //go:inline
 func (l Logger) LogDebug(msg string, keyValues ...interface{}) {
-	// CRITICAL OPTIMIZATION: Early return if debug not enabled
+	// Early return if debug not enabled (zero-cost when disabled)
 	// This is completely free - just a level comparison
 	if !l.logger.Debug().Enabled() {
 		return

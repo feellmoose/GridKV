@@ -36,6 +36,8 @@ type gradualMigrationManager struct {
 	batchInterval time.Duration // interval between batches
 	maxConcurrent int           // max concurrent migrations
 	activeCount   atomic.Int32  // current active migration count
+	stopCh        chan struct{} // stop signal for migrations
+	stopOnce      sync.Once     // ensure stopCh is only closed once
 }
 
 // newGradualMigrationManager creates a new gradual migration manager
@@ -52,6 +54,7 @@ func newGradualMigrationManager(gm *GossipManager) *gradualMigrationManager {
 		batchSize:     50,                     // 50 keys per batch
 		batchInterval: 500 * time.Millisecond, // 500ms between batches
 		maxConcurrent: 3,                      // max 3 concurrent migrations
+		stopCh:        make(chan struct{}),
 	}
 }
 
@@ -90,7 +93,7 @@ func (gmm *gradualMigrationManager) startGradualMigration(nodeID string, isRemov
 	go gmm.runGradualMigration(nodeID, isRemoval, task)
 }
 
-// runGradualMigration performs gradual migration with rate limiting
+// runGradualMigration performs gradual migration
 func (gmm *gradualMigrationManager) runGradualMigration(nodeID string, isRemoval bool, task *migrationTask) {
 	defer func() {
 		gmm.activeCount.Add(-1)
@@ -118,19 +121,35 @@ func (gmm *gradualMigrationManager) runGradualMigration(nodeID string, isRemoval
 	task.totalKeys = int64(len(affectedKeys))
 	logging.Info("Starting gradual migration", "node", nodeID, "keys", len(affectedKeys), "isRemoval", isRemoval)
 
-	// Process keys in small batches with rate limiting
+	// Process keys in small batches
 	for i := 0; i < len(affectedKeys); i += gmm.batchSize {
+		// Check for stop signal
+		select {
+		case <-gmm.stopCh:
+			logging.Debug("Migration stopped", "node", nodeID)
+			return
+		default:
+		}
+
 		// Check if migration should pause (e.g., high load)
 		if task.status != "running" {
-			time.Sleep(gmm.batchInterval * 2) // Wait longer if paused
+			select {
+			case <-gmm.stopCh:
+				return
+			case <-time.After(gmm.batchInterval * 2):
+			}
 			continue
 		}
 
-		// Rate limiting: wait if needed
+		// Wait if needed
 		elapsed := time.Since(task.lastBatchTime)
 		expectedInterval := time.Duration(gmm.batchSize) * time.Second / time.Duration(gmm.migrationRate)
 		if elapsed < expectedInterval {
-			time.Sleep(expectedInterval - elapsed)
+			select {
+			case <-gmm.stopCh:
+				return
+			case <-time.After(expectedInterval - elapsed):
+			}
 		}
 
 		end := i + gmm.batchSize
@@ -159,7 +178,11 @@ func (gmm *gradualMigrationManager) runGradualMigration(nodeID string, isRemoval
 		}
 
 		// Small delay between batches
-		time.Sleep(gmm.batchInterval)
+		select {
+		case <-gmm.stopCh:
+			return
+		case <-time.After(gmm.batchInterval):
+		}
 	}
 
 	logging.Info("Gradual migration completed", "node", nodeID, "migrated", task.migratedKeys.Load(), "fetched", task.fetchedKeys.Load())
@@ -186,7 +209,7 @@ func (gmm *gradualMigrationManager) filterAffectedKeysForMigration(allKeys []str
 	// For addition: keys that should now be on the new node need to be fetched
 	for _, key := range allKeys {
 		// Get current replica list (after hashring change)
-		replicas := gmm.gm.hashRing.GetN(key, gmm.gm.replicaCount)
+		replicas := gmm.gm.getReplicas(key, gmm.gm.replicaCount)
 
 		if isRemoval {
 			// Check if this key needs migration (was on removed node, now on different node)
@@ -209,7 +232,7 @@ func (gmm *gradualMigrationManager) filterAffectedKeysForMigration(allKeys []str
 			}
 		} else {
 			// For addition: check if new node should have this key
-			// This is less critical, handled by normal replication
+			// Handled by normal replication
 			// But we can proactively fetch if needed
 		}
 	}
@@ -270,4 +293,18 @@ func (gmm *gradualMigrationManager) getMigrationStatus(nodeID string) (progress 
 	}
 
 	return 0, "not found"
+}
+
+// stop stops all active migrations and waits for them to complete
+func (gmm *gradualMigrationManager) stop() {
+	gmm.stopOnce.Do(func() {
+		close(gmm.stopCh)
+	})
+
+	// Wait for active migrations to complete (with timeout)
+	maxWaitTime := 2 * time.Second
+	deadline := time.Now().Add(maxWaitTime)
+	for gmm.activeCount.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
 }

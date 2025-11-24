@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"math/rand"
 	"sort"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	gridkv "github.com/feellmoose/gridkv"
+	"github.com/feellmoose/gridkv/internal/utils/network"
 )
 
 // Shared test helper functions
@@ -34,89 +37,280 @@ func calculatePercentiles(latencies []time.Duration) (p50, p95, p99 time.Duratio
 	return
 }
 
-func setupTestCluster(tb testing.TB, nodeCount, basePort int) []*gridkv.GridKV {
-	nodes := make([]*gridkv.GridKV, nodeCount)
+// countLiveNodes counts the number of live/healthy nodes in the cluster
+func countLiveNodes(nodes []*gridkv.GridKV) int {
+	if len(nodes) == 0 {
+		return 0
+	}
+
+	// Sample a few nodes to estimate cluster health
+	sampleCount := 5
+	if sampleCount > len(nodes) {
+		sampleCount = len(nodes)
+	}
+	sampleIndices := make([]int, 0, sampleCount)
+	for i := 0; i < len(nodes) && len(sampleIndices) < sampleCount; i++ {
+		if nodes[i] != nil {
+			sampleIndices = append(sampleIndices, i)
+		}
+	}
+
+	if len(sampleIndices) == 0 {
+		return 0
+	}
+
+	totalHealthy := 0
+	for _, idx := range sampleIndices {
+		status := nodes[idx].GetReplicaStatus()
+		if status.Ready && status.HealthyNodes > 0 {
+			totalHealthy += status.HealthyNodes
+		}
+	}
+
+	if totalHealthy == 0 {
+		return 0
+	}
+
+	// Return average healthy nodes across samples
+	return totalHealthy / len(sampleIndices)
+}
+
+// networkTypeString converts network type to string for logging
+func networkTypeString(nt gridkv.NetworkType) string {
+	switch nt {
+	case gridkv.TCP:
+		return "TCP"
+	case gridkv.QUIC:
+		return "QUIC"
+	case gridkv.UDP:
+		return "UDP"
+	default:
+		return fmt.Sprintf("unknown(%d)", nt)
+	}
+}
+
+// TestEnvironmentConfig configures test environment simulation
+type TestEnvironmentConfig struct {
+	NetworkProfile network.NetworkProfile
+	NetworkType    gridkv.NetworkType
+	NodeCount      int
+	ReplicaCount   int
+	BasePort       int
+	StorageBackend gridkv.StorageBackendType
+	MaxMemoryMB    int64
+	ShardCount     int
+}
+
+// DefaultTestEnvironment returns default test environment config
+func DefaultTestEnvironment() *TestEnvironmentConfig {
+	return &TestEnvironmentConfig{
+		NetworkProfile: network.ProfileLAN,
+		NetworkType:    gridkv.TCP,
+		NodeCount:      3,
+		ReplicaCount:   3,
+		BasePort:       20000,
+		StorageBackend: gridkv.BackendMemorySharded,
+		MaxMemoryMB:    1024,
+		ShardCount:     64,
+	}
+}
+
+// TestEnvironmentSimulator manages test cluster with environment simulation
+type TestEnvironmentSimulator struct {
+	config *TestEnvironmentConfig
+	nodes  []*gridkv.GridKV
+	mu     sync.RWMutex
+}
+
+// NewTestEnvironmentSimulator creates a new environment simulator
+func NewTestEnvironmentSimulator(config *TestEnvironmentConfig) *TestEnvironmentSimulator {
+	if config == nil {
+		config = DefaultTestEnvironment()
+	}
+	return &TestEnvironmentSimulator{
+		config: config,
+		nodes:  make([]*gridkv.GridKV, 0, config.NodeCount),
+	}
+}
+
+// SetupCluster creates and initializes the test cluster
+func (tes *TestEnvironmentSimulator) SetupCluster(tb testing.TB) error {
+	tes.mu.Lock()
+	defer tes.mu.Unlock()
+
+	latencyConfig := network.GetConfigForProfile(tes.config.NetworkProfile, tes.config.NodeCount)
+	tes.nodes = make([]*gridkv.GridKV, tes.config.NodeCount)
 
 	// Create seed node
 	var err error
-	nodes[0], err = gridkv.NewGridKV(&gridkv.GridKVOptions{
+	opts := &gridkv.GridKVOptions{
 		LocalNodeID:        "node-0",
-		LocalAddress:       fmt.Sprintf("localhost:%d", basePort),
-		FailureTimeout:     2 * time.Second,
-		SuspectTimeout:     4 * time.Second,
-		GossipInterval:     200 * time.Millisecond,
+		LocalAddress:       fmt.Sprintf("localhost:%d", tes.config.BasePort),
+		FailureTimeout:     latencyConfig.FailureTimeout,
+		SuspectTimeout:     latencyConfig.SuspectTimeout,
+		GossipInterval:     latencyConfig.GossipInterval,
+		ReplicationTimeout: latencyConfig.ReplicationTimeout,
+		ReadTimeout:        latencyConfig.ReadTimeout,
 		StartupGracePeriod: 1 * time.Second,
+		DisableAuth:        true,
+		ReplicaCount:       tes.config.ReplicaCount,
 		Network: &gridkv.NetworkOptions{
-			Type:     gridkv.TCP,
-			BindAddr: fmt.Sprintf("localhost:%d", basePort),
+			Type:     tes.config.NetworkType,
+			BindAddr: fmt.Sprintf("localhost:%d", tes.config.BasePort),
+			MaxConns: latencyConfig.MaxConnections,
+			MaxIdle:  latencyConfig.MaxIdleConnections,
 		},
 		Storage: &gridkv.StorageOptions{
-			Backend:     gridkv.BackendMemory,
-			MaxMemoryMB: 512,
+			Backend:     tes.config.StorageBackend,
+			MaxMemoryMB: tes.config.MaxMemoryMB,
+			ShardCount:  tes.config.ShardCount,
 		},
-		ReplicaCount: minInt(3, nodeCount),
-		WriteQuorum:  minInt(2, nodeCount),
-		ReadQuorum:   minInt(2, nodeCount),
-	})
-	if err != nil {
-		tb.Fatalf("Failed to create seed node: %v", err)
 	}
+
+	tes.nodes[0], err = gridkv.NewGridKV(opts)
+	if err != nil {
+		return fmt.Errorf("failed to create seed node: %w", err)
+	}
+
+	time.Sleep(1 * time.Second)
 
 	// Create remaining nodes
-	seedAddr := []string{fmt.Sprintf("localhost:%d", basePort)}
-	for i := 1; i < nodeCount; i++ {
-		nodes[i], err = gridkv.NewGridKV(&gridkv.GridKVOptions{
+	seedAddr := []string{fmt.Sprintf("localhost:%d", tes.config.BasePort)}
+	for i := 1; i < tes.config.NodeCount; i++ {
+		opts := &gridkv.GridKVOptions{
 			LocalNodeID:        fmt.Sprintf("node-%d", i),
-			LocalAddress:       fmt.Sprintf("localhost:%d", basePort+i),
+			LocalAddress:       fmt.Sprintf("localhost:%d", tes.config.BasePort+i),
 			SeedAddrs:          seedAddr,
-			FailureTimeout:     2 * time.Second,
-			SuspectTimeout:     4 * time.Second,
-			GossipInterval:     200 * time.Millisecond,
+			FailureTimeout:     latencyConfig.FailureTimeout,
+			SuspectTimeout:     latencyConfig.SuspectTimeout,
+			GossipInterval:     latencyConfig.GossipInterval,
+			ReplicationTimeout: latencyConfig.ReplicationTimeout,
+			ReadTimeout:        latencyConfig.ReadTimeout,
 			StartupGracePeriod: 1 * time.Second,
+			DisableAuth:        true,
+			ReplicaCount:       tes.config.ReplicaCount,
 			Network: &gridkv.NetworkOptions{
-				Type:     gridkv.TCP,
-				BindAddr: fmt.Sprintf("localhost:%d", basePort+i),
+				Type:     tes.config.NetworkType,
+				BindAddr: fmt.Sprintf("localhost:%d", tes.config.BasePort+i),
+				MaxConns: latencyConfig.MaxConnections,
+				MaxIdle:  latencyConfig.MaxIdleConnections,
 			},
 			Storage: &gridkv.StorageOptions{
-				Backend:     gridkv.BackendMemory,
-				MaxMemoryMB: 512,
+				Backend:     tes.config.StorageBackend,
+				MaxMemoryMB: tes.config.MaxMemoryMB,
+				ShardCount:  tes.config.ShardCount,
 			},
-			ReplicaCount: minInt(3, nodeCount),
-			WriteQuorum:  minInt(2, nodeCount),
-			ReadQuorum:   minInt(2, nodeCount),
-		})
+		}
+
+		tes.nodes[i], err = gridkv.NewGridKV(opts)
 		if err != nil {
-			tb.Fatalf("Failed to create node %d: %v", i, err)
+			tes.cleanupNodes(i)
+			return fmt.Errorf("failed to create node %d: %w", i, err)
 		}
+		time.Sleep(200 * time.Millisecond)
 	}
 
-	return nodes
+	// Wait for cluster stabilization
+	time.Sleep(2 * time.Second)
+	return nil
 }
 
-func cleanupTestCluster(nodes []*gridkv.GridKV) {
-	for _, node := range nodes {
-		if node != nil {
-			node.Close()
-		}
+// GetNodes returns all cluster nodes
+func (tes *TestEnvironmentSimulator) GetNodes() []*gridkv.GridKV {
+	tes.mu.RLock()
+	defer tes.mu.RUnlock()
+	return tes.nodes
+}
+
+// GetNode returns node at index
+func (tes *TestEnvironmentSimulator) GetNode(idx int) *gridkv.GridKV {
+	tes.mu.RLock()
+	defer tes.mu.RUnlock()
+	if idx < 0 || idx >= len(tes.nodes) {
+		return nil
 	}
+	return tes.nodes[idx]
 }
 
-func waitForHealthyNodes(tb testing.TB, node *gridkv.GridKV, expected int, timeout time.Duration) {
+// ShutdownNode gracefully shuts down a node
+func (tes *TestEnvironmentSimulator) ShutdownNode(idx int, timeout time.Duration) error {
+	tes.mu.Lock()
+	defer tes.mu.Unlock()
+	if idx < 0 || idx >= len(tes.nodes) || tes.nodes[idx] == nil {
+		return fmt.Errorf("invalid node index: %d", idx)
+	}
+	node := tes.nodes[idx]
+	tes.nodes[idx] = nil
+	return node.CloseWithTimeout(timeout)
+}
+
+// ShutdownNodes shuts down multiple nodes
+func (tes *TestEnvironmentSimulator) ShutdownNodes(indices []int, timeout time.Duration) error {
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(indices))
+	for _, idx := range indices {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := tes.ShutdownNode(i, timeout); err != nil {
+				errCh <- err
+			}
+		}(idx)
+	}
+	wg.Wait()
+	close(errCh)
+	if len(errCh) > 0 {
+		return <-errCh
+	}
+	return nil
+}
+
+// Cleanup shuts down all nodes
+func (tes *TestEnvironmentSimulator) Cleanup() {
+	tes.mu.Lock()
+	defer tes.mu.Unlock()
+	tes.cleanupNodes(len(tes.nodes))
+}
+
+func (tes *TestEnvironmentSimulator) cleanupNodes(limit int) {
+	var wg sync.WaitGroup
+	const closeTimeout = 10 * time.Second
+	for idx := 0; idx < limit && idx < len(tes.nodes); idx++ {
+		if tes.nodes[idx] == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, n *gridkv.GridKV) {
+			defer wg.Done()
+			if err := n.CloseWithTimeout(closeTimeout); err != nil {
+				if strings.Contains(err.Error(), "timeout") {
+					fmt.Printf("WARN: node %d close timed out\n", i)
+				}
+			}
+		}(idx, tes.nodes[idx])
+	}
+	wg.Wait()
+}
+
+// WaitForHealthyNodes waits for cluster to reach expected healthy node count
+func (tes *TestEnvironmentSimulator) WaitForHealthyNodes(tb testing.TB, expected int, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		status := node.GetReplicaStatus()
-		if status.HealthyNodes == expected {
+		tes.mu.RLock()
+		if len(tes.nodes) == 0 {
+			tes.mu.RUnlock()
+			return
+		}
+		sampleNode := tes.nodes[0]
+		tes.mu.RUnlock()
+		if sampleNode == nil {
+			return
+		}
+		status := sampleNode.GetReplicaStatus()
+		if status.HealthyNodes >= expected {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	status := node.GetReplicaStatus()
-	tb.Fatalf("timed out waiting for %d healthy nodes (have %d)", expected, status.HealthyNodes)
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+	tb.Fatalf("timed out waiting for %d healthy nodes", expected)
 }

@@ -1,3 +1,17 @@
+// Package hlc implements Hybrid Logical Clock (HLC) for distributed timestamps.
+//
+// HLC combines physical time with a logical counter to ensure causally ordered
+// timestamps across distributed nodes. Used for conflict resolution in GridKV.
+//
+// Format: <nodeID>:<unixnano>:<counter>
+//
+// Features:
+//   - Causality preservation: If A → B, then HLC(A) < HLC(B)
+//   - Bounded drift: Stays within ε of physical time
+//   - Monotonic: Never decreases, even if system clock goes backwards
+//   - Performance: Cached timestamps reduce allocations by 70-90%
+//
+// Thread-safety: All HLC methods are safe for concurrent access.
 package hlc
 
 import (
@@ -22,10 +36,10 @@ type HLC struct {
 	counter uint64
 	nodeID  string
 
-	// OPTIMIZATION: Pre-allocate buffer for string formatting
+	// Pre-allocated buffer for string formatting
 	buf []byte
 
-	// OPTIMIZATION: Cache last formatted timestamp to reduce allocations
+	// Cache last formatted timestamp to reduce allocations
 	cachedTS     string
 	cacheValid   bool
 	lastCacheTS  int64
@@ -68,12 +82,12 @@ func (h *HLC) Now() string {
 		h.cacheValid = false // Invalidate cache on counter increment
 	}
 
-	// OPTIMIZATION: Return cached string if still valid (reduces allocations by 70-90%)
+	// Return cached string if still valid (reduces allocations by 70-90%)
 	if h.cacheValid && h.lastTs == h.lastCacheTS && h.counter == h.lastCacheCtr {
 		return h.cachedTS
 	}
 
-	// OPTIMIZATION: Reuse buffer to reduce allocations
+	// Reuse buffer to reduce allocations
 	h.buf = h.buf[:0]
 	h.buf = append(h.buf, h.nodeID...)
 	h.buf = append(h.buf, ':')

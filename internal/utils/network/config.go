@@ -74,18 +74,39 @@ func GetConfigForLatency(avgRTT time.Duration, clusterSize int) *LatencyConfig {
 		config.ReadTimeout = 500 * time.Millisecond
 	}
 
-	// 4. Connection pool sizing
-	// MaxConnections: cluster_size × 4 (allows multiple concurrent operations per node)
-	// MaxIdle: cluster_size × 2 (keeps warm connections to all nodes)
-	config.MaxConnections = clusterSize * 4
-	config.MaxIdleConnections = clusterSize * 2
+	// 4. Connection pool sizing - dynamically scaled for large clusters
+	// For small/medium clusters: cluster_size × 4 (allows multiple concurrent operations per node)
+	// For large clusters (50-100 nodes): more aggressive scaling to handle connection storms
+	switch {
+	case clusterSize <= 10:
+		// Small clusters: standard scaling
+		config.MaxConnections = clusterSize * 4
+		config.MaxIdleConnections = clusterSize * 2
+	case clusterSize <= 30:
+		// Medium clusters: moderate scaling
+		config.MaxConnections = clusterSize * 5
+		config.MaxIdleConnections = clusterSize * 3
+	case clusterSize <= 50:
+		// Large clusters: higher scaling for connection volume
+		config.MaxConnections = clusterSize * 6
+		config.MaxIdleConnections = clusterSize * 4
+	case clusterSize <= 100:
+		// Very large clusters: aggressive scaling (50-100 nodes)
+		config.MaxConnections = clusterSize * 8
+		config.MaxIdleConnections = clusterSize * 6
+	default:
+		// Huge clusters (>100 nodes): maximum practical scaling
+		config.MaxConnections = clusterSize * 10
+		config.MaxIdleConnections = clusterSize * 8
+	}
 
 	// Cap maximum connections to prevent resource exhaustion
-	if config.MaxConnections > 1000 {
-		config.MaxConnections = 1000
+	// Higher caps for large clusters to handle message volume
+	if config.MaxConnections > 2000 {
+		config.MaxConnections = 2000 // Increased from 1000 for 50-100 node clusters
 	}
-	if config.MaxIdleConnections > 200 {
-		config.MaxIdleConnections = 200
+	if config.MaxIdleConnections > 500 {
+		config.MaxIdleConnections = 500 // Increased from 200 for large clusters
 	}
 
 	return config
@@ -204,54 +225,4 @@ func EstimateGossipLoad(clusterSize int, gossipInterval time.Duration) int {
 	roundsPerSecond := float64(time.Second) / float64(gossipInterval)
 
 	return int(float64(messagesPerRound) * roundsPerSecond)
-}
-
-// RecommendQuorumSettings recommends read/write quorum settings based on
-// consistency requirements and cluster size.
-type QuorumSettings struct {
-	ReplicaCount int
-	WriteQuorum  int
-	ReadQuorum   int
-	Description  string
-}
-
-// GetQuorumSettings returns recommended quorum settings for different scenarios
-func GetQuorumSettings(scenario string, clusterSize int) *QuorumSettings {
-	replicaCount := 3
-	if clusterSize < 3 {
-		replicaCount = clusterSize
-	}
-
-	switch scenario {
-	case "strong":
-		// Strong consistency: R + W > N
-		return &QuorumSettings{
-			ReplicaCount: replicaCount,
-			WriteQuorum:  2,
-			ReadQuorum:   2,
-			Description:  "Strong consistency (R+W > N)",
-		}
-
-	case "balanced":
-		// Balanced: R + W = N
-		return &QuorumSettings{
-			ReplicaCount: replicaCount,
-			WriteQuorum:  2,
-			ReadQuorum:   1,
-			Description:  "Balanced consistency (R+W = N)",
-		}
-
-	case "eventual":
-		// Eventual consistency: R + W < N (maximum performance)
-		return &QuorumSettings{
-			ReplicaCount: replicaCount,
-			WriteQuorum:  1,
-			ReadQuorum:   1,
-			Description:  "Eventual consistency (R+W < N, fastest)",
-		}
-
-	default:
-		// Default to strong consistency
-		return GetQuorumSettings("strong", clusterSize)
-	}
 }

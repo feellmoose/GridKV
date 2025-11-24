@@ -1,3 +1,14 @@
+// Package crypto provides cryptographic utilities for GridKV message signing.
+//
+// This package provides Ed25519-based message signing and verification for secure
+// cluster communication. All messages between nodes are signed to prevent tampering.
+//
+// Features:
+//   - Ed25519 key pair generation
+//   - Message signing and verification
+//   - Zero external dependencies (uses standard library)
+//
+// Thread-safety: All functions are safe for concurrent access.
 package crypto
 
 import (

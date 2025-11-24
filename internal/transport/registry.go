@@ -22,13 +22,7 @@ func RegisterTransport(transportType string, factory TransportFactory) {
 func NewTransport(transportType string) (Transport, error) {
 	factory, ok := transportRegistry.Load(transportType)
 	if !ok {
-		// Provide descriptive error for non-compiled transports
-		switch transportType {
-		case "gnet":
-			return nil, fmt.Errorf("gnet transport not available. Compile with default tags or without -tags nognet")
-		default:
-			return nil, fmt.Errorf("unsupported or uncompiled transport: %s", transportType)
-		}
+		return nil, fmt.Errorf("unsupported or uncompiled transport: %s", transportType)
 	}
 
 	return factory.(TransportFactory)()
@@ -42,4 +36,23 @@ func ListAvailableTransports() []string {
 		return true
 	})
 	return transports
+}
+
+func init() {
+	// Auto-register TCP transport (default, always available)
+	RegisterTransport("tcp", func() (Transport, error) {
+		return NewTCPTransport(), nil
+	})
+
+	// Auto-register QUIC transport
+	RegisterTransport("quic", func() (Transport, error) {
+		config := DefaultQUICConfig()
+		return NewQUICTransport(config)
+	})
+
+	// Auto-register UDP transport
+	RegisterTransport("udp", func() (Transport, error) {
+		config := DefaultUDPConfig()
+		return NewUDPTransport(config)
+	})
 }

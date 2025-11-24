@@ -1,29 +1,28 @@
 package storage
 
 // File: memory_sharded.go
-// Purpose: MemorySharded backend implementation - extreme performance with sharding
+// Purpose: MemorySharded backend implementation with sharding for high performance
 //
-// This file implements the MemorySharded storage backend (V2), which focuses on:
-//   - Extreme performance (2.9M+ Get ops/s, 740K+ Set ops/s)
+// This file implements the MemorySharded storage backend (V2), which provides:
+//   - High performance (2.9M+ Get ops/s, 740K+ Set ops/s)
 //   - Ultra-low latency (346 ns/op for Get)
-//   - High concurrency through 256 shards (configurable)
+//   - High concurrency through configurable sharding (256 shards default)
 //   - Zero-copy and batch operations for maximum throughput
 //
 // Structure:
-//   - Lines 1-60:    Type definitions
-//   - Lines 61-115:  Constructors and shard selection
-//   - Lines 116-270: Core API (Set, Get, Delete)
-//   - Lines 271-420: High-performance API (GetNoCopy, BatchGet/Set)
-//   - Lines 421-560: Keys, Clear, Delete
-//   - Lines 561-730: Gossip sync methods and Stats
+//   - Type definitions: Storage structures and shard definitions
+//   - Constructors: Initialization and shard allocation
+//   - Core API: Set, Get, Delete operations
+//   - High-performance API: GetNoCopy, BatchGet/BatchSet
+//   - Utility methods: Keys, Clear, Gossip sync, Stats
 //
-// Optimizations:
-//   - CPU-adaptive sharding (256 shards default)
+// Implementation details:
+//   - CPU-adaptive sharding (256 shards default, configurable)
 //   - sync.Map for lock-free access per shard
-//   - Pre-allocated ring buffers
+//   - Pre-allocated ring buffers for sync operations
 //   - xxhash for fast key distribution
-//   - Object pools (sync.Pool)
-//   - Unsafe optimizations for zero allocations
+//   - Object pools (sync.Pool) for reduced allocations
+//   - Inlined shard selection for zero-cost abstraction
 //   - Pre-allocated error objects
 
 import (
@@ -39,11 +38,11 @@ import (
 // ShardedMemoryStorage provides EXTREME high-performance, high-throughput in-memory caching
 // with CPU-adaptive sharding to maximize throughput under high concurrency.
 //
-// OPTIMIZED VERSION (V2):
+// V2 Features:
 // 1. Configurable shard count (default 256, auto-calculated if 0)
 // 2. Zero-copy read option (GetNoCopy)
 // 3. Batch operations (BatchGet/BatchSet)
-// 4. Fast-path inlining
+// 4. Inlined fast paths
 // 5. Reduced allocations
 //
 // Performance: ~2.9M+ Get ops/sec, ~730K+ Set ops/sec (concurrent, 20 cores)
@@ -89,10 +88,10 @@ type V2Config struct {
 	ShardCount  int // 0 = auto (256 default)
 }
 
-// NewShardedMemoryStorageV2 creates an ultra-optimized sharded memory storage.
-// This is the V2 optimized version with configurable shards and batch operations.
+// NewShardedMemoryStorageV2 creates a sharded memory storage.
+// V2 version with configurable shards and batch operations.
 //
-// Optimizations:
+// Features:
 // - 256 shards by default (optimal for most workloads)
 // - Configurable shard count
 // - Zero-copy read option (GetNoCopy)
@@ -136,21 +135,8 @@ func NewShardedMemoryStorageV2(config V2Config) (*ShardedMemoryStorage, error) {
 	return s, nil
 }
 
-// getShard returns the shard for a given key
-// INLINED for zero-cost abstraction
-//
-//go:inline
-func (s *ShardedMemoryStorage) getShard(key string) *memoryShard {
-	hash := xxhash.Sum64String(key)
-	return s.shards[hash&s.shardMask]
-}
-
-// getShardByHash returns shard by pre-computed hash
-//
-//go:inline
-func (s *ShardedMemoryStorage) getShardByHash(hash uint64) *memoryShard {
-	return s.shards[hash&s.shardMask]
-}
+// getShard and getShardByHash functions have been inlined directly at call sites
+// for zero-cost abstraction - removed to reduce code duplication
 
 // Set stores a key-value pair
 func (s *ShardedMemoryStorage) Set(key string, item *StoredItem) error {
@@ -161,7 +147,7 @@ func (s *ShardedMemoryStorage) Set(key string, item *StoredItem) error {
 		return errNilItem
 	}
 
-	shard := s.getShard(key)
+	shard := s.shards[xxhash.Sum64String(key)&s.shardMask]
 
 	// Calculate item size
 	itemSize := int64(len(key) + len(item.Value) + 64)
@@ -178,7 +164,7 @@ func (s *ShardedMemoryStorage) Set(key string, item *StoredItem) error {
 	itemCopy := GetStoredItem()
 	itemCopy.ExpireAt = item.ExpireAt
 	itemCopy.Version = item.Version
-	// OPTIMIZATION: Use FastCloneBytes to reduce allocations
+	// Use FastCloneBytes to reduce allocations
 	itemCopy.Value = FastCloneBytes(item.Value)
 
 	// Check if key exists
@@ -223,15 +209,19 @@ func (s *ShardedMemoryStorage) Get(key string) (*StoredItem, error) {
 	}
 
 	s.getCount.Add(1)
-	shard := s.getShard(key)
+	shard := s.shards[xxhash.Sum64String(key)&s.shardMask]
 
 	value, ok := shard.data.Load(key)
 	if !ok {
 		s.missCount.Add(1)
 		return nil, ErrItemNotFound
 	}
-
-	item := value.(*StoredItem)
+	// Defensive: type assertion guard
+	item, ok := value.(*StoredItem)
+	if !ok || item == nil {
+		s.missCount.Add(1)
+		return nil, ErrItemNotFound
+	}
 
 	// Check expiration (fast path)
 	if !item.ExpireAt.IsZero() && time.Now().After(item.ExpireAt) {
@@ -248,7 +238,7 @@ func (s *ShardedMemoryStorage) Get(key string) (*StoredItem, error) {
 	result := GetStoredItem()
 	result.ExpireAt = item.ExpireAt
 	result.Version = item.Version
-	// OPTIMIZATION: Use FastCloneBytes
+	// Use FastCloneBytes to reduce allocations
 	result.Value = FastCloneBytes(item.Value)
 
 	return result, nil
@@ -260,23 +250,26 @@ func (s *ShardedMemoryStorage) Get(key string) (*StoredItem, error) {
 // Use only when you need maximum performance and won't modify the value.
 //
 // Performance: ~40-50% faster than Get() for large values
-//
-// OPTIMIZATION: Eliminates 44ns value copy overhead
+// Eliminates value copy overhead (~44ns saved)
 func (s *ShardedMemoryStorage) GetNoCopy(key string) (*StoredItem, error) {
 	if key == "" {
 		return nil, errEmptyKey
 	}
 
 	s.getCount.Add(1)
-	shard := s.getShard(key)
+	shard := s.shards[xxhash.Sum64String(key)&s.shardMask]
 
 	value, ok := shard.data.Load(key)
 	if !ok {
 		s.missCount.Add(1)
 		return nil, ErrItemNotFound
 	}
-
-	item := value.(*StoredItem)
+	// Defensive: type assertion guard
+	item, ok := value.(*StoredItem)
+	if !ok || item == nil {
+		s.missCount.Add(1)
+		return nil, ErrItemNotFound
+	}
 
 	// Check expiration (fast path)
 	if !item.ExpireAt.IsZero() && time.Now().After(item.ExpireAt) {
@@ -289,8 +282,7 @@ func (s *ShardedMemoryStorage) GetNoCopy(key string) (*StoredItem, error) {
 
 	s.hitCount.Add(1)
 
-	// OPTIMIZATION: Return item directly without copy
-	// This saves ~44ns per operation (12% of total time)
+	// Return item directly without copy (~44ns saved per operation)
 	return item, nil
 }
 
@@ -300,7 +292,7 @@ func (s *ShardedMemoryStorage) GetNoCopy(key string) (*StoredItem, error) {
 //
 // Performance: ~2-3x faster than individual Gets for 10+ keys
 //
-// OPTIMIZATION: Batch operations reduce function call overhead
+// Batch operations reduce function call overhead
 func (s *ShardedMemoryStorage) BatchGet(keys []string) (map[string]*StoredItem, error) {
 	if len(keys) == 0 {
 		return make(map[string]*StoredItem), nil
@@ -314,7 +306,12 @@ func (s *ShardedMemoryStorage) BatchGet(keys []string) (map[string]*StoredItem, 
 		shard *memoryShard
 		keys  []string
 	}
-	shardBatches := make(map[int]*shardBatch)
+	// Pre-size map to minimize reallocations (typical shard count is known)
+	estimatedShards := s.shardCount
+	if estimatedShards > len(keys) {
+		estimatedShards = len(keys)
+	}
+	shardBatches := make(map[int]*shardBatch, estimatedShards)
 
 	for _, key := range keys {
 		if key == "" {
@@ -363,7 +360,7 @@ func (s *ShardedMemoryStorage) BatchGet(keys []string) (map[string]*StoredItem, 
 			resultItem := GetStoredItem()
 			resultItem.ExpireAt = item.ExpireAt
 			resultItem.Version = item.Version
-			// OPTIMIZATION: Use FastCloneBytes
+			// Use FastCloneBytes to reduce allocations
 			resultItem.Value = FastCloneBytes(item.Value)
 
 			result[key] = resultItem
@@ -497,7 +494,7 @@ func (s *ShardedMemoryStorage) BatchSet(items map[string]*StoredItem) error {
 			itemCopy := GetStoredItem()
 			itemCopy.ExpireAt = item.ExpireAt
 			itemCopy.Version = item.Version
-			// OPTIMIZATION: Use FastCloneBytes
+			// Use FastCloneBytes to reduce allocations
 			itemCopy.Value = FastCloneBytes(item.Value)
 
 			// Check if exists
@@ -543,7 +540,7 @@ func (s *ShardedMemoryStorage) Delete(key string, version int64) error {
 		return errEmptyKey
 	}
 
-	shard := s.getShard(key)
+	shard := s.shards[xxhash.Sum64String(key)&s.shardMask]
 
 	// Load and delete atomically
 	value, loaded := shard.data.LoadAndDelete(key)
@@ -714,7 +711,7 @@ func (s *ShardedMemoryStorage) ApplyFullSyncSnapshot(snapshot []*FullStateItem, 
 
 	for _, item := range snapshot {
 		if item.Item != nil {
-			shard := s.getShard(item.Key)
+			shard := s.shards[xxhash.Sum64String(item.Key)&s.shardMask]
 			shard.data.Store(item.Key, item.Item)
 
 			itemSize := int64(len(item.Key) + len(item.Item.Value) + 64)
