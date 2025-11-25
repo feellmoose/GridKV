@@ -1,7 +1,6 @@
 package gossip
 
 import (
-	"errors"
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/utils/logging"
@@ -111,7 +110,7 @@ func (gm *GossipManager) updateNode(nodeID, address string, newState NodeState, 
 		if addr != "" {
 			gm.flushBatchForTarget(addr)
 		}
-		logging.Error(errors.New("MEMBER DEAD"), "removed from ring", "node", nodeID)
+		logging.Warn("removed from ring", "node", nodeID)
 	}
 	if add {
 		gm.hashRing.Add(nodeID)
@@ -305,7 +304,7 @@ func (gm *GossipManager) runFailureDetection() {
 				node.State = NodeState_NODE_STATE_DEAD
 				node.Version = gm.incrementLocalVersion()
 				toMarkDead = append(toMarkDead, id)
-				logging.Error(errors.New("MEMBER DEAD"), "member dead", "node", id, "clusterSize", clusterSize)
+				logging.Warn("member declared dead", "node", id, "clusterSize", clusterSize)
 			}
 
 		case NodeState_NODE_STATE_DEAD:

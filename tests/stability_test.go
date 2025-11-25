@@ -28,7 +28,7 @@ func TestStabilityExtremeLatency(t *testing.T) {
 			name: "Satellite_Link",
 			envConfig: &TestEnvironmentConfig{
 				NetworkProfile: network.ProfileSatellite,
-				NetworkType:    gridkv.TCP,
+				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      5,
 				ReplicaCount:   3,
 				BasePort:       80000,
@@ -43,7 +43,7 @@ func TestStabilityExtremeLatency(t *testing.T) {
 			name: "Global_HighLatency",
 			envConfig: &TestEnvironmentConfig{
 				NetworkProfile: network.ProfileGlobal,
-				NetworkType:    gridkv.TCP,
+				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      10,
 				ReplicaCount:   3,
 				BasePort:       81000,
@@ -175,7 +175,7 @@ func TestStabilityNodeFailures(t *testing.T) {
 			name: "SingleNodeFailure",
 			envConfig: &TestEnvironmentConfig{
 				NetworkProfile: network.ProfileLAN,
-				NetworkType:    gridkv.TCP,
+				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      5,
 				ReplicaCount:   3,
 				BasePort:       90000,
@@ -192,7 +192,7 @@ func TestStabilityNodeFailures(t *testing.T) {
 			name: "MultipleNodeFailures",
 			envConfig: &TestEnvironmentConfig{
 				NetworkProfile: network.ProfileLAN,
-				NetworkType:    gridkv.TCP,
+				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      10,
 				ReplicaCount:   3,
 				BasePort:       91000,
@@ -209,7 +209,7 @@ func TestStabilityNodeFailures(t *testing.T) {
 			name: "HalfNodesFailure",
 			envConfig: &TestEnvironmentConfig{
 				NetworkProfile: network.ProfileLAN,
-				NetworkType:    gridkv.TCP,
+				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      8,
 				ReplicaCount:   3,
 				BasePort:       92000,
@@ -410,7 +410,7 @@ func TestStabilitySuddenShutdown(t *testing.T) {
 			name: "MajorityShutdown_60Percent",
 			envConfig: &TestEnvironmentConfig{
 				NetworkProfile: network.ProfileLAN,
-				NetworkType:    gridkv.TCP,
+				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      10,
 				ReplicaCount:   3,
 				BasePort:       93000,
@@ -427,7 +427,7 @@ func TestStabilitySuddenShutdown(t *testing.T) {
 			name: "MajorityShutdown_70Percent",
 			envConfig: &TestEnvironmentConfig{
 				NetworkProfile: network.ProfileLAN,
-				NetworkType:    gridkv.TCP,
+				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      10,
 				ReplicaCount:   3,
 				BasePort:       94000,

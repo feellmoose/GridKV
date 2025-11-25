@@ -1,9 +1,7 @@
 // Package gridkv provides a distributed key-value cache with eventual consistency.
 //
-// Features: consistent hashing, batched replication (N=3), SWIM failure detection (<1s),
+// Features: consistent hashing, batched replication, SWIM failure detection,
 // adaptive LAN/WAN networking, Prometheus/OTLP metrics.
-//
-// Performance: local 43ns, LAN <1ms, WAN <50ms, peak 682M ops/s.
 //
 // Thread-safe: all public methods are safe for concurrent access.
 package gridkv
@@ -14,6 +12,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/gossip"
@@ -21,6 +20,9 @@ import (
 	"github.com/feellmoose/gridkv/internal/utils/crypto"
 	"github.com/feellmoose/gridkv/internal/utils/logging"
 )
+
+// ErrShuttingDown indicates the node has begun graceful shutdown and no longer accepts new operations.
+var ErrShuttingDown = errors.New("gridkv shutting down")
 
 // GridKV is the distributed key-value cache instance.
 //
@@ -33,7 +35,13 @@ type GridKV struct {
 	hashRing *gossip.ConsistentHash
 	ttl      time.Duration
 
-	stopOnce sync.Once
+	stopOnce     sync.Once
+	shutdownOnce sync.Once
+	shuttingDown atomic.Bool
+}
+
+func (g *GridKV) isShuttingDown() bool {
+	return g != nil && g.shuttingDown.Load()
 }
 
 // NewGridKV initializes a GridKV instance.
@@ -207,6 +215,9 @@ func (g *GridKV) Set(ctx context.Context, key string, value []byte, ttl ...time.
 	if g.gm == nil {
 		return errors.New("GridKV not initialized")
 	}
+	if g.isShuttingDown() {
+		return ErrShuttingDown
+	}
 	if key == "" {
 		return errors.New("key cannot be empty")
 	}
@@ -280,6 +291,9 @@ func (g *GridKV) Get(ctx context.Context, key string) (value []byte, err error) 
 	}
 	if key == "" {
 		return nil, errors.New("key cannot be empty")
+	}
+	if g.isShuttingDown() {
+		return nil, ErrShuttingDown
 	}
 
 	// Get operation uses eventual-consistency path (no readiness check needed)
@@ -386,6 +400,9 @@ func (g *GridKV) GetAsync(ctx context.Context, key string) (ReadFuture, error) {
 	if key == "" {
 		return nil, errors.New("key cannot be empty")
 	}
+	if g.isShuttingDown() {
+		return nil, ErrShuttingDown
+	}
 
 	return &readFutureWrapper{inner: g.gm.GetAsync(ctx, key)}, nil
 }
@@ -455,6 +472,9 @@ func (g *GridKV) GetBatchAsync(ctx context.Context, keys []string) (BatchReadFut
 	if g.gm == nil {
 		return nil, errors.New("GridKV not initialized")
 	}
+	if g.isShuttingDown() {
+		return nil, ErrShuttingDown
+	}
 	if len(keys) == 0 {
 		return &batchReadFutureWrapper{inner: g.gm.GetBatchAsync(ctx, nil)}, nil
 	}
@@ -480,6 +500,9 @@ func (g *GridKV) Delete(ctx context.Context, key string) (err error) {
 	}
 	if key == "" {
 		return errors.New("key cannot be empty")
+	}
+	if g.isShuttingDown() {
+		return ErrShuttingDown
 	}
 
 	// Get current version for optimistic locking
@@ -644,6 +667,22 @@ func (g *GridKV) CloseWithTimeout(timeout time.Duration) error {
 	go func() {
 		defer close(done)
 
+		g.shutdownOnce.Do(func() {
+			g.shuttingDown.Store(true)
+		})
+
+		if g.gm != nil {
+			g.gm.BeginShutdown()
+		}
+
+		if g.gm != nil {
+			ctx, cancel := context.WithDeadline(context.Background(), deadline)
+			if err := g.gm.WaitForDrain(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logging.Warn("wait for replication drain", "err", err)
+			}
+			cancel()
+		}
+
 		if g.gm != nil {
 			g.stopOnce.Do(func() {
 				g.gm.Stop()
@@ -675,64 +714,6 @@ func (g *GridKV) CloseWithTimeout(timeout time.Duration) error {
 	case <-time.After(time.Until(deadline)):
 		return fmt.Errorf("close timeout after %v", timeout)
 	}
-}
-
-// StopGossip stops gossip manager without closing other components. For diagnostics/tests.
-func (g *GridKV) StopGossip() {
-	if g.gm == nil {
-		return
-	}
-	g.stopOnce.Do(func() {
-		g.gm.Stop()
-	})
-}
-
-// InjectGossipMessage injects a message directly to gossip manager. For testing/diagnostics.
-func (g *GridKV) InjectGossipMessage(msg *gossip.GossipMessage) {
-	if g.gm == nil {
-		return
-	}
-	g.gm.SimulateReceive(msg)
-}
-
-// ForceRemoveNode marks a peer as dead. For tests/diagnostics.
-func (g *GridKV) ForceRemoveNode(nodeID string) {
-	if g.gm == nil {
-		return
-	}
-	g.gm.ForceRemoveNode(nodeID)
-}
-
-// MessageStats returns gossip message stats: total received, dropped (queue saturation/validation failures).
-func (g *GridKV) MessageStats() (total, dropped int64) {
-	if g.gm == nil {
-		return 0, 0
-	}
-	return g.gm.MessageStats()
-}
-
-// PipelineDrops returns count of replication ops dropped due to pipeline saturation.
-func (g *GridKV) PipelineDrops() int64 {
-	if g.gm == nil {
-		return 0
-	}
-	return g.gm.PipelineDrops()
-}
-
-// FlushAllPipelines flushes all replication pipelines. Use before consistency checks or shutdown.
-func (g *GridKV) FlushAllPipelines() {
-	if g.gm == nil {
-		return
-	}
-	g.gm.FlushAllPipelines()
-}
-
-// PendingReads returns count of in-flight read operations.
-func (g *GridKV) PendingReads() int64 {
-	if g.gm == nil {
-		return 0
-	}
-	return g.gm.PendingReadsCount()
 }
 
 // ReplicaStatus represents cluster health and readiness state.

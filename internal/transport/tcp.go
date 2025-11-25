@@ -132,7 +132,9 @@ func ApplyTCPConfig(conn *net.TCPConn, config *TCPOptimizationConfig) error {
 	// 1. Disable Nagle's algorithm for lower latency
 	if config.NoDelay {
 		if err := conn.SetNoDelay(true); err != nil {
-			logging.Warn("Failed to set TCP_NODELAY", "err", err)
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("Failed to set TCP_NODELAY", "err", err)
+			}
 			lastErr = err
 		}
 	}
@@ -140,12 +142,16 @@ func ApplyTCPConfig(conn *net.TCPConn, config *TCPOptimizationConfig) error {
 	// 2. Enable TCP keep-alive to detect dead connections
 	if config.KeepAlive {
 		if err := conn.SetKeepAlive(true); err != nil {
-			logging.Warn("Failed to enable TCP keep-alive", "err", err)
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("Failed to enable TCP keep-alive", "err", err)
+			}
 			lastErr = err
 		}
 
 		if err := conn.SetKeepAlivePeriod(config.KeepAlivePeriod); err != nil {
-			logging.Warn("Failed to set keep-alive period", "err", err)
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("Failed to set keep-alive period", "err", err)
+			}
 			lastErr = err
 		}
 	}
@@ -153,14 +159,18 @@ func ApplyTCPConfig(conn *net.TCPConn, config *TCPOptimizationConfig) error {
 	// 3. Set optimal buffer sizes (BDP-based)
 	if config.ReadBufferSize > 0 {
 		if err := conn.SetReadBuffer(config.ReadBufferSize); err != nil {
-			logging.Warn("Failed to set read buffer", "size", config.ReadBufferSize, "err", err)
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("Failed to set read buffer", "size", config.ReadBufferSize, "err", err)
+			}
 			lastErr = err
 		}
 	}
 
 	if config.WriteBufferSize > 0 {
 		if err := conn.SetWriteBuffer(config.WriteBufferSize); err != nil {
-			logging.Warn("Failed to set write buffer", "size", config.WriteBufferSize, "err", err)
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("Failed to set write buffer", "size", config.WriteBufferSize, "err", err)
+			}
 			lastErr = err
 		}
 	}
@@ -194,6 +204,13 @@ type TCPTransportConn struct {
 //
 //go:noinline
 func (t *TCPTransportConn) WriteDataWithContext(ctx context.Context, data []byte) error {
+	const maxMessageSize = 10 * 1024 * 1024 // 10MB max
+
+	// Check message size before sending to avoid connection reset
+	if len(data) > maxMessageSize {
+		return fmt.Errorf("message too large: %d bytes (max: %d)", len(data), maxMessageSize)
+	}
+
 	if deadline, ok := ctx.Deadline(); ok {
 		// OPTIMIZATION: Set deadline directly without padding
 		// Padding was causing issues - use exact deadline for better timeout handling
@@ -509,10 +526,35 @@ func (l *TCPTransportListener) acceptConnections() {
 				l.handleConnection(c)
 			}(conn)
 		default:
+			// Connection pool exhausted - reject with backpressure
+			// Log at debug level to avoid spam, but track for metrics
 			if logging.Log.IsDebugEnabled() {
-				logging.Debug("Connection rejected: worker pool full", "remote", conn.RemoteAddr())
+				logging.Debug("Connection rejected: worker pool full", "remote", conn.RemoteAddr(), "max_workers", l.maxWorkers)
 			}
-			conn.Close()
+			// Give a brief moment for the pool to drain before rejecting
+			// This helps during transient spikes
+			select {
+			case <-l.stopCh:
+				conn.Close()
+				return
+			case <-time.After(10 * time.Millisecond):
+				// Check again if a slot opened up
+				select {
+				case l.connPool <- struct{}{}:
+					l.wg.Add(1)
+					go func(c *net.TCPConn) {
+						defer func() {
+							<-l.connPool
+							l.wg.Done()
+						}()
+						l.handleConnection(c)
+					}(conn)
+					continue // Successfully queued, continue accepting
+				default:
+					// Still full, reject
+					conn.Close()
+				}
+			}
 		}
 	}
 }
@@ -563,9 +605,25 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 		if dataLength == 0 || dataLength > maxMessageSize {
 			// Cold path: invalid message size
 			if dataLength > maxMessageSize {
-				logging.Error(fmt.Errorf("message too large: %d bytes", dataLength),
-					"connect[net], rejecting message", "remote_addr", conn.RemoteAddr().String())
-				return
+				if logging.Log.IsDebugEnabled() {
+					logging.Debug("connect[net], rejecting oversized message",
+						"remote_addr", conn.RemoteAddr().String(),
+						"size", dataLength, "limit", maxMessageSize)
+				}
+				// Read and discard the oversized message to keep connection alive
+				discardBuf := make([]byte, 8192)
+				remaining := int64(dataLength)
+				for remaining > 0 {
+					toRead := int64(len(discardBuf))
+					if toRead > remaining {
+						toRead = remaining
+					}
+					if _, err := io.CopyN(io.Discard, reader, toRead); err != nil {
+						return
+					}
+					remaining -= toRead
+				}
+				continue
 			}
 			// Zero-length message - continue without logging in hot path
 			continue

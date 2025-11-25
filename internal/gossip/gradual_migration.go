@@ -1,6 +1,7 @@
 package gossip
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,16 +30,23 @@ type migrationTask struct {
 
 // gradualMigrationManager manages gradual data migration to reduce impact of hashring changes
 type gradualMigrationManager struct {
-	gm            *GossipManager
-	state         *gradualMigrationState
-	migrationRate int           // keys per second per migration
-	batchSize     int           // keys per batch
-	batchInterval time.Duration // interval between batches
-	maxConcurrent int           // max concurrent migrations
-	activeCount   atomic.Int32  // current active migration count
-	stopCh        chan struct{} // stop signal for migrations
-	stopOnce      sync.Once     // ensure stopCh is only closed once
+	gm              *GossipManager
+	state           *gradualMigrationState
+	migrationRate   int           // keys per second per migration
+	batchSize       int           // keys per batch
+	batchInterval   time.Duration // interval between batches
+	maxConcurrent   int           // max concurrent migrations
+	activeCount     atomic.Int32  // current active migration count
+	stopCh          chan struct{} // stop signal for migrations
+	stopOnce        sync.Once     // ensure stopCh is only closed once
+	shutdownOnce    sync.Once
+	shutdownPending atomic.Int64
 }
+
+const (
+	shutdownReplicationMaxAttempts = 6
+	shutdownReplicationBackoff     = 200 * time.Millisecond
+)
 
 // newGradualMigrationManager creates a new gradual migration manager
 func newGradualMigrationManager(gm *GossipManager) *gradualMigrationManager {
@@ -307,4 +315,182 @@ func (gmm *gradualMigrationManager) stop() {
 	for gmm.activeCount.Load() > 0 && time.Now().Before(deadline) {
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func (gmm *gradualMigrationManager) startShutdownMigration() {
+	if gmm == nil {
+		return
+	}
+	gmm.shutdownOnce.Do(func() {
+		go gmm.runShutdownMigration()
+	})
+}
+
+func (gmm *gradualMigrationManager) runShutdownMigration() {
+	gm := gmm.gm
+	if gm == nil || gm.store == nil {
+		return
+	}
+	keys := gm.store.Keys()
+	totalKeys := int64(len(keys))
+	gmm.shutdownPending.Store(totalKeys)
+	if len(keys) == 0 {
+		return
+	}
+	defer gmm.shutdownPending.Store(0)
+	logging.Info("Starting shutdown data sync", "node", gm.localNodeID, "keys", len(keys))
+
+	batchSize := gm.maxReplicators
+	if batchSize <= 0 {
+		batchSize = 16
+	}
+	delay := gmm.batchInterval
+	if delay <= 0 {
+		delay = 50 * time.Millisecond
+	}
+
+	for i := 0; i < len(keys); i += batchSize {
+		end := i + batchSize
+		if end > len(keys) {
+			end = len(keys)
+		}
+
+		var wg sync.WaitGroup
+		for _, key := range keys[i:end] {
+			key := key
+			wg.Add(1)
+			worker := func() {
+				defer wg.Done()
+				if !gmm.replicateKeyForShutdown(key) {
+					logging.Warn("Shutdown replication exhausted retries", "node", gm.localNodeID, "key", key)
+				}
+				gmm.shutdownPending.Add(-1)
+			}
+
+			if gm.replicationPool != nil {
+				if err := gm.replicationPool.Submit(worker); err != nil {
+					worker()
+				}
+			} else {
+				worker()
+			}
+		}
+		wg.Wait()
+		time.Sleep(delay)
+	}
+
+	logging.Info("Shutdown data sync completed", "node", gm.localNodeID)
+}
+
+func (gmm *gradualMigrationManager) replicateKeyForShutdown(key string) bool {
+	gm := gmm.gm
+	if gm == nil || gm.store == nil {
+		return false
+	}
+
+	item, err := gm.store.Get(key)
+	if err != nil || item == nil {
+		return true
+	}
+
+	gm.mu.RLock()
+	clusterSize := len(gm.liveNodes)
+	gm.mu.RUnlock()
+	if clusterSize <= 1 {
+		return true
+	}
+
+	effectiveReplicaCount := gm.replicaCount
+	if clusterSize < effectiveReplicaCount {
+		effectiveReplicaCount = clusterSize
+	}
+	if effectiveReplicaCount == 0 {
+		return true
+	}
+
+	attemptWindow := gm.replicationTimeout * 8
+	if attemptWindow < 5*time.Second {
+		attemptWindow = 5 * time.Second
+	}
+	deadline := time.Now().Add(attemptWindow)
+
+	attempts := shutdownReplicationMaxAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		if time.Now().After(deadline) {
+			break
+		}
+		targets := gmm.shutdownTargetsForKey(key, effectiveReplicaCount)
+		if len(targets) == 0 {
+			break
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), gm.replicationTimeout*2)
+		successes := gm.replicateSyncToTargets(ctx, key, item, targets)
+		cancel()
+		if successes > 0 {
+			return true
+		}
+		time.Sleep(shutdownReplicationBackoff)
+	}
+
+	return false
+}
+
+func (gmm *gradualMigrationManager) shutdownTargetsForKey(key string, replicaCount int) []string {
+	gm := gmm.gm
+	if gm == nil {
+		return nil
+	}
+
+	base := gm.getReplicas(key, replicaCount)
+	seen := make(map[string]struct{}, len(base)+4)
+	targets := make([]string, 0, replicaCount*2+4)
+
+	appendTarget := func(id string) {
+		if id == "" || id == gm.localNodeID {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		targets = append(targets, id)
+	}
+
+	for _, id := range base {
+		appendTarget(id)
+	}
+
+	gm.mu.RLock()
+	alive := make([]string, 0, len(gm.liveNodes))
+	suspect := make([]string, 0, len(gm.liveNodes))
+	for id, node := range gm.liveNodes {
+		if id == gm.localNodeID || node == nil || node.State == NodeState_NODE_STATE_DEAD {
+			continue
+		}
+		if node.State == NodeState_NODE_STATE_ALIVE {
+			alive = append(alive, id)
+		} else {
+			suspect = append(suspect, id)
+		}
+	}
+	gm.mu.RUnlock()
+
+	for _, id := range alive {
+		appendTarget(id)
+	}
+	for _, id := range suspect {
+		appendTarget(id)
+	}
+
+	return targets
+}
+
+func (gmm *gradualMigrationManager) pendingShutdownKeys() int64 {
+	if gmm == nil {
+		return 0
+	}
+	return gmm.shutdownPending.Load()
 }

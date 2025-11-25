@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -77,24 +78,30 @@ type ConnPool struct {
 }
 
 type ConnPoolMetrics struct {
-	totalGets       atomic.Int64
-	totalPuts       atomic.Int64
-	totalInvalidate atomic.Int64
-	totalWaits      atomic.Int64
-	totalDialed     atomic.Int64
-	totalReused     atomic.Int64
-	healthCheckFail atomic.Int64
+	totalGets         atomic.Int64
+	totalPuts         atomic.Int64
+	totalInvalidate   atomic.Int64
+	totalWaits        atomic.Int64
+	totalDialed       atomic.Int64
+	totalReused       atomic.Int64
+	healthCheckFail   atomic.Int64
+	totalExhausted    atomic.Int64 // Connection pool exhausted errors
+	totalDialFailures atomic.Int64 // Dial failures (connection refused, etc.)
+	totalWaitTimeouts atomic.Int64 // Waits that timed out
 }
 
 func (m *ConnPoolMetrics) GetMetrics() map[string]int64 {
 	return map[string]int64{
-		"total_gets":        m.totalGets.Load(),
-		"total_puts":        m.totalPuts.Load(),
-		"total_invalidate":  m.totalInvalidate.Load(),
-		"total_waits":       m.totalWaits.Load(),
-		"total_dialed":      m.totalDialed.Load(),
-		"total_reused":      m.totalReused.Load(),
-		"health_check_fail": m.healthCheckFail.Load(),
+		"total_gets":          m.totalGets.Load(),
+		"total_puts":          m.totalPuts.Load(),
+		"total_invalidate":    m.totalInvalidate.Load(),
+		"total_waits":         m.totalWaits.Load(),
+		"total_dialed":        m.totalDialed.Load(),
+		"total_reused":        m.totalReused.Load(),
+		"health_check_fail":   m.healthCheckFail.Load(),
+		"total_exhausted":     m.totalExhausted.Load(),
+		"total_dial_failures": m.totalDialFailures.Load(),
+		"total_wait_timeouts": m.totalWaitTimeouts.Load(),
 	}
 }
 
@@ -386,6 +393,10 @@ func (p *ConnPool) Get(ctx context.Context) (TransportConn, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	var dialAttempts int
+	const maxDialRetries = 3
+	const baseBackoff = 50 * time.Millisecond
+
 	for {
 		// 1. Check if the connection pool is closed
 		if p.closed {
@@ -437,8 +448,48 @@ func (p *ConnPool) Get(ctx context.Context) (TransportConn, error) {
 			if err != nil {
 				// Dial failed, revert the total count
 				p.total--
+				if p.metrics != nil {
+					p.metrics.totalDialFailures.Add(1)
+				}
+
+				// Check if this is a connection refused error that might be transient
+				errStr := err.Error()
+				isConnectionRefused := strings.Contains(errStr, "connection refused") ||
+					strings.Contains(errStr, "connect: connection refused")
+				isTransient := isConnectionRefused && dialAttempts < maxDialRetries
+
+				if isTransient {
+					// Exponential backoff for transient connection refused errors
+					dialAttempts++
+					backoff := baseBackoff * time.Duration(1<<uint(dialAttempts-1)) // 50ms, 100ms, 200ms
+					if backoff > 500*time.Millisecond {
+						backoff = 500 * time.Millisecond // Cap at 500ms
+					}
+
+					// Check context deadline before waiting
+					if deadline, ok := ctx.Deadline(); ok {
+						remaining := time.Until(deadline)
+						if remaining <= backoff {
+							return nil, err
+						}
+					}
+
+					p.mu.Unlock()
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(backoff):
+					}
+					p.mu.Lock()
+					continue // Retry dial
+				}
+
+				// Permanent failure or max retries reached
 				return nil, err
 			}
+
+			// Success - reset retry state
+			dialAttempts = 0
 
 			if p.metrics != nil {
 				p.metrics.totalDialed.Add(1)

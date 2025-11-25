@@ -463,7 +463,21 @@ func (n *NetworkImpl) SendBinary(address string, msg *BinaryMessage) error {
 
 func (n *NetworkImpl) SendRaw(ctx context.Context, address string, data []byte) error {
 	if err := n.protocol.Send(ctx, address, data); err != nil {
-		logging.Error(err, "Error sending raw data", "address", address, "size", len(data))
+		// During shutdown or connection pool exhaustion, connection refused is expected
+		// Only log as error if it's not a transient connection issue
+		errMsg := err.Error()
+		isConnectionRefused := strings.Contains(errMsg, "connection refused") ||
+			strings.Contains(errMsg, "connection pool exhausted") ||
+			strings.Contains(errMsg, "connection pool closed")
+
+		if isConnectionRefused {
+			// Log at debug level to reduce spam during shutdown/failures
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("Connection refused during send (may be transient)", "address", address, "size", len(data), "err", err)
+			}
+		} else {
+			logging.Error(err, "Error sending raw data", "address", address, "size", len(data))
+		}
 		return err
 	}
 
@@ -513,6 +527,12 @@ func (n *NetworkImpl) SendWithTimeout(addr string, msg *GossipMessage, timeout t
 		}
 		data = binary.Marshal()
 		PutBinaryMessage(binary)
+	}
+
+	// Check message size before sending to avoid TCP limit and connection reset
+	const maxMessageSize = 10 * 1024 * 1024 // 10MB max
+	if len(data) > maxMessageSize {
+		return fmt.Errorf("message too large: %d bytes (max: %d)", len(data), maxMessageSize)
 	}
 
 	if err := n.protocol.Send(ctx, addr, data); err != nil {

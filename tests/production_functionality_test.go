@@ -1,9 +1,12 @@
 package tests
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +15,24 @@ import (
 	gridkv "github.com/feellmoose/gridkv"
 	"github.com/feellmoose/gridkv/internal/utils/network"
 )
+
+var prodLongRuntime = os.Getenv("GRIDKV_PROD_TEST_LONG") == "1"
+
+func prodDuration(short, long time.Duration) time.Duration {
+	if prodLongRuntime {
+		return long
+	}
+	return short
+}
+
+const gibibyte int64 = 1 << 30
+
+func prodDataSize(shortBytes, longBytes int64) int64 {
+	if prodLongRuntime {
+		return longBytes
+	}
+	return shortBytes
+}
 
 // TestProductionFunctionalityCorrectness tests correctness under various environments
 func TestProductionFunctionalityCorrectness(t *testing.T) {
@@ -27,7 +48,7 @@ func TestProductionFunctionalityCorrectness(t *testing.T) {
 			name: "LAN_Environment",
 			envConfig: &TestEnvironmentConfig{
 				NetworkProfile: network.ProfileLAN,
-				NetworkType:    gridkv.TCP,
+				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      5,
 				ReplicaCount:   3,
 				BasePort:       60000,
@@ -35,13 +56,13 @@ func TestProductionFunctionalityCorrectness(t *testing.T) {
 				MaxMemoryMB:    2048,
 				ShardCount:     128,
 			},
-			duration: 30 * time.Second,
+			duration: prodDuration(10*time.Second, 30*time.Second),
 		},
 		{
 			name: "WAN_Environment",
 			envConfig: &TestEnvironmentConfig{
 				NetworkProfile: network.ProfileWAN,
-				NetworkType:    gridkv.TCP,
+				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      10,
 				ReplicaCount:   3,
 				BasePort:       61000,
@@ -49,13 +70,13 @@ func TestProductionFunctionalityCorrectness(t *testing.T) {
 				MaxMemoryMB:    4096,
 				ShardCount:     256,
 			},
-			duration: 60 * time.Second,
+			duration: prodDuration(20*time.Second, 60*time.Second),
 		},
 		{
 			name: "Global_Environment",
 			envConfig: &TestEnvironmentConfig{
 				NetworkProfile: network.ProfileGlobal,
-				NetworkType:    gridkv.TCP,
+				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      15,
 				ReplicaCount:   3,
 				BasePort:       62000,
@@ -63,7 +84,7 @@ func TestProductionFunctionalityCorrectness(t *testing.T) {
 				MaxMemoryMB:    8192,
 				ShardCount:     512,
 			},
-			duration: 90 * time.Second,
+			duration: prodDuration(30*time.Second, 90*time.Second),
 		},
 	}
 
@@ -83,6 +104,7 @@ func testCorrectnessScenario(t *testing.T, config *TestEnvironmentConfig, testDu
 
 	nodes := sim.GetNodes()
 	ctx := context.Background()
+	sim.WaitForHealthyNodes(t, config.NodeCount, 10*time.Second)
 	stopCh := make(chan struct{})
 
 	writtenKeys := make(map[string][]byte)
@@ -325,15 +347,15 @@ func TestProductionOperationRatio(t *testing.T) {
 			deleteRatio: 5,
 			envConfig: &TestEnvironmentConfig{
 				NetworkProfile: network.ProfileLAN,
-				NetworkType:    gridkv.TCP,
+				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      5,
 				ReplicaCount:   3,
-				BasePort:       70000,
+				BasePort:       63000,
 				StorageBackend: gridkv.BackendMemorySharded,
 				MaxMemoryMB:    2048,
 				ShardCount:     128,
 			},
-			duration:       30 * time.Second,
+			duration:       prodDuration(10*time.Second, 30*time.Second),
 			minSuccessRate: 85,
 		},
 		{
@@ -343,15 +365,15 @@ func TestProductionOperationRatio(t *testing.T) {
 			deleteRatio: 5,
 			envConfig: &TestEnvironmentConfig{
 				NetworkProfile: network.ProfileLAN,
-				NetworkType:    gridkv.TCP,
+				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      5,
 				ReplicaCount:   3,
-				BasePort:       71000,
+				BasePort:       63100,
 				StorageBackend: gridkv.BackendMemorySharded,
 				MaxMemoryMB:    2048,
 				ShardCount:     128,
 			},
-			duration:       30 * time.Second,
+			duration:       prodDuration(10*time.Second, 30*time.Second),
 			minSuccessRate: 90,
 		},
 		{
@@ -361,15 +383,15 @@ func TestProductionOperationRatio(t *testing.T) {
 			deleteRatio: 34,
 			envConfig: &TestEnvironmentConfig{
 				NetworkProfile: network.ProfileLAN,
-				NetworkType:    gridkv.TCP,
+				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      5,
 				ReplicaCount:   3,
-				BasePort:       72000,
+				BasePort:       63200,
 				StorageBackend: gridkv.BackendMemorySharded,
 				MaxMemoryMB:    2048,
 				ShardCount:     128,
 			},
-			duration:       30 * time.Second,
+			duration:       prodDuration(10*time.Second, 30*time.Second),
 			minSuccessRate: 85,
 		},
 	}
@@ -556,10 +578,10 @@ func TestProductionCoreOperations(t *testing.T) {
 	}
 	config := &TestEnvironmentConfig{
 		NetworkProfile: network.ProfileLAN,
-		NetworkType:    gridkv.TCP,
+		NetworkType:    networkTypeFromEnv(gridkv.TCP),
 		NodeCount:      1,
 		ReplicaCount:   1,
-		BasePort:       110000,
+		BasePort:       64000,
 		StorageBackend: gridkv.BackendMemory,
 		MaxMemoryMB:    512,
 		ShardCount:     0,
@@ -634,10 +656,10 @@ func TestProductionDataLossProbability(t *testing.T) {
 	}
 	config := &TestEnvironmentConfig{
 		NetworkProfile: network.ProfileLAN,
-		NetworkType:    gridkv.TCP,
+		NetworkType:    networkTypeFromEnv(gridkv.TCP),
 		NodeCount:      15,
 		ReplicaCount:   3,
-		BasePort:       111000,
+		BasePort:       64100,
 		StorageBackend: gridkv.BackendMemorySharded,
 		MaxMemoryMB:    2048,
 		ShardCount:     256,
@@ -747,10 +769,10 @@ func TestProductionDataLossProbability(t *testing.T) {
 		}(r)
 	}
 
-	time.Sleep(20 * time.Second)
+	time.Sleep(prodDuration(8*time.Second, 20*time.Second))
 	close(stopCh)
 	wg.Wait()
-	time.Sleep(2 * time.Second)
+	time.Sleep(prodDuration(1*time.Second, 2*time.Second))
 
 	// Final verification
 	allKeysMu.RLock()
@@ -822,10 +844,10 @@ func TestProductionConsistencyConvergence(t *testing.T) {
 
 	config := &TestEnvironmentConfig{
 		NetworkProfile: network.ProfileLAN,
-		NetworkType:    gridkv.TCP,
+		NetworkType:    networkTypeFromEnv(gridkv.TCP),
 		NodeCount:      3,
 		ReplicaCount:   3,
-		BasePort:       112000,
+		BasePort:       64200,
 		StorageBackend: gridkv.BackendMemorySharded,
 		MaxMemoryMB:    1024,
 		ShardCount:     128,
@@ -888,9 +910,7 @@ func TestProductionConsistencyConvergence(t *testing.T) {
 
 	// Wait for replication
 	for flushRound := 0; flushRound < 3; flushRound++ {
-		for _, node := range nodes {
-			node.FlushAllPipelines()
-		}
+		sim.WaitForReplicationSettle(nodes...)
 		time.Sleep(150 * time.Millisecond)
 	}
 
@@ -925,6 +945,109 @@ func TestProductionConsistencyConvergence(t *testing.T) {
 	t.Logf("consistency convergence in %s", time.Since(writeStart))
 }
 
+// TestProductionDelayPhaseConvergence ensures replicated values become visible within bounded delays.
+func TestProductionDelayPhaseConvergence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping delay-phase convergence test in short mode")
+	}
+
+	const (
+		totalKeys = 40
+		valueSize = 512
+	)
+
+	delays := []time.Duration{
+		0,
+		500 * time.Millisecond,
+		2 * time.Second,
+		5 * time.Second,
+	}
+
+	config := &TestEnvironmentConfig{
+		NetworkProfile: network.ProfileWAN,
+		NetworkType:    networkTypeFromEnv(gridkv.TCP),
+		NodeCount:      9,
+		ReplicaCount:   3,
+		BasePort:       64400,
+		StorageBackend: gridkv.BackendMemorySharded,
+		MaxMemoryMB:    4096,
+		ShardCount:     256,
+	}
+
+	sim := NewTestEnvironmentSimulator(config)
+	if err := sim.SetupCluster(t); err != nil {
+		t.Fatalf("Failed to setup cluster: %v", err)
+	}
+	defer sim.Cleanup()
+
+	nodes := sim.GetNodes()
+	ctx := context.Background()
+
+	written := make(map[string][]byte, totalKeys)
+	writer := nodes[0]
+	for i := 0; i < totalKeys; i++ {
+		key := fmt.Sprintf("delay-phase-%d-%d", i, time.Now().UnixNano())
+		value := randomValue(valueSize)
+		target := writer
+		var writeErr error
+		for attempt := 0; attempt < 20; attempt++ {
+			writeErr = target.Set(ctx, key, value)
+			if writeErr == nil {
+				break
+			}
+			errText := writeErr.Error()
+			if strings.Contains(errText, "coordinator") || strings.Contains(errText, "cluster not ready") {
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			break
+		}
+		if writeErr != nil {
+			t.Fatalf("Set failed for %s: %v", key, writeErr)
+		}
+		valueCopy := make([]byte, len(value))
+		copy(valueCopy, value)
+		written[key] = valueCopy
+	}
+
+	// Prime pipelines before sampling.
+	sim.WaitForReplicationSettle(nodes...)
+
+	type phaseResult struct {
+		delay   time.Duration
+		found   int
+		missing int
+	}
+	results := make([]phaseResult, 0, len(delays))
+
+	for _, delay := range delays {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		sim.WaitForReplicationSettle(nodes...)
+
+		found := 0
+		for key, expected := range written {
+			if verifyKeyAcrossNodes(nodes, key, expected, 300*time.Millisecond) {
+				found++
+			}
+		}
+		result := phaseResult{
+			delay:   delay,
+			found:   found,
+			missing: len(written) - found,
+		}
+		results = append(results, result)
+		t.Logf("delay=%s reachable=%d missing=%d", delay, result.found, result.missing)
+	}
+
+	final := results[len(results)-1]
+	convergence := float64(final.found) / float64(len(written)) * 100
+	if convergence < 95 {
+		t.Fatalf("Convergence %.2f%% below 95%% after %s", convergence, delays[len(delays)-1])
+	}
+}
+
 // TestProductionCriticalMessageDelivery tests critical message delivery under load
 func TestProductionCriticalMessageDelivery(t *testing.T) {
 	if testing.Short() {
@@ -932,10 +1055,10 @@ func TestProductionCriticalMessageDelivery(t *testing.T) {
 	}
 	config := &TestEnvironmentConfig{
 		NetworkProfile: network.ProfileLAN,
-		NetworkType:    gridkv.TCP,
+		NetworkType:    networkTypeFromEnv(gridkv.TCP),
 		NodeCount:      10,
 		ReplicaCount:   3,
-		BasePort:       113000,
+		BasePort:       64300,
 		StorageBackend: gridkv.BackendMemorySharded,
 		MaxMemoryMB:    1024,
 		ShardCount:     128,
@@ -1012,7 +1135,7 @@ func TestProductionCriticalMessageDelivery(t *testing.T) {
 		}(w)
 	}
 
-	time.Sleep(10 * time.Second)
+	time.Sleep(prodDuration(4*time.Second, 10*time.Second))
 	close(stopCh)
 	wg.Wait()
 
@@ -1035,4 +1158,542 @@ func TestProductionCriticalMessageDelivery(t *testing.T) {
 	if readsCompleted.Load() > 0 && readSuccessRate < 30 {
 		t.Errorf("Read success rate too low: %.2f%%", readSuccessRate)
 	}
+}
+
+// TestProductionExtremeFailure ensures data survives when a majority of nodes fail under extreme latency.
+func TestProductionExtremeFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping extreme failure test in short mode")
+	}
+
+	const (
+		nodeCount        = 10
+		replicas         = 4
+		totalKeys        = 400
+		failCount        = 6
+		writeTimeout     = 15 * time.Second
+		drainGracePeriod = 15 * time.Second
+		consistencyWait  = 90 * time.Second
+		minValueSize     = 4 * 1024  // 4 KiB
+		maxValueSize     = 64 * 1024 // 64 KiB
+	)
+
+	config := &TestEnvironmentConfig{
+		NetworkProfile: network.ProfileSatellite,
+		NetworkType:    networkTypeFromEnv(gridkv.TCP),
+		NodeCount:      nodeCount,
+		ReplicaCount:   replicas,
+		BasePort:       65000,
+		StorageBackend: gridkv.BackendMemorySharded,
+		MaxMemoryMB:    4096,
+		ShardCount:     256,
+	}
+
+	sim := NewTestEnvironmentSimulator(config)
+	if err := sim.SetupCluster(t); err != nil {
+		t.Fatalf("Failed to setup cluster: %v", err)
+	}
+	defer sim.Cleanup()
+
+	nodes := sim.GetNodes()
+	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	defer cancel()
+
+	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+	written := make(map[string][]byte, totalKeys)
+	for i := 0; i < totalKeys; i++ {
+		key := fmt.Sprintf("extreme-key-%d", i)
+		valueSize := rnd.Intn(maxValueSize-minValueSize+1) + minValueSize
+		value := make([]byte, valueSize)
+		if _, err := rnd.Read(value); err != nil {
+			t.Fatalf("failed to generate random value: %v", err)
+		}
+		if err := nodes[0].Set(ctx, key, value); err != nil {
+			t.Fatalf("initial write failed: %v", err)
+		}
+		written[key] = append([]byte(nil), value...)
+	}
+
+	sim.WaitForReplicationSettle(nodes...)
+
+	failIndices := make([]int, 0, failCount)
+	for i := 1; i <= failCount; i++ {
+		failIndices = append(failIndices, i)
+	}
+	t.Logf("Draining %d nodes (failover simulation)...", failCount)
+	if err := sim.ShutdownNodes(failIndices, 60*time.Second); err != nil {
+		if strings.Contains(err.Error(), "close timeout") {
+			t.Logf("ShutdownNodes timed out: %v (continuing verification)", err)
+		} else {
+			t.Fatalf("failed to shutdown nodes: %v", err)
+		}
+	}
+
+	time.Sleep(drainGracePeriod)
+	sim.WaitForHealthyNodes(t, nodeCount-failCount, 30*time.Second)
+
+	sim.WaitForReplicationSettle(nodes...)
+
+	nodes = sim.GetNodes()
+	survivors := make([]*gridkv.GridKV, 0, nodeCount-failCount)
+	for idx, node := range nodes {
+		if node != nil && idx < nodeCount {
+			survivors = append(survivors, node)
+		}
+	}
+	if len(survivors) == 0 {
+		t.Fatalf("no surviving nodes available for verification")
+	}
+
+	deadline := time.Now().Add(consistencyWait)
+	for key, want := range written {
+		var recovered bool
+		for time.Now().Before(deadline) && !recovered {
+			for _, node := range survivors {
+				sim.WaitForReplicationSettle(node)
+				val, err := node.Get(context.Background(), key)
+				if err == nil && bytes.Equal(val, want) {
+					recovered = true
+					break
+				}
+			}
+			if !recovered {
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+		if !recovered {
+			t.Fatalf("key %s missing after majority failure", key)
+		}
+	}
+}
+
+func verifyKeyAcrossNodes(nodes []*gridkv.GridKV, key string, expected []byte, timeout time.Duration) bool {
+	if len(nodes) == 0 {
+		return false
+	}
+	order := rand.Perm(len(nodes))
+	for _, idx := range order {
+		node := nodes[idx]
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		value, err := node.Get(ctx, key)
+		cancel()
+		if err == nil && value != nil && bytes.Equal(value, expected) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestProductionExtremeEventualConsistency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping extreme eventual consistency test in short mode")
+	}
+
+	const (
+		nodeCount        = 12
+		replicas         = 2
+		failCount        = 4
+		minValueSize     = 256 * 1024
+		maxValueSize     = 1 * 1024 * 1024
+		workerMultiplier = 3
+		basePort         = 64000
+	)
+
+	targetDataBytes := prodDataSize(2*gibibyte, 10*gibibyte)
+	workloadDuration := prodDuration(90*time.Second, 4*time.Minute)
+	consistencyWait := prodDuration(120*time.Second, 5*time.Minute)
+	drainGracePeriod := prodDuration(30*time.Second, 90*time.Second)
+	writeTimeout := 20 * time.Second
+	readTimeout := 15 * time.Second
+
+	config := &TestEnvironmentConfig{
+		NetworkProfile: network.ProfileSatellite,
+		NetworkType:    networkTypeFromEnv(gridkv.TCP),
+		NodeCount:      nodeCount,
+		ReplicaCount:   replicas,
+		BasePort:       basePort,
+		StorageBackend: gridkv.BackendMemorySharded,
+		MaxMemoryMB:    6144,
+		ShardCount:     512,
+	}
+
+	sim := NewTestEnvironmentSimulator(config)
+	if err := sim.SetupCluster(t); err != nil {
+		t.Fatalf("failed to setup cluster: %v", err)
+	}
+	defer sim.Cleanup()
+
+	nodes := sim.GetNodes()
+	tracker := newExtremeKeyTracker()
+	var keySeq atomic.Int64
+	workerCount := nodeCount * workerMultiplier
+	var writeOps, readOps, deleteOps atomic.Int64
+	var writeErrs, readErrs, deleteErrs atomic.Int64
+
+	errCh := make(chan error, 1)
+	reportErr := func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
+
+	start := time.Now()
+	stopTime := start.Add(workloadDuration)
+
+	var failOnce atomic.Bool
+	var failWG sync.WaitGroup
+	enableFailures := prodLongRuntime
+
+	induceFailures := func() {
+		defer failWG.Done()
+		failIndices := make([]int, 0, failCount)
+		for idx := nodeCount - 1; idx >= 1 && len(failIndices) < failCount; idx-- {
+			failIndices = append(failIndices, idx)
+		}
+		t.Logf("Inducing shutdown of %d nodes under load...", len(failIndices))
+		if err := sim.ShutdownNodes(failIndices, 90*time.Second); err != nil && !strings.Contains(err.Error(), "timeout") {
+			reportErr(fmt.Errorf("shutdown failed: %w", err))
+		}
+	}
+
+	var wg sync.WaitGroup
+	for workerID := 0; workerID < workerCount; workerID++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(id)*7919))
+			for time.Now().Before(stopTime) {
+				if enableFailures && !failOnce.Load() && time.Since(start) > workloadDuration/2 {
+					if failOnce.CompareAndSwap(false, true) {
+						failWG.Add(1)
+						go induceFailures()
+					}
+				}
+
+				currentBytes := tracker.currentBytes()
+				op := pickExtremeOperation(r, currentBytes, targetDataBytes)
+
+				switch op {
+				case "write":
+					writeOps.Add(1)
+					node := pickAliveNode(nodes, r)
+					if node == nil {
+						time.Sleep(5 * time.Millisecond)
+						continue
+					}
+					valueSize := r.Intn(maxValueSize-minValueSize+1) + minValueSize
+					seed := r.Int63()
+					payload := deterministicPayload(seed, valueSize)
+					preferNew := currentBytes < targetDataBytes || tracker.size() == 0
+					key := tracker.pickKeyForWrite(r, preferNew, fmt.Sprintf("evt-key-%d", keySeq.Add(1)))
+
+					ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+					err := node.Set(ctx, key, payload)
+					cancel()
+					if err != nil {
+						writeErrs.Add(1)
+						continue
+					}
+					tracker.upsert(key, extremeValueInfo{size: valueSize, seed: seed})
+				case "read":
+					readOps.Add(1)
+					key, info, ok := tracker.random(r)
+					if !ok {
+						time.Sleep(5 * time.Millisecond)
+						continue
+					}
+					node := pickAliveNode(nodes, r)
+					if node == nil {
+						time.Sleep(5 * time.Millisecond)
+						continue
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
+					value, err := node.Get(ctx, key)
+					cancel()
+					if err != nil {
+						readErrs.Add(1)
+						continue
+					}
+					expected := deterministicPayload(info.seed, info.size)
+					if !bytes.Equal(value, expected) {
+						readErrs.Add(1)
+						continue
+					}
+				case "delete":
+					deleteOps.Add(1)
+					key, _, ok := tracker.random(r)
+					if !ok {
+						time.Sleep(5 * time.Millisecond)
+						continue
+					}
+					node := pickAliveNode(nodes, r)
+					if node == nil {
+						time.Sleep(5 * time.Millisecond)
+						continue
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+					err := node.Delete(ctx, key)
+					cancel()
+					if err != nil {
+						deleteErrs.Add(1)
+						continue
+					}
+					tracker.remove(key)
+				}
+			}
+		}(workerID)
+	}
+
+	wg.Wait()
+	if failOnce.Load() {
+		failWG.Wait()
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("workload error: %v", err)
+	default:
+	}
+
+	t.Logf("Extreme workload complete: target=%.2f GiB current=%.2f GiB writes=%d (fail=%d) reads=%d (fail=%d) deletes=%d (fail=%d)",
+		float64(targetDataBytes)/float64(gibibyte),
+		float64(tracker.currentBytes())/float64(gibibyte),
+		writeOps.Load(), writeErrs.Load(),
+		readOps.Load(), readErrs.Load(),
+		deleteOps.Load(), deleteErrs.Load())
+
+	sim.WaitForReplicationSettle(nodes...)
+
+	sim.LogNodeDiagnostics(t, "post-workload")
+
+	time.Sleep(drainGracePeriod)
+
+	survivors := make([]*gridkv.GridKV, 0, len(nodes))
+	for _, node := range nodes {
+		if node != nil {
+			survivors = append(survivors, node)
+		}
+	}
+	if len(survivors) == 0 {
+		t.Fatalf("no surviving nodes for verification")
+	}
+
+	snapshot := tracker.snapshot()
+	if len(snapshot) == 0 {
+		t.Fatalf("no keys were written during workload")
+	}
+
+	verifyKeys := make([]string, 0, len(snapshot))
+	for key := range snapshot {
+		verifyKeys = append(verifyKeys, key)
+	}
+	rand.Shuffle(len(verifyKeys), func(i, j int) {
+		verifyKeys[i], verifyKeys[j] = verifyKeys[j], verifyKeys[i]
+	})
+	maxSamples := 1024
+	if prodLongRuntime {
+		maxSamples = 4096
+	}
+	if len(verifyKeys) > maxSamples {
+		verifyKeys = verifyKeys[:maxSamples]
+	}
+
+	verifyCh := make(chan string, len(verifyKeys))
+	for _, key := range verifyKeys {
+		verifyCh <- key
+	}
+	close(verifyCh)
+
+	verifyErr := make(chan error, 1)
+	verifyWorkerCount := len(survivors)
+	if verifyWorkerCount > 8 {
+		verifyWorkerCount = 8
+	}
+	if verifyWorkerCount < 1 {
+		verifyWorkerCount = 1
+	}
+
+	var verifyWG sync.WaitGroup
+	for i := 0; i < verifyWorkerCount; i++ {
+		verifyWG.Add(1)
+		go func() {
+			defer verifyWG.Done()
+			for key := range verifyCh {
+				info := snapshot[key]
+				expected := deterministicPayload(info.seed, info.size)
+				deadline := time.Now().Add(consistencyWait)
+				var consistent bool
+				for time.Now().Before(deadline) && !consistent {
+					for _, node := range survivors {
+						sim.WaitForReplicationSettle(node)
+						ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
+						value, err := node.Get(ctx, key)
+						cancel()
+						if err == nil && bytes.Equal(value, expected) {
+							consistent = true
+							break
+						}
+					}
+					if !consistent {
+						time.Sleep(200 * time.Millisecond)
+					}
+				}
+				if !consistent {
+					select {
+					case verifyErr <- fmt.Errorf("key %s not consistent after %.0fs", key, consistencyWait.Seconds()):
+					default:
+					}
+					sim.LogNodeDiagnostics(t, "verification failure")
+					return
+				}
+			}
+		}()
+	}
+
+	verifyWG.Wait()
+	select {
+	case err := <-verifyErr:
+		t.Fatalf("%v", err)
+	default:
+	}
+}
+
+type extremeValueInfo struct {
+	size int
+	seed int64
+}
+
+type extremeKeyTracker struct {
+	mu         sync.RWMutex
+	keys       []string
+	index      map[string]int
+	meta       map[string]extremeValueInfo
+	totalBytes int64
+}
+
+func newExtremeKeyTracker() *extremeKeyTracker {
+	return &extremeKeyTracker{
+		index: make(map[string]int),
+		meta:  make(map[string]extremeValueInfo),
+	}
+}
+
+func (t *extremeKeyTracker) upsert(key string, info extremeValueInfo) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if idx, ok := t.index[key]; ok {
+		prev := t.meta[key]
+		t.meta[key] = info
+		delta := info.size - prev.size
+		atomic.AddInt64(&t.totalBytes, int64(delta))
+		t.keys[idx] = key
+	} else {
+		t.index[key] = len(t.keys)
+		t.keys = append(t.keys, key)
+		t.meta[key] = info
+		atomic.AddInt64(&t.totalBytes, int64(info.size))
+	}
+}
+
+func (t *extremeKeyTracker) remove(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	info, ok := t.meta[key]
+	if !ok {
+		return
+	}
+	idx := t.index[key]
+	lastIdx := len(t.keys) - 1
+	lastKey := t.keys[lastIdx]
+	t.keys[idx] = lastKey
+	t.index[lastKey] = idx
+	t.keys = t.keys[:lastIdx]
+	delete(t.index, key)
+	delete(t.meta, key)
+	atomic.AddInt64(&t.totalBytes, -int64(info.size))
+}
+
+func (t *extremeKeyTracker) random(r *rand.Rand) (string, extremeValueInfo, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if len(t.keys) == 0 {
+		return "", extremeValueInfo{}, false
+	}
+	key := t.keys[r.Intn(len(t.keys))]
+	return key, t.meta[key], true
+}
+
+func (t *extremeKeyTracker) pickKeyForWrite(r *rand.Rand, preferNew bool, nextKey string) string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if preferNew || len(t.keys) == 0 || r.Float64() < 0.5 {
+		return nextKey
+	}
+	key := t.keys[r.Intn(len(t.keys))]
+	return key
+}
+
+func (t *extremeKeyTracker) snapshot() map[string]extremeValueInfo {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	copyMap := make(map[string]extremeValueInfo, len(t.meta))
+	for k, v := range t.meta {
+		copyMap[k] = v
+	}
+	return copyMap
+}
+
+func (t *extremeKeyTracker) currentBytes() int64 {
+	return atomic.LoadInt64(&t.totalBytes)
+}
+
+func (t *extremeKeyTracker) size() int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return len(t.keys)
+}
+
+func deterministicPayload(seed int64, size int) []byte {
+	r := rand.New(rand.NewSource(seed))
+	buf := make([]byte, size)
+	_, _ = r.Read(buf)
+	return buf
+}
+
+func pickExtremeOperation(r *rand.Rand, currentBytes, targetBytes int64) string {
+	lowerBound := targetBytes - targetBytes/10
+	upperBound := targetBytes + targetBytes/10
+	if currentBytes < lowerBound {
+		if r.Float64() < 0.7 {
+			return "write"
+		}
+	}
+	if currentBytes > upperBound {
+		if r.Float64() < 0.6 {
+			return "delete"
+		}
+	}
+	p := r.Float64()
+	switch {
+	case p < 0.45:
+		return "write"
+	case p < 0.8:
+		return "read"
+	default:
+		return "delete"
+	}
+}
+
+func pickAliveNode(nodes []*gridkv.GridKV, r *rand.Rand) *gridkv.GridKV {
+	if len(nodes) == 0 {
+		return nil
+	}
+	for i := 0; i < len(nodes)*2; i++ {
+		idx := r.Intn(len(nodes))
+		if node := nodes[idx]; node != nil {
+			return node
+		}
+	}
+	return nil
 }

@@ -261,12 +261,14 @@ func (cgm *ClusterGossipManager) forwardDirect(targetNodeID string, key string, 
 		return fmt.Errorf("target node %s not found", targetNodeID)
 	}
 
+	setData := storageItemToProto(item)
 	protoOp := &CacheSyncOperation{
 		Key:           key,
 		ClientVersion: item.Version,
 		Type:          OperationType_OP_SET,
+		SetData:       setData,
 		DataPayload: &CacheSyncOperation_SetData{
-			SetData: storageItemToProto(item),
+			SetData: setData,
 		},
 	}
 
@@ -418,9 +420,10 @@ func (cgm *ClusterGossipManager) replicateAsync(key string, item *storage.Stored
 		Key:           key,
 		ClientVersion: item.Version,
 		Type:          OperationType_OP_SET,
-		DataPayload: &CacheSyncOperation_SetData{
-			SetData: storageItemToProto(item),
-		},
+	}
+	baseOp.SetData = storageItemToProto(item)
+	baseOp.DataPayload = &CacheSyncOperation_SetData{
+		SetData: baseOp.SetData,
 	}
 
 	if baseOp.GetSetData() == nil {
@@ -563,12 +566,14 @@ func (cgm *ClusterGossipManager) SetBatch(ctx context.Context, items map[string]
 					return
 				}
 				for _, it := range its {
+					setData := storageItemToProto(it.item)
 					protoOp := &CacheSyncOperation{
 						Key:           it.key,
 						ClientVersion: it.item.Version,
 						Type:          OperationType_OP_SET,
+						SetData:       setData,
 						DataPayload: &CacheSyncOperation_SetData{
-							SetData: storageItemToProto(it.item),
+							SetData: setData,
 						},
 					}
 					if protoOp.GetSetData() != nil {

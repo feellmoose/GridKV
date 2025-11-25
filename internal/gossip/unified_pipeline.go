@@ -2,6 +2,7 @@ package gossip
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -80,6 +81,14 @@ func (up *UnifiedPipeline) flush() {
 	up.sendBatch(ops)
 }
 
+// Pending returns the number of buffered operations waiting to flush.
+func (up *UnifiedPipeline) Pending() int64 {
+	if up == nil {
+		return 0
+	}
+	return up.pendingOps.Load()
+}
+
 func (up *UnifiedPipeline) run() {
 	defer up.wg.Done()
 	interval := up.getAdaptiveFlushInterval()
@@ -135,6 +144,27 @@ func (up *UnifiedPipeline) sendBatch(ops []*CacheSyncOperation) {
 	}
 
 	if up.useBinary {
+		// Check message size and split if needed to avoid TCP limit
+		payload, _ := encodeCacheSyncPayload(ops)
+		estimatedSize := len(payload) + 64 // Add overhead for binary message header
+
+		if estimatedSize > maxSerializedMessageSize {
+			// Split operations into smaller batches
+			splitSize := len(ops) / 2
+			if splitSize == 0 {
+				splitSize = 1
+			}
+			for i := 0; i < len(ops); i += splitSize {
+				end := i + splitSize
+				if end > len(ops) {
+					end = len(ops)
+				}
+				batch := ops[i:end]
+				up.sendBatch(batch) // Recursive call with smaller batch
+			}
+			return
+		}
+
 		msg := GetBinaryMessage()
 		msg.Type = BinaryMsgTypeCacheSync
 		senderBytes := []byte(up.manager.localNodeID)
@@ -144,14 +174,47 @@ func (up *UnifiedPipeline) sendBatch(ops []*CacheSyncOperation) {
 				msg.Sender[i] = 0
 			}
 		}
-		msg.Payload = EncodeOperations(ops)
+		msg.Payload = payload
 		data := msg.Marshal()
 		PutBinaryMessage(msg)
 
 		ctx, cancel := context.WithTimeout(context.Background(), up.manager.replicationTimeout)
-		_ = up.manager.network.SendRaw(ctx, up.target, data)
+		err := up.manager.network.SendRaw(ctx, up.target, data)
 		cancel()
+		if err != nil {
+			// Check if error is due to message size or connection reset
+			errStr := err.Error()
+			isSizeError := len(data) > maxSerializedMessageSize ||
+				strings.Contains(errStr, "message too large") ||
+				strings.Contains(errStr, "connection reset")
+
+			if isSizeError && len(ops) > 1 {
+				// Split and retry if it's a size-related error
+				splitSize := len(ops) / 2
+				if splitSize == 0 {
+					splitSize = 1
+				}
+				for i := 0; i < len(ops); i += splitSize {
+					end := i + splitSize
+					if end > len(ops) {
+						end = len(ops)
+					}
+					up.sendBatch(ops[i:end]) // Recursive call with smaller batch
+				}
+				return
+			}
+
+			if up.manager.metrics != nil {
+				up.manager.metrics.IncrementReplicationFailures()
+			}
+			up.requeueOps(ops)
+			return
+		}
+		if up.manager.metrics != nil {
+			up.manager.metrics.IncrementReplicationSuccess()
+		}
 	} else {
+		// Build message and check actual serialized size before sending
 		msg := getGossipMessage()
 		msg.Type = GossipMessageType_MESSAGE_TYPE_CACHE_SYNC
 		msg.Sender = up.manager.localNodeID
@@ -164,6 +227,32 @@ func (up *UnifiedPipeline) sendBatch(ops []*CacheSyncOperation) {
 			},
 		}
 		up.manager.signMessageCanonical(msg)
+
+		// Check actual serialized size (gossip messages convert to binary internally)
+		binary := convertGossipMessageToBinary(msg)
+		if binary != nil {
+			data := binary.Marshal()
+			PutBinaryMessage(binary)
+
+			const maxMessageSize = 10 * 1024 * 1024 // 10MB max
+			if len(data) > maxMessageSize {
+				putGossipMessage(msg)
+				// Split operations into smaller batches
+				splitSize := len(ops) / 2
+				if splitSize == 0 {
+					splitSize = 1
+				}
+				for i := 0; i < len(ops); i += splitSize {
+					end := i + splitSize
+					if end > len(ops) {
+						end = len(ops)
+					}
+					up.sendBatch(ops[i:end]) // Recursive call with smaller batch
+				}
+				return
+			}
+		}
+
 		timeout := up.manager.replicationTimeout
 		if len(ops) > 50000 {
 			timeout = timeout * 3
@@ -175,6 +264,32 @@ func (up *UnifiedPipeline) sendBatch(ops []*CacheSyncOperation) {
 			} else {
 				up.manager.metrics.IncrementReplicationFailures()
 			}
+		}
+		if err != nil {
+			// Check if error is due to message size
+			errStr := err.Error()
+			isSizeError := strings.Contains(errStr, "message too large")
+
+			if isSizeError && len(ops) > 1 {
+				// Split and retry if it's a size-related error
+				splitSize := len(ops) / 2
+				if splitSize == 0 {
+					splitSize = 1
+				}
+				for i := 0; i < len(ops); i += splitSize {
+					end := i + splitSize
+					if end > len(ops) {
+						end = len(ops)
+					}
+					up.sendBatch(ops[i:end]) // Recursive call with smaller batch
+				}
+				putGossipMessage(msg)
+				return
+			}
+
+			up.requeueOps(ops)
+			putGossipMessage(msg)
+			return
 		}
 		putGossipMessage(msg)
 	}
@@ -195,7 +310,8 @@ func (up *UnifiedPipeline) sendDirect(op *CacheSyncOperation) {
 				msg.Sender[i] = 0
 			}
 		}
-		msg.Payload = EncodeOperations([]*CacheSyncOperation{op})
+		payload, _ := encodeCacheSyncPayload([]*CacheSyncOperation{op})
+		msg.Payload = payload
 		data := msg.Marshal()
 		PutBinaryMessage(msg)
 
@@ -220,6 +336,23 @@ func (up *UnifiedPipeline) sendDirect(op *CacheSyncOperation) {
 		_ = up.manager.network.SendWithTimeout(up.target, msg, 100*time.Millisecond)
 		putGossipMessage(msg)
 	}
+}
+
+func (up *UnifiedPipeline) requeueOps(ops []*CacheSyncOperation) {
+	if up == nil || len(ops) == 0 || up.manager == nil || up.stopped.Load() {
+		return
+	}
+	if !up.manager.isNodeLocallyAlive(up.target) {
+		return
+	}
+	up.opsMu.Lock()
+	up.ops = append(ops, up.ops...)
+	up.opsMu.Unlock()
+	up.pendingOps.Add(int64(len(ops)))
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		up.flush()
+	}()
 }
 
 func (up *UnifiedPipeline) Stop() {

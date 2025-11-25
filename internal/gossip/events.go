@@ -429,12 +429,14 @@ func (b *BatchedReadRepair) flushLocked() {
 
 			opsMap := make(map[string]*CacheSyncOperation)
 			for _, repair := range repairsCopy {
+				setData := storageItemToProto(repair.Item)
 				op := &CacheSyncOperation{
 					Key:           repair.Key,
 					ClientVersion: repair.Item.Version,
 					Type:          OperationType_OP_SET,
+					SetData:       setData,
 					DataPayload: &CacheSyncOperation_SetData{
-						SetData: storageItemToProto(repair.Item),
+						SetData: setData,
 					},
 				}
 				opsMap[repair.Key] = op

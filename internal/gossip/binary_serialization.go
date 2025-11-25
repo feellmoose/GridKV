@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"sync"
+
+	"github.com/golang/snappy"
 )
 
 var (
@@ -70,6 +72,11 @@ func UnmarshalBinaryMessage(data []byte) (*BinaryMessage, error) {
 }
 
 // convertBinaryToGossipMessage converts BinaryMessage to GossipMessage
+const (
+	cacheSyncCompressThreshold = 128 * 1024
+	cacheSyncCompressedMagic   = 0xEACEEA5E
+)
+
 func convertBinaryToGossipMessage(binary *BinaryMessage) *GossipMessage {
 	if binary == nil {
 		return nil
@@ -89,13 +96,14 @@ func convertBinaryToGossipMessage(binary *BinaryMessage) *GossipMessage {
 	switch binary.Type {
 	case BinaryMsgTypeCacheSync:
 		msg.Type = GossipMessageType_MESSAGE_TYPE_CACHE_SYNC
-		ops, err := DecodeOperations(binary.Payload)
+		ops, compressed, err := decodeCacheSyncPayload(binary.Payload)
 		if err == nil && len(ops) > 0 {
 			syncMsg := &SyncMessage{
 				IncrementalSync: &IncrementalSyncPayload{
 					Operations: ops,
 				},
 			}
+			msg.Compressed = compressed
 			msg.CacheSyncPayload = syncMsg
 			msg.Payload = &GossipMessage_CacheSyncPayload{
 				CacheSyncPayload: syncMsg,
@@ -180,7 +188,8 @@ func convertGossipMessageToBinary(msg *GossipMessage) *BinaryMessage {
 		}
 		if syncMsg != nil {
 			if incSync := syncMsg.GetIncrementalSync(); incSync != nil {
-				binary.Payload = EncodeOperations(incSync.Operations)
+				payload, _ := encodeCacheSyncPayload(incSync.Operations)
+				binary.Payload = payload
 			}
 		}
 	case GossipMessageType_MESSAGE_TYPE_CONNECT:
@@ -243,7 +252,42 @@ func convertGossipMessageToBinary(msg *GossipMessage) *BinaryMessage {
 	return binary
 }
 
+// maxSerializedMessageSize is the maximum size for a serialized message before sending
+// Set to 9MB to leave room for protocol headers and avoid TCP 10MB limit
+const maxSerializedMessageSize = 9 * 1024 * 1024
+
 // EncodeOperations encodes CacheSyncOperation slice to binary format
+func encodeCacheSyncPayload(ops []*CacheSyncOperation) ([]byte, bool) {
+	if len(ops) == 0 {
+		return nil, false
+	}
+	raw := EncodeOperations(ops)
+	if len(raw) <= cacheSyncCompressThreshold {
+		return raw, false
+	}
+	compressed := snappy.Encode(nil, raw)
+	payload := make([]byte, 4+len(compressed))
+	binary.LittleEndian.PutUint32(payload[0:4], cacheSyncCompressedMagic)
+	copy(payload[4:], compressed)
+	return payload, true
+}
+
+func decodeCacheSyncPayload(data []byte) ([]*CacheSyncOperation, bool, error) {
+	if len(data) < 4 {
+		return nil, false, ErrInvalidMessage
+	}
+	if binary.LittleEndian.Uint32(data[0:4]) != cacheSyncCompressedMagic {
+		ops, err := DecodeOperations(data)
+		return ops, false, err
+	}
+	decompressed, err := snappy.Decode(nil, data[4:])
+	if err != nil {
+		return nil, false, err
+	}
+	ops, err := DecodeOperations(decompressed)
+	return ops, true, err
+}
+
 func EncodeOperations(ops []*CacheSyncOperation) []byte {
 	if len(ops) == 0 {
 		return nil

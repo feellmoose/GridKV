@@ -979,12 +979,14 @@ func (gm *GossipManager) forwardWrite(key string, item *storage.StoredItem, coor
 		return fmt.Errorf("coordinator %s unknown", coordinatorID)
 	}
 
+	setData := storageItemToProto(item)
 	protoOp := &CacheSyncOperation{
 		Key:           key,
 		ClientVersion: item.Version,
 		Type:          OperationType_OP_SET,
+		SetData:       setData,
 		DataPayload: &CacheSyncOperation_SetData{
-			SetData: storageItemToProto(item),
+			SetData: setData,
 		},
 	}
 	// If conversion failed (unlikely), skip sending malformed write
@@ -1088,12 +1090,14 @@ func (gm *GossipManager) replicateToNodes(ctx context.Context, key string, item 
 	}
 
 	// Use pipeline batching for high throughput
+	setData := storageItemToProto(item)
 	baseOp := &CacheSyncOperation{
 		Key:           key,
 		ClientVersion: item.Version,
 		Type:          OperationType_OP_SET,
+		SetData:       setData,
 		DataPayload: &CacheSyncOperation_SetData{
-			SetData: storageItemToProto(item),
+			SetData: setData,
 		},
 	}
 	if baseOp.GetSetData() == nil {

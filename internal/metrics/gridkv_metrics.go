@@ -124,6 +124,10 @@ func registerGridKVMetrics(e *MetricsExporter) {
 	e.RegisterCounter("network_bytes_sent", "Network bytes sent", "bytes", nil)
 	e.RegisterCounter("network_bytes_received", "Network bytes received", "bytes", nil)
 
+	// Transport diagnostics
+	e.RegisterCounter("transport_send_success_total", "Successful transport sends", "sends", nil)
+	e.RegisterCounter("transport_send_failures_total", "Failed transport sends", "sends", nil)
+
 	// Core storage metrics (2 metrics)
 	e.RegisterGauge("storage_keys_total", "Total keys in storage", "keys", nil)
 	e.RegisterGauge("storage_size_bytes", "Storage size in bytes", "bytes", nil)
@@ -143,6 +147,10 @@ func registerGridKVMetrics(e *MetricsExporter) {
 	e.RegisterCounter("read_batch_batches_sent", "Total batch read requests sent", "batches", nil)
 	e.RegisterGauge("read_batch_pending_requests", "Current pending read requests in batches", "requests", nil)
 	e.RegisterCounter("read_batch_errors", "Batch read processing errors", "errors", nil)
+
+	// Gossip diagnostics
+	e.RegisterGauge("gossip_local_healthy_nodes", "Healthy nodes from local perspective", "nodes", nil)
+	e.RegisterGauge("gossip_local_cluster_size", "Cluster size from local perspective", "nodes", nil)
 }
 
 // Cluster Metrics (Gauges)
@@ -299,26 +307,59 @@ func (m *GridKVMetrics) AddNetworkBytesReceived(bytes int64) {
 	m.exporter.AddCounter("network_bytes_received", bytes)
 }
 
+// IncrementTransportSendSuccess increments the transport send success counter.
+//
+//go:inline
+func (m *GridKVMetrics) IncrementTransportSendSuccess() {
+	m.exporter.IncrementCounter("transport_send_success_total")
+}
+
+// IncrementTransportSendFailures increments the transport send failures counter.
+//
+//go:inline
+func (m *GridKVMetrics) IncrementTransportSendFailures() {
+	m.exporter.IncrementCounter("transport_send_failures_total")
+}
+
 // Storage Metrics
 
+// SetStorageKeys updates the total number of keys currently persisted.
+//
+// Use this when compaction or migration changes the key count materially.
+//
+//go:inline
 func (m *GridKVMetrics) SetStorageKeys(count int64) {
 	m.exporter.SetGauge("storage_keys_total", count)
 }
 
+// SetStorageBytes records the total logical storage footprint in bytes.
+//
+// This typically maps to the backing store's allocated size.
+//
+//go:inline
 func (m *GridKVMetrics) SetStorageBytes(bytes int64) {
 	m.exporter.SetGauge("storage_size_bytes", bytes)
 }
 
 // Performance Metrics
 
+// SetLatencyP50 sets the rolling P50 latency (nanoseconds) for served requests.
+//
+//go:inline
 func (m *GridKVMetrics) SetLatencyP50(nanos int64) {
 	m.exporter.SetGauge("latency_p50_ns", nanos)
 }
 
+// SetLatencyP95 sets the rolling P95 latency (nanoseconds) for served requests.
+//
+//go:inline
 func (m *GridKVMetrics) SetLatencyP95(nanos int64) {
 	m.exporter.SetGauge("latency_p95_ns", nanos)
 }
 
+// SetLatencyP99 sets the rolling P99 latency (nanoseconds) for served requests.
+//
+//go:inline
 func (m *GridKVMetrics) SetLatencyP99(nanos int64) {
 	m.exporter.SetGauge("latency_p99_ns", nanos)
 }
@@ -344,6 +385,13 @@ func (m *GridKVMetrics) IncrementPipelineOperationsDropped() {
 //go:inline
 func (m *GridKVMetrics) SetPipelineActiveCount(count int64) {
 	m.exporter.SetGauge("pipeline_active_count", count)
+}
+
+// SetShutdownPendingShards reports pending shards during graceful shutdown.
+//
+//go:inline
+func (m *GridKVMetrics) SetShutdownPendingShards(count int64) {
+	m.exporter.SetGauge("shutdown_pending_shards", count)
 }
 
 // Read Batch Processing Metrics (optimized)
@@ -374,6 +422,20 @@ func (m *GridKVMetrics) IncrementReadBatchErrors() {
 //go:inline
 func (m *GridKVMetrics) SetReadBatchPendingRequests(count int64) {
 	m.exporter.SetGauge("read_batch_pending_requests", count)
+}
+
+// SetGossipLocalHealthyNodes sets the gauge for locally observed healthy nodes.
+//
+//go:inline
+func (m *GridKVMetrics) SetGossipLocalHealthyNodes(count int64) {
+	m.exporter.SetGauge("gossip_local_healthy_nodes", count)
+}
+
+// SetGossipLocalClusterSize sets the gauge for locally observed cluster size.
+//
+//go:inline
+func (m *GridKVMetrics) SetGossipLocalClusterSize(count int64) {
+	m.exporter.SetGauge("gossip_local_cluster_size", count)
 }
 
 // Export collects all metrics and sends them to the configured export function.

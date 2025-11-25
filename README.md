@@ -14,7 +14,7 @@ English | [简体中文](README_ZH.md)
 - **Embedded**: Import as Go library, runs in-process
 - **Distributed Get**: Automatic replica selection, retry, and read-repair
 - **Auto-Clustering**: SWIM protocol, <1s failure detection
-- **High Performance**: 3-6M ops/s (5-node cluster), 10-20M ops/s (10-node cluster)
+ - **High Performance**: up to 95K ops/s (3-node Memory peak) / 66K ops/s (3-node MemorySharded peak) on a single host, plus 14.6M ops/s local microbenchmarks
 - **Adaptive Networking**: Auto-detects LAN/WAN, optimizes accordingly
 
 ---
@@ -69,16 +69,23 @@ GridKV's `Get()` operation provides intelligent distributed read capabilities:
 
 ### Performance
 
-**Cluster Throughput** (MemorySharded backend, QUIC transport):
-- **5-node cluster**: 3-6M ops/s (LAN)
-- **10-node cluster**: 10-20M ops/s (LAN)
-- **15-node cluster**: 15-30M ops/s (LAN)
+All published numbers come from a single Linux 6.14 host (Go 1.23, Intel i7-12700H, 20 vCPUs, QUIC transport). We publish two workload modes:
 
-**Latency**:
-- Local (same instance): 43ns
-- LAN (cached, single replica): <1ms
-- LAN (forwarded): ~2ms
-- WAN (cached): <50ms
+- **Peak** – `GRIDKV_NO_THROTTLE=1 go test ./tests/... -run TestMemory*` removes the 10 ms / 5 ms / 20 ms sleeps from the mixed workload to show the maximum sustainable throughput of this single-host setup.
+- **Validation** – default workload (60 % write / 30 % read / 10 % delete with sleeps) used for regression testing memory safety, eviction, and replication.
+
+**Cluster Throughput (single-host LAN, QUIC)**:
+
+- Peak / MemorySharded: 66 K ops/s (3 nodes), 17 K (5 nodes), 10 K (10 nodes), 9 K (15 nodes)
+- Peak / Memory: 95 K ops/s (3 nodes), 38 K (5 nodes), 9 K (10 nodes)
+- Validation / MemorySharded: 5.6 K ops/s (3 nodes), 3.4 K (5 nodes), 1.5 K (10 nodes), 2.0 K (15 nodes)
+- Validation / Memory: 4.4 K ops/s (3 nodes), 2.7 K (5 nodes), 1.6 K (10 nodes)
+
+**Latency** (MemorySharded / QUIC):
+- Local (same instance): 43 ns
+- LAN (cached, single replica): <1 ms
+- LAN (forwarded): ~2 ms
+- WAN (cached): <50 ms
 
 ### How It Works
 
@@ -110,23 +117,31 @@ if err != nil {
 
 ## Storage Backends
 
-| Backend | Cluster Performance (10-node) | Local Performance | Use Case | Notes |
-|---------|-------------------------------|------------------|----------|-------|
-| **MemorySharded** | 10-20M ops/s (mixed)<br>30-50M ops/s (read-heavy) | 5.8M ops/s (100B)<br>14M ops/s (read-heavy) | Production, high-throughput | Recommended for production. Shard count: 2-4x CPU cores. |
-| **Memory** | 2-4M ops/s (mixed)<br>5-8M ops/s (read-heavy) | 933K ops/s (100B)<br>2.2M ops/s (read-heavy) | Development, testing | Auto-compression for values >1KB. Single lock limits concurrency. |
+| Backend | Peak Cluster (10-node, QUIC, **no throttle**) | Validation Cluster (10-node, QUIC, throttled) | Local Microbench (ops/s) | Use Case | Notes |
+|---------|---------------------------------------------|---------------------------------------------|--------------------------|----------|-------|
+| **MemorySharded** | **10.1K ops/s** total (writes 9.4K / reads 0.2K / deletes 0.5K) | **1.48K ops/s** total (writes 0.76K / reads 0.27K / deletes 0.45K) | 6.28M (100B small)<br>14.6M (read-heavy) | Production, high-throughput | Peak mode uses `GRIDKV_NO_THROTTLE=1`. Validation mode keeps mixed workload sleeps (10ms/5ms/20ms). |
+| **Memory** | **9.0K ops/s** total (writes 8.5K / reads 0.1K / deletes 0.5K) | **1.62K ops/s** total (writes 0.80K / reads 0.21K / deletes 0.61K) | 3.35M (100B small)<br>8.91M (read-heavy) | Development, testing | Compression-friendly values reach 0.77M (4KB) / 0.32M (16KB). Set `GRIDKV_NO_THROTTLE=1` for peak cluster tests. |
 
 ### MemorySharded (Recommended)
 
-**Cluster Performance**:
-- **5-node cluster**: 3-6M ops/s (mixed workload)
-- **10-node cluster**: 10-20M ops/s (mixed workload)
-- **15-node cluster**: 15-30M ops/s (mixed workload)
-- **Read-heavy (10-node)**: 30-50M ops/s
+**Peak Cluster Throughput** (QUIC, `GRIDKV_NO_THROTTLE=1`, single i7-12700H host):
+- **3-node**: 66.2K ops/s (writes 63.9K / reads 0.7K / deletes 1.6K)
+- **5-node**: 17.2K ops/s (writes 15.4K / reads 1.3K / deletes 0.5K)
+- **10-node**: 10.1K ops/s (writes 9.4K / reads 0.2K / deletes 0.5K)
+- **15-node**: 9.0K ops/s (writes 8.5K / reads 0.2K / deletes 0.3K)
 
-**Local Performance** (single node, Intel i7-12700H, 20 cores):
-- Small (100B): 5.8M ops/s (170ns/op)
-- Medium (1KB): 2.4M ops/s (419ns/op)
-- Read-heavy: 14M ops/s (71ns/op)
+**Validation Cluster Throughput** (default throttled workload: writers 10 ms / readers 5 ms / deleters 20 ms):
+- **3-node**: 5.63K ops/s (writes 1.92K / reads 3.25K / deletes 0.46K)
+- **5-node**: 3.43K ops/s (writes 1.96K / reads 0.79K / deletes 0.68K)
+- **10-node**: 1.48K ops/s (writes 0.76K / reads 0.27K / deletes 0.45K)
+- **15-node**: 1.99K ops/s (writes 0.93K / reads 0.73K / deletes 0.33K)
+
+_Transport note_: QUIC peak runs currently hit a 416 KiB UDP receive buffer ceiling on this Linux host, so read-heavy traffic flattens earlier than writes. Raising `/proc/sys/net/core/rmem_max` or running on multiple hosts yields higher read QPS.
+
+**Local Microbenchmarks** (`go test ./internal/storage -run ^$ -bench BenchmarkMemorySharded -benchtime=2s`):
+- Small (100B): 6.28M ops/s (159 ns/op)
+- Write-only (100B): 6.63M ops/s (151 ns/op)
+- Read-heavy: 14.6M ops/s (68.6 ns/op, 100% cache hit window)
 
 **Configuration**:
 ```go
@@ -139,15 +154,26 @@ Storage: &gridkv.StorageOptions{
 
 ### Memory (Simple)
 
-**Cluster Performance**:
-- **5-node cluster**: 1-2M ops/s (mixed workload)
-- **10-node cluster**: 2-4M ops/s (mixed workload)
-- **Read-heavy (10-node)**: 5-8M ops/s
+**Peak Cluster Throughput** (QUIC, `GRIDKV_NO_THROTTLE=1`, single i7-12700H host):
+- **3-node**: 94.6K ops/s (writes 61.7K / reads 30.6K / deletes 2.4K)
+- **5-node**: 38.4K ops/s (writes 37.3K / reads 0.24K / deletes 0.86K)
+- **10-node**: 9.0K ops/s (writes 8.45K / reads 0.12K / deletes 0.47K)
 
-**Local Performance** (single node):
-- Small (100B): 933K ops/s (1.1µs/op)
-- Medium (1KB): 840K ops/s (1.2µs/op, 15% compression)
-- Read-heavy: 2.2M ops/s (454ns/op)
+**Validation Cluster Throughput** (default throttled workload):
+- **3-node**: 4.45K ops/s (writes 1.63K / reads 2.43K / deletes 0.38K)
+- **5-node**: 2.73K ops/s (writes 1.63K / reads 0.53K / deletes 0.57K)
+- **10-node**: 1.62K ops/s (writes 0.80K / reads 0.21K / deletes 0.61K)
+
+_Transport note_: Removing throttles shifts the bottleneck from application logic to transport; TCP peak numbers on the same host land within ±30% of the QUIC peak results depending on node count.
+
+**Local Microbenchmarks** (`go test ./internal/storage -run ^$ -bench BenchmarkMemory -benchtime=2s`):
+- Small (100B): 3.35M ops/s (306 ns/op)
+- Medium (4 KB, compressible): 0.77M ops/s (1.32 µs/op, 0.8 % compressed size)
+- Large (16 KB, compressible): 0.32M ops/s (3.23 µs/op, 0.2 % compressed size)
+- Write-only (100B): 3.30M ops/s (308 ns/op)
+- Read-heavy: 8.91M ops/s (115 ns/op)
+
+_Benchmark environment: Linux 6.14, Go 1.23, Intel i7-12700H (20 vCPUs), GOMAXPROCS=20._
 
 **Configuration**:
 ```go
@@ -205,21 +231,64 @@ Network: &gridkv.NetworkOptions{
 
 ## Performance
 
-**Cluster Throughput** (MemorySharded backend, QUIC transport, LAN):
+All benchmarks were executed on a single Linux 6.14 host (Go 1.23, Intel i7-12700H, 20 vCPUs, GOMAXPROCS=20) with QUIC transport. Two workload modes are published:
 
-| Cluster Size | Mixed Workload | Read-Heavy | Write-Heavy |
-|--------------|----------------|------------|-------------|
-| 3 nodes | 2-4M ops/s | 8-12M ops/s | 1-2M ops/s |
-| 5 nodes | 3-6M ops/s | 15-25M ops/s | 2-3M ops/s |
-| 10 nodes | 10-20M ops/s | 30-50M ops/s | 5-8M ops/s |
-| 15 nodes | 15-30M ops/s | 45-75M ops/s | 8-12M ops/s |
+- **Peak** – run `GRIDKV_NO_THROTTLE=1 go test ./tests/... -run TestMemory*` to disable the 10 ms / 5 ms / 20 ms sleeps in `runMixedClusterWorkload`. This shows the maximum sustainable throughput in a single-host setup.
+- **Validation** – default workload (sleeps enabled) that we use for regression testing of memory safety, compression, eviction, and replication.
 
-**Latency**:
-- Local (same instance): 43ns
-- Distributed Get (LAN, cached): <1ms
-- Distributed Get (LAN, forwarded): ~2ms
-- Distributed Get (WAN, cached): <50ms
-- Distributed Set (async): ~2ms
+> **Important**: These numbers come from a LAN-style simulation on a *single* machine, and we currently only validate cluster sizes up to 15 nodes in this environment. Multi-host scaling characteristics may differ until we run distributed benchmarks.
+
+### Peak Cluster Throughput (QUIC, `GRIDKV_NO_THROTTLE=1`)
+
+| MemorySharded Cluster | Total QPS | Write QPS | Read QPS | Delete QPS |
+|----------------------|-----------|-----------|----------|------------|
+| 3 nodes | 66,184 | 63,866 | 688 | 1,630 |
+| 5 nodes | 17,154 | 15,395 | 1,264 | 495 |
+| 10 nodes | 10,059 | 9,390 | 216 | 454 |
+| 15 nodes | 8,979 | 8,542 | 172 | 266 |
+
+| Memory Cluster | Total QPS | Write QPS | Read QPS | Delete QPS |
+|----------------|-----------|-----------|----------|------------|
+| 3 nodes | 94,625 | 61,709 | 30,564 | 2,352 |
+| 5 nodes | 38,396 | 37,300 | 241 | 856 |
+| 10 nodes | 9,039 | 8,452 | 120 | 467 |
+
+_Note_: On this host, QUIC hits the default 416 KiB UDP receive buffer which limits small-cluster read throughput. Raising `rmem_max` or using multiple machines increases the read numbers substantially.
+
+### Validation Cluster Throughput (Mixed 60/30/10 with throttles)
+
+| MemorySharded Cluster | Total QPS | Write QPS | Read QPS | Delete QPS |
+|----------------------|-----------|-----------|----------|------------|
+| 3 nodes | 5,627 | 1,921 | 3,246 | 459 |
+| 5 nodes | 3,430 | 1,959 | 794 | 677 |
+| 10 nodes | 1,476 | 758 | 268 | 450 |
+| 15 nodes | 1,990 | 928 | 728 | 334 |
+
+| Memory Cluster | Total QPS | Write QPS | Read QPS | Delete QPS |
+|----------------|-----------|-----------|----------|------------|
+| 3 nodes | 4,452 | 1,634 | 2,434 | 383 |
+| 5 nodes | 2,725 | 1,630 | 529 | 566 |
+| 10 nodes | 1,621 | 797 | 211 | 613 |
+
+### Local Microbenchmarks (`go test ./internal/storage -run ^$ -bench BenchmarkMemory -benchtime=2s`)
+
+| Backend | Scenario | Ops/sec | Notes |
+|---------|----------|--------:|-------|
+| Memory | Small values (100 B) | 3.35M | 306 ns/op |
+| Memory | Medium values (4 KB, compressible) | 0.77M | 1.32 µs/op, 0.8 % compressed size |
+| Memory | Large values (16 KB, compressible) | 0.32M | 3.23 µs/op, 0.2 % compressed size |
+| Memory | Write-only (100 B) | 3.30M | 308 ns/op |
+| Memory | Read-heavy hot set | 8.91M | 115 ns/op |
+| MemorySharded | Small values (100 B) | 6.28M | 159 ns/op |
+| MemorySharded | Write-only (100 B) | 6.63M | 151 ns/op |
+| MemorySharded | Read-heavy hot set | 14.6M | 68.6 ns/op |
+
+**Latency (MemorySharded / QUIC)**:
+- Local (same instance): 43 ns
+- Distributed Get (LAN, cached): <1 ms
+- Distributed Get (LAN, forwarded): ~2 ms
+- Distributed Get (WAN, cached): <50 ms
+- Distributed Set (async): ~2 ms
 
 ---
 

@@ -23,7 +23,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -52,16 +54,14 @@ type MemoryStorage struct {
 	encoderPool sync.Pool
 	decoderPool sync.Pool
 
-	// LRU eviction support
-	lruMu      sync.Mutex
-	lruList    *list.List               // LRU list for eviction
-	lruMap     map[string]*list.Element // key -> LRU element
+	// LRU eviction support (sharded for reduced lock contention)
+	lru        *shardedLRU
 	evictCount atomic.Int64
 
 	// Sync buffer (lock-free ring buffer)
 	syncBuffer   []AtomicSyncOp
-	syncHead     uint64
-	syncTail     uint64
+	syncHead     atomic.Uint64 // Use atomic for thread safety
+	syncTail     atomic.Uint64 // Use atomic for thread safety
 	syncCapacity uint64
 	syncMask     uint64
 
@@ -76,8 +76,13 @@ type MemoryStorage struct {
 
 	maxMemoryBytes     int64 // Memory limit (0 = unlimited)
 	currentBytes       atomic.Int64
-	compressionEnabled bool // Enable compression for values > threshold
-	compressionThresh  int  // Compress values larger than this (default: 256 bytes)
+	compressionEnabled bool          // Enable compression for values > threshold
+	compressionThresh  int           // Compress values larger than this (default: 256 bytes)
+	evictShardCounter  atomic.Uint64 // Counter for round-robin eviction
+
+	// Expiration cleaner
+	cleanerStop    chan struct{}
+	cleanerRunning atomic.Bool
 }
 
 // compressedItem stores compressed value with metadata
@@ -87,6 +92,43 @@ type compressedItem struct {
 	Value      []byte // Compressed or raw value
 	Compressed bool   // Whether value is compressed
 	OrigSize   int    // Original size before compression
+}
+
+// Memory overhead constants (Go runtime overhead)
+const (
+	// compressedItemOverhead is the size of compressedItem struct
+	compressedItemOverhead = int64(unsafe.Sizeof(compressedItem{}))
+	// stringOverhead is Go string header size (16 bytes on 64-bit)
+	stringOverhead = int64(16)
+	// sliceOverhead is Go slice header size (24 bytes on 64-bit)
+	sliceOverhead = int64(24)
+	// sync.Map entry overhead (approximate, includes pointers and metadata)
+	syncMapEntryOverhead = int64(64)
+)
+
+// calculateItemSize calculates the approximate memory size of a stored item
+// This includes: key string, value slice, compressedItem struct, and sync.Map overhead
+func calculateItemSize(key string, value []byte) int64 {
+	return int64(len(key)) + // Key string data
+		int64(len(value)) + // Value slice data
+		compressedItemOverhead + // compressedItem struct
+		stringOverhead + // String header for key
+		sliceOverhead + // Slice header for value
+		syncMapEntryOverhead // sync.Map internal overhead
+}
+
+// lruShard represents a single LRU shard with its own lock
+type lruShard struct {
+	mu     sync.Mutex
+	list   *list.List
+	keyMap map[string]*list.Element
+}
+
+// shardedLRU provides sharded LRU to reduce lock contention
+type shardedLRU struct {
+	shards     []*lruShard
+	shardCount int
+	shardMask  uint64
 }
 
 // NewMemoryStorage creates a new memory-efficient in-memory storage with aggressive compression.
@@ -105,6 +147,16 @@ func NewMemoryStorage(maxMemoryMB int64) (*MemoryStorage, error) {
 		maxBytes = maxMemoryMB * 1024 * 1024
 	}
 
+	// Initialize sharded LRU (64 shards for good balance)
+	lruShardCount := 64
+	lruShards := make([]*lruShard, lruShardCount)
+	for i := 0; i < lruShardCount; i++ {
+		lruShards[i] = &lruShard{
+			list:   list.New(),
+			keyMap: make(map[string]*list.Element),
+		}
+	}
+
 	m := &MemoryStorage{
 		syncBuffer:         make([]AtomicSyncOp, capacity),
 		syncCapacity:       capacity,
@@ -112,8 +164,12 @@ func NewMemoryStorage(maxMemoryMB int64) (*MemoryStorage, error) {
 		maxMemoryBytes:     maxBytes,
 		compressionEnabled: true,
 		compressionThresh:  64, // Aggressive: compress values > 64 bytes (lowered from 256)
-		lruList:            list.New(),
-		lruMap:             make(map[string]*list.Element),
+		lru: &shardedLRU{
+			shards:     lruShards,
+			shardCount: lruShardCount,
+			shardMask:  uint64(lruShardCount - 1),
+		},
+		cleanerStop: make(chan struct{}),
 	}
 
 	// Initialize compression pools with better compression ratio
@@ -130,22 +186,46 @@ func NewMemoryStorage(maxMemoryMB int64) (*MemoryStorage, error) {
 		return decoder
 	}
 
+	// Start expiration cleaner
+	m.startExpirationCleaner()
+
 	return m, nil
 }
 
 // compress compresses data if compression is enabled and size > threshold
+// Returns compressed data and whether compression was applied
 func (m *MemoryStorage) compress(data []byte) ([]byte, bool) {
 	if !m.compressionEnabled || len(data) < m.compressionThresh {
+		return data, false
+	}
+
+	// Fast path: Skip compression for very small values that won't benefit
+	// Compression overhead is typically 20-50 bytes, so values < 100 bytes
+	// are unlikely to compress well
+	if len(data) < 100 {
+		return data, false
+	}
+
+	// Quick check: If data looks like it's already compressed (starts with zstd magic),
+	// skip compression attempt to avoid double compression
+	if len(data) >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD {
 		return data, false
 	}
 
 	encoder := m.encoderPool.Get().(*zstd.Encoder)
 	defer m.encoderPool.Put(encoder)
 
-	compressed := encoder.EncodeAll(data, make([]byte, 0, len(data)))
+	// Pre-allocate buffer with estimated size (typically compressed is 50-80% of original)
+	estimatedSize := len(data) / 2
+	if estimatedSize < 64 {
+		estimatedSize = 64
+	}
+	compressed := encoder.EncodeAll(data, make([]byte, 0, estimatedSize))
 
-	// Only use compressed if it's actually smaller
-	if len(compressed) < len(data) {
+	// Only use compressed if it's actually smaller (with 5% threshold to account for overhead)
+	// This prevents marginal compression that doesn't save meaningful space
+	compressionRatio := float64(len(compressed)) / float64(len(data))
+	if compressionRatio < 0.95 {
 		return compressed, true
 	}
 	return data, false
@@ -167,50 +247,161 @@ func (m *MemoryStorage) decompress(data []byte, wasCompressed bool) ([]byte, err
 	return decompressed, nil
 }
 
-// evictLRU evicts the least recently used item
+// evictLRU evicts the least recently used item from a random shard
 func (m *MemoryStorage) evictLRU() bool {
-	m.lruMu.Lock()
-	defer m.lruMu.Unlock()
+	// Try each shard in round-robin fashion to find an item to evict
+	// Start from a rotating shard to avoid always evicting from the same shard
+	startShard := m.evictShardCounter.Add(1) & m.lru.shardMask
 
-	if m.lruList.Len() == 0 {
-		return false
-	}
+	for i := 0; i < m.lru.shardCount; i++ {
+		shardIdx := (startShard + uint64(i)) & m.lru.shardMask
+		shard := m.lru.shards[shardIdx]
 
-	// Evict oldest item
-	oldest := m.lruList.Back()
-	if oldest != nil {
-		key := oldest.Value.(string)
-		m.lruList.Remove(oldest)
-		delete(m.lruMap, key)
-
-		// Remove from data map
-		if value, ok := m.data.LoadAndDelete(key); ok {
-			m.keyCount.Add(-1)
-			m.evictCount.Add(1)
-
-			// Update memory usage
-			if item, ok := value.(*compressedItem); ok {
-				itemSize := int64(len(key) + len(item.Value) + 64)
-				m.currentBytes.Add(-itemSize)
-				m.compressedBytes.Add(-int64(len(item.Value)))
-				m.originalBytes.Add(-int64(item.OrigSize))
-			}
-			return true
+		shard.mu.Lock()
+		if shard.list.Len() == 0 {
+			shard.mu.Unlock()
+			continue
 		}
+
+		// Evict oldest item from this shard
+		oldest := shard.list.Back()
+		if oldest != nil {
+			key := oldest.Value.(string)
+			shard.list.Remove(oldest)
+			delete(shard.keyMap, key)
+			shard.mu.Unlock()
+
+			// Remove from data map
+			if value, ok := m.data.LoadAndDelete(key); ok {
+				m.keyCount.Add(-1)
+				m.evictCount.Add(1)
+
+				// Update memory usage
+				if item, ok := value.(*compressedItem); ok {
+					itemSize := calculateItemSize(key, item.Value)
+					m.currentBytes.Add(-itemSize)
+					m.compressedBytes.Add(-int64(len(item.Value)))
+					m.originalBytes.Add(-int64(item.OrigSize))
+				}
+				return true
+			}
+			// Key was already deleted, continue to next shard
+			continue
+		}
+		shard.mu.Unlock()
 	}
 	return false
 }
 
-// touchLRU marks key as recently used
+// touchLRU marks key as recently used (sharded for reduced lock contention)
 func (m *MemoryStorage) touchLRU(key string) {
-	m.lruMu.Lock()
-	defer m.lruMu.Unlock()
+	// Hash key to select shard
+	hash := xxhash.Sum64String(key)
+	shard := m.lru.shards[hash&m.lru.shardMask]
 
-	if elem, ok := m.lruMap[key]; ok {
-		m.lruList.MoveToFront(elem)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	if elem, ok := shard.keyMap[key]; ok {
+		shard.list.MoveToFront(elem)
 	} else {
-		elem := m.lruList.PushFront(key)
-		m.lruMap[key] = elem
+		elem := shard.list.PushFront(key)
+		shard.keyMap[key] = elem
+	}
+}
+
+// removeFromLRU removes a key from LRU (sharded)
+func (m *MemoryStorage) removeFromLRU(key string) {
+	hash := xxhash.Sum64String(key)
+	shard := m.lru.shards[hash&m.lru.shardMask]
+
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+
+	if elem, ok := shard.keyMap[key]; ok {
+		shard.list.Remove(elem)
+		delete(shard.keyMap, key)
+	}
+}
+
+// clearLRU clears all LRU shards
+func (m *MemoryStorage) clearLRU() {
+	for _, shard := range m.lru.shards {
+		shard.mu.Lock()
+		shard.list = list.New()
+		shard.keyMap = make(map[string]*list.Element)
+		shard.mu.Unlock()
+	}
+}
+
+// startExpirationCleaner starts a background goroutine to periodically clean expired items
+// The goroutine will exit when cleanerStop is closed or receives a signal.
+func (m *MemoryStorage) startExpirationCleaner() {
+	if m.cleanerRunning.Swap(true) {
+		return // Already running
+	}
+
+	go func() {
+		defer func() {
+			// Ensure we mark as not running even if panic occurs
+			m.cleanerRunning.Store(false)
+		}()
+
+		ticker := time.NewTicker(10 * time.Second) // Clean every 10 seconds
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				m.cleanExpiredItems()
+			case <-m.cleanerStop:
+				// Cleaner stopped, exit goroutine
+				return
+			}
+		}
+	}()
+}
+
+// cleanExpiredItems removes all expired items from storage
+// This function is safe to call concurrently and handles errors gracefully.
+func (m *MemoryStorage) cleanExpiredItems() {
+	now := time.Now()
+	expiredKeys := make([]string, 0, 100) // Pre-allocate for batch deletion
+
+	// Collect expired keys (thread-safe Range)
+	m.data.Range(func(key, value interface{}) bool {
+		// Type assertion with safety check
+		k, ok1 := key.(string)
+		if !ok1 {
+			return true // Skip invalid key type
+		}
+		compItem, ok2 := value.(*compressedItem)
+		if !ok2 {
+			return true // Skip invalid value type
+		}
+
+		if !compItem.ExpireAt.IsZero() && now.After(compItem.ExpireAt) {
+			expiredKeys = append(expiredKeys, k)
+		}
+		return true
+	})
+
+	// Delete expired items in batch (thread-safe operations)
+	for _, key := range expiredKeys {
+		if value, ok := m.data.LoadAndDelete(key); ok {
+			m.keyCount.Add(-1)
+
+			// Update memory usage (atomic operations)
+			if item, ok := value.(*compressedItem); ok {
+				itemSize := calculateItemSize(key, item.Value)
+				m.currentBytes.Add(-itemSize)
+				m.compressedBytes.Add(-int64(len(item.Value)))
+				m.originalBytes.Add(-int64(item.OrigSize))
+			}
+
+			// Remove from LRU (thread-safe)
+			m.removeFromLRU(key)
+		}
 	}
 }
 
@@ -229,7 +420,7 @@ func (m *MemoryStorage) Set(key string, item *StoredItem) error {
 	compressedValue, isCompressed := m.compress(item.Value)
 
 	// Calculate item size for memory tracking
-	itemSize := int64(len(key) + len(compressedValue) + 64) // key + compressed value + overhead
+	itemSize := calculateItemSize(key, compressedValue)
 
 	// Check memory limit and evict proactively (aggressive memory management)
 	if m.maxMemoryBytes > 0 {
@@ -280,7 +471,7 @@ func (m *MemoryStorage) Set(key string, item *StoredItem) error {
 	} else {
 		// Update size delta
 		if oldItem, ok := oldValue.(*compressedItem); ok {
-			oldSize := int64(len(key) + len(oldItem.Value) + 64)
+			oldSize := calculateItemSize(key, oldItem.Value)
 			m.currentBytes.Add(itemSize - oldSize)
 			m.compressedBytes.Add(int64(len(compressedValue) - len(oldItem.Value)))
 			m.originalBytes.Add(int64(origSize - oldItem.OrigSize))
@@ -296,14 +487,14 @@ func (m *MemoryStorage) Set(key string, item *StoredItem) error {
 		Data:    item, // Original uncompressed data for sync
 	}
 
-	head := atomic.LoadUint64(&m.syncHead)
+	// Use atomic increment to get unique head position (prevents race condition)
+	head := m.syncHead.Add(1) - 1
 	m.syncBuffer[head&m.syncMask].Op = op
-	atomic.StoreUint64(&m.syncHead, head+1)
 
 	// Auto-advance tail if full (lock-free overwrite)
-	tail := atomic.LoadUint64(&m.syncTail)
+	tail := m.syncTail.Load()
 	if head-tail >= m.syncCapacity {
-		atomic.CompareAndSwapUint64(&m.syncTail, tail, tail+1)
+		m.syncTail.CompareAndSwap(tail, tail+1)
 	}
 
 	return nil
@@ -311,6 +502,7 @@ func (m *MemoryStorage) Set(key string, item *StoredItem) error {
 
 // Get retrieves a key-value pair with automatic decompression.
 // Decompresses value if it was compressed during Set.
+// Note: Hot key caching is handled at the gossip layer to avoid duplication.
 func (m *MemoryStorage) Get(key string) (*StoredItem, error) {
 	if key == "" {
 		return nil, errEmptyKey
@@ -334,12 +526,7 @@ func (m *MemoryStorage) Get(key string) (*StoredItem, error) {
 		m.keyCount.Add(-1)
 
 		// Update LRU
-		m.lruMu.Lock()
-		if elem, ok := m.lruMap[key]; ok {
-			m.lruList.Remove(elem)
-			delete(m.lruMap, key)
-		}
-		m.lruMu.Unlock()
+		m.removeFromLRU(key)
 
 		return nil, ErrItemExpired
 	}
@@ -379,19 +566,14 @@ func (m *MemoryStorage) Delete(key string, version int64) error {
 
 		// Update memory usage
 		if item, ok := value.(*compressedItem); ok {
-			itemSize := int64(len(key) + len(item.Value) + 64)
+			itemSize := calculateItemSize(key, item.Value)
 			m.currentBytes.Add(-itemSize)
 			m.compressedBytes.Add(-int64(len(item.Value)))
 			m.originalBytes.Add(-int64(item.OrigSize))
 		}
 
 		// Remove from LRU
-		m.lruMu.Lock()
-		if elem, ok := m.lruMap[key]; ok {
-			m.lruList.Remove(elem)
-			delete(m.lruMap, key)
-		}
-		m.lruMu.Unlock()
+		m.removeFromLRU(key)
 	}
 
 	// Add to sync buffer
@@ -402,13 +584,13 @@ func (m *MemoryStorage) Delete(key string, version int64) error {
 		Data:    nil,
 	}
 
-	head := atomic.LoadUint64(&m.syncHead)
+	// Use atomic increment to get unique head position (prevents race condition)
+	head := m.syncHead.Add(1) - 1
 	m.syncBuffer[head&m.syncMask].Op = op
-	atomic.StoreUint64(&m.syncHead, head+1)
 
-	tail := atomic.LoadUint64(&m.syncTail)
+	tail := m.syncTail.Load()
 	if head-tail >= m.syncCapacity {
-		atomic.CompareAndSwapUint64(&m.syncTail, tail, tail+1)
+		m.syncTail.CompareAndSwap(tail, tail+1)
 	}
 
 	return nil
@@ -430,12 +612,7 @@ func (m *MemoryStorage) Keys() []string {
 			m.keyCount.Add(-1)
 
 			// Remove from LRU
-			m.lruMu.Lock()
-			if elem, ok := m.lruMap[k]; ok {
-				m.lruList.Remove(elem)
-				delete(m.lruMap, k)
-			}
-			m.lruMu.Unlock()
+			m.removeFromLRU(k)
 
 			return true
 		}
@@ -457,27 +634,36 @@ func (m *MemoryStorage) Clear() error {
 	m.originalBytes.Store(0)
 
 	// Clear LRU
-	m.lruMu.Lock()
-	m.lruList = list.New()
-	m.lruMap = make(map[string]*list.Element)
-	m.lruMu.Unlock()
+	m.clearLRU()
 
 	// Clear sync buffer atomically
-	head := atomic.LoadUint64(&m.syncHead)
-	atomic.StoreUint64(&m.syncTail, head)
+	head := m.syncHead.Load()
+	m.syncTail.Store(head)
 
 	return nil
 }
 
-// Close closes the storage.
+// Close closes the storage and ensures all goroutines exit.
 func (m *MemoryStorage) Close() error {
+	// Stop expiration cleaner gracefully
+	if m.cleanerRunning.Swap(false) {
+		// Signal cleaner to stop
+		select {
+		case m.cleanerStop <- struct{}{}:
+		default:
+			// Channel already closed or full, close it
+		}
+		close(m.cleanerStop)
+		// Give cleaner time to exit (max 100ms)
+		time.Sleep(50 * time.Millisecond)
+	}
 	return m.Clear()
 }
 
 // GetSyncBuffer returns pending sync operations (lock-free).
 func (m *MemoryStorage) GetSyncBuffer() ([]*CacheSyncOperation, error) {
-	head := atomic.LoadUint64(&m.syncHead)
-	tail := atomic.LoadUint64(&m.syncTail)
+	head := m.syncHead.Load()
+	tail := m.syncTail.Load()
 
 	size := head - tail
 	if size == 0 {
@@ -499,7 +685,7 @@ func (m *MemoryStorage) GetSyncBuffer() ([]*CacheSyncOperation, error) {
 	}
 
 	// Atomically advance tail
-	atomic.StoreUint64(&m.syncTail, head)
+	m.syncTail.Store(head)
 
 	return ops, nil
 }
@@ -560,10 +746,7 @@ func (m *MemoryStorage) ApplyFullSyncSnapshot(snapshot []*FullStateItem, snapsho
 	m.data = sync.Map{}
 
 	// Clear LRU
-	m.lruMu.Lock()
-	m.lruList = list.New()
-	m.lruMap = make(map[string]*list.Element)
-	m.lruMu.Unlock()
+	m.clearLRU()
 
 	// Apply snapshot with compression
 	count := int64(0)
@@ -588,7 +771,7 @@ func (m *MemoryStorage) ApplyFullSyncSnapshot(snapshot []*FullStateItem, snapsho
 			m.data.Store(item.Key, compItem)
 			count++
 
-			itemSize := int64(len(item.Key) + len(compressedValue) + 64)
+			itemSize := calculateItemSize(item.Key, compressedValue)
 			totalBytes += itemSize
 			totalCompressed += int64(len(compressedValue))
 			totalOriginal += int64(origSize)
@@ -604,16 +787,16 @@ func (m *MemoryStorage) ApplyFullSyncSnapshot(snapshot []*FullStateItem, snapsho
 	m.originalBytes.Store(totalOriginal)
 
 	// Clear sync buffer
-	head := atomic.LoadUint64(&m.syncHead)
-	atomic.StoreUint64(&m.syncTail, head)
+	head := m.syncHead.Load()
+	m.syncTail.Store(head)
 
 	return nil
 }
 
 // Stats returns storage statistics with compression info.
 func (m *MemoryStorage) Stats() StorageStats {
-	head := atomic.LoadUint64(&m.syncHead)
-	tail := atomic.LoadUint64(&m.syncTail)
+	head := m.syncHead.Load()
+	tail := m.syncTail.Load()
 
 	hits := m.hitCount.Load()
 	misses := m.missCount.Load()
@@ -835,7 +1018,7 @@ func (m *MemoryStorage) BatchSet(items map[string]*StoredItem) error {
 		if key == "" || item == nil {
 			continue
 		}
-		totalSize += int64(len(key) + len(item.Value) + 128)
+		totalSize += calculateItemSize(key, item.Value)
 	}
 
 	// Check memory limit
@@ -859,6 +1042,7 @@ func (m *MemoryStorage) BatchSet(items map[string]*StoredItem) error {
 		m.setCount.Add(1)
 
 		// Compress if enabled and value is large enough
+		// Batch compression: reuse encoder for multiple items to reduce pool overhead
 		value := item.Value
 		compressed := false
 		origSize := len(value)
@@ -871,8 +1055,8 @@ func (m *MemoryStorage) BatchSet(items map[string]*StoredItem) error {
 			}
 		}
 
-		// Check if key exists
-		_, exists := m.data.Load(key)
+		// Check if key exists (for accurate memory tracking)
+		oldValue, exists := m.data.Load(key)
 
 		// Store compressed item
 		citem := &compressedItem{
@@ -885,23 +1069,29 @@ func (m *MemoryStorage) BatchSet(items map[string]*StoredItem) error {
 
 		m.data.Store(key, citem)
 
-		// Update stats
+		// Update stats accurately
+		itemSize := calculateItemSize(key, value)
 		if !exists {
 			m.keyCount.Add(1)
-		}
-
-		itemSize := int64(len(key) + len(value) + 64)
-		m.currentBytes.Add(itemSize)
-
-		if compressed {
-			m.compressedBytes.Add(int64(len(value)))
-			m.originalBytes.Add(int64(origSize))
+			m.currentBytes.Add(itemSize)
+			if compressed {
+				m.compressedBytes.Add(int64(len(value)))
+				m.originalBytes.Add(int64(origSize))
+			}
+		} else {
+			// Update size delta for existing key
+			if oldItem, ok := oldValue.(*compressedItem); ok {
+				oldSize := calculateItemSize(key, oldItem.Value)
+				m.currentBytes.Add(itemSize - oldSize)
+				m.compressedBytes.Add(int64(len(value) - len(oldItem.Value)))
+				m.originalBytes.Add(int64(origSize - oldItem.OrigSize))
+			}
 		}
 
 		// Touch LRU
 		m.touchLRU(key)
 
-		// Add to sync buffer
+		// Add to sync buffer (lock-free ring buffer)
 		op := &CacheSyncOperation{
 			Key:     key,
 			Version: item.Version,
@@ -909,12 +1099,14 @@ func (m *MemoryStorage) BatchSet(items map[string]*StoredItem) error {
 			Data:    item,
 		}
 
-		head := m.syncHead
+		head := m.syncHead.Load()
 		m.syncBuffer[head&m.syncMask].Op = op
-		m.syncHead = head + 1
+		m.syncHead.Store(head + 1)
 
-		if m.syncHead-m.syncTail >= m.syncCapacity {
-			m.syncTail++
+		// Auto-advance tail if full (lock-free overwrite)
+		tail := m.syncTail.Load()
+		if head-tail >= m.syncCapacity {
+			m.syncTail.CompareAndSwap(tail, tail+1)
 		}
 	}
 

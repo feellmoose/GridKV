@@ -1,6 +1,8 @@
 package gossip
 
 import (
+	"bytes"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -243,6 +245,48 @@ func TestBinaryOperationsEncoding(t *testing.T) {
 	}
 
 	t.Logf("Encode: %v, Decode: %v, Size: %d bytes", encodeTime, decodeTime, len(encoded))
+}
+
+func TestCacheSyncPayloadCompression(t *testing.T) {
+	ops := make([]*CacheSyncOperation, 0, 512)
+	for i := 0; i < 512; i++ {
+		ops = append(ops, &CacheSyncOperation{
+			Key:           fmt.Sprintf("bulk-key-%d", i),
+			ClientVersion: int64(i),
+			Type:          OperationType_OP_SET,
+			SetData: &StoredItem{
+				ExpireAt: uint64(time.Now().Unix()),
+				Value:    bytes.Repeat([]byte("x"), 1024),
+			},
+		})
+	}
+
+	payload, compressed := encodeCacheSyncPayload(ops)
+	if !compressed {
+		t.Fatalf("expected compression for large payload")
+	}
+
+	decodedOps, wasCompressed, err := decodeCacheSyncPayload(payload)
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if !wasCompressed {
+		t.Fatalf("expected compressed flag from decode")
+	}
+	if len(decodedOps) != len(ops) {
+		t.Fatalf("decoded op count mismatch: got %d want %d", len(decodedOps), len(ops))
+	}
+	for i := range decodedOps {
+		if decodedOps[i].Key != ops[i].Key {
+			t.Fatalf("key mismatch at %d", i)
+		}
+		if decodedOps[i].Type != ops[i].Type {
+			t.Fatalf("type mismatch at %d", i)
+		}
+		if decodedOps[i].GetSetData() == nil || len(decodedOps[i].GetSetData().Value) != len(ops[i].GetSetData().Value) {
+			t.Fatalf("value mismatch at %d", i)
+		}
+	}
 }
 
 func TestBinarySerializationPerformance(t *testing.T) {

@@ -236,6 +236,7 @@ type tokenBucket struct {
 	once     sync.Once
 	stopCh   chan struct{}
 	ticker   *time.Ticker
+	paused   atomic.Bool
 }
 
 func (tb *tokenBucket) start() {
@@ -269,6 +270,9 @@ func (tb *tokenBucket) stop() {
 }
 
 func (tb *tokenBucket) Allow(n int64) bool {
+	if tb.paused.Load() {
+		return false
+	}
 	for {
 		cur := tb.tokens.Load()
 		if cur < n {
@@ -278,6 +282,10 @@ func (tb *tokenBucket) Allow(n int64) bool {
 			return true
 		}
 	}
+}
+
+func (tb *tokenBucket) pause() {
+	tb.paused.Store(true)
 }
 
 // hotCacheEntry stores a cached item with expiry
@@ -764,6 +772,76 @@ func (gm *GossipManager) Stop() {
 	logging.Debug("Gossip Manager stopped", "node", gm.localNodeID)
 }
 
+// BeginShutdown prepares replication components for node shutdown.
+func (gm *GossipManager) BeginShutdown() {
+	if gm == nil {
+		return
+	}
+	gm.FlushAllPipelines()
+	if gm.gradualMigration != nil {
+		gm.gradualMigration.startShutdownMigration()
+	}
+	gm.migrateLimiter.pause()
+	gm.readRepairLimiter.pause()
+}
+
+// WaitForDrain blocks until replication pipelines and shutdown migrations finish or the context expires.
+func (gm *GossipManager) WaitForDrain(ctx context.Context) error {
+	if gm == nil {
+		return nil
+	}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		pending := gm.pendingReplicationOps() + gm.pendingShutdownMigrations()
+		if gm.metrics != nil {
+			gm.metrics.SetShutdownPendingShards(pending)
+		}
+		if pending == 0 {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (gm *GossipManager) pendingReplicationOps() int64 {
+	var total int64
+
+	gm.pipelineMu.Lock()
+	for _, pipeline := range gm.pipelines {
+		if pipeline != nil && pipeline.ch != nil {
+			total += int64(len(pipeline.ch))
+		}
+	}
+	gm.pipelineMu.Unlock()
+
+	unifiedPipelines.Range(func(_, value interface{}) bool {
+		up, ok := value.(*UnifiedPipeline)
+		if !ok || up == nil {
+			return true
+		}
+		if up.manager == gm {
+			total += up.Pending()
+		}
+		return true
+	})
+
+	return total
+}
+
+func (gm *GossipManager) pendingShutdownMigrations() int64 {
+	if gm.gradualMigration == nil {
+		return 0
+	}
+	return gm.gradualMigration.pendingShutdownKeys()
+}
+
 // Gossip and sync functions merged from sync.go for file consolidation
 
 var (
@@ -858,6 +936,173 @@ func (gm *GossipManager) gossipPeriodically() {
 	if len(gossipTargets) > 0 {
 		gm.gossipCachePeriodically(gossipTargets[0])
 	}
+}
+
+func (gm *GossipManager) newCacheSyncOperation(key string, item *storage.StoredItem) *CacheSyncOperation {
+	if item == nil {
+		return nil
+	}
+	setData := storageItemToProto(item)
+	if setData == nil {
+		return nil
+	}
+	return &CacheSyncOperation{
+		Key:           key,
+		ClientVersion: item.Version,
+		Type:          OperationType_OP_SET,
+		SetData:       setData,
+		DataPayload: &CacheSyncOperation_SetData{
+			SetData: setData,
+		},
+	}
+}
+
+func (gm *GossipManager) sendCacheSyncOps(ctx context.Context, address string, ops []*CacheSyncOperation) error {
+	if len(ops) == 0 {
+		return nil
+	}
+	if gm.useBinaryProtocol {
+		// Check message size and split if needed to avoid TCP limit
+		payload, _ := encodeCacheSyncPayload(ops)
+		estimatedSize := len(payload) + 64 // Add overhead for binary message header
+
+		if estimatedSize > maxSerializedMessageSize {
+			// Split operations into smaller batches
+			splitSize := len(ops) / 2
+			if splitSize == 0 {
+				splitSize = 1
+			}
+			var firstErr error
+			for i := 0; i < len(ops); i += splitSize {
+				end := i + splitSize
+				if end > len(ops) {
+					end = len(ops)
+				}
+				batch := ops[i:end]
+				if err := gm.sendCacheSyncOps(ctx, address, batch); err != nil && firstErr == nil {
+					firstErr = err
+				}
+			}
+			return firstErr
+		}
+
+		msg := GetBinaryMessage()
+		msg.Type = BinaryMsgTypeCacheSync
+		senderBytes := []byte(gm.localNodeID)
+		copy(msg.Sender[:], senderBytes)
+		if len(senderBytes) < len(msg.Sender) {
+			for i := len(senderBytes); i < len(msg.Sender); i++ {
+				msg.Sender[i] = 0
+			}
+		}
+		msg.Payload = payload
+		data := msg.Marshal()
+		PutBinaryMessage(msg)
+
+		sendCtx, cancel := context.WithTimeout(ctx, gm.replicationTimeout)
+		defer cancel()
+		return gm.network.SendRaw(sendCtx, address, data)
+	}
+
+	// Build message and check actual serialized size before sending
+	msg := getGossipMessage()
+	msg.Type = GossipMessageType_MESSAGE_TYPE_CACHE_SYNC
+	msg.Sender = gm.localNodeID
+	msg.Hlc = gm.hlc.Now()
+	msg.Payload = &GossipMessage_CacheSyncPayload{
+		CacheSyncPayload: &SyncMessage{
+			IncrementalSync: &IncrementalSyncPayload{
+				Operations: ops,
+			},
+		},
+	}
+	gm.signMessageCanonical(msg)
+
+	// Check actual serialized size (gossip messages convert to binary internally)
+	binary := convertGossipMessageToBinary(msg)
+	if binary != nil {
+		data := binary.Marshal()
+		PutBinaryMessage(binary)
+
+		const maxMessageSize = 10 * 1024 * 1024 // 10MB max
+		if len(data) > maxMessageSize {
+			putGossipMessage(msg)
+			// Split operations into smaller batches
+			splitSize := len(ops) / 2
+			if splitSize == 0 {
+				splitSize = 1
+			}
+			var firstErr error
+			for i := 0; i < len(ops); i += splitSize {
+				end := i + splitSize
+				if end > len(ops) {
+					end = len(ops)
+				}
+				batch := ops[i:end]
+				if err := gm.sendCacheSyncOps(ctx, address, batch); err != nil && firstErr == nil {
+					firstErr = err
+				}
+			}
+			return firstErr
+		}
+	}
+
+	timeout := gm.replicationTimeout
+	select {
+	case <-ctx.Done():
+		putGossipMessage(msg)
+		return ctx.Err()
+	default:
+	}
+	err := gm.network.SendWithTimeout(address, msg, timeout)
+	putGossipMessage(msg)
+	return err
+}
+
+func (gm *GossipManager) getNodeAddress(nodeID string) (string, bool) {
+	gm.mu.RLock()
+	defer gm.mu.RUnlock()
+	if n, ok := gm.liveNodes[nodeID]; ok && n != nil && n.Address != "" {
+		return n.Address, true
+	}
+	return "", false
+}
+
+func (gm *GossipManager) replicateSyncToTargets(ctx context.Context, key string, item *storage.StoredItem, targetIDs []string) int {
+	if len(targetIDs) == 0 || item == nil {
+		return 0
+	}
+	baseOp := gm.newCacheSyncOperation(key, item)
+	if baseOp == nil {
+		return 0
+	}
+	successes := 0
+	for _, targetID := range targetIDs {
+		if targetID == "" || targetID == gm.localNodeID {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return successes
+		default:
+		}
+		addr, ok := gm.getNodeAddress(targetID)
+		if !ok {
+			continue
+		}
+		opClone := CloneCacheSyncOperation(baseOp)
+		if err := gm.sendCacheSyncOps(ctx, addr, []*CacheSyncOperation{opClone}); err != nil {
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("direct replication failed", "key", key, "target", targetID, "err", err)
+			}
+			continue
+		}
+		successes++
+		if logging.Log.IsDebugEnabled() {
+			logging.Debug("shutdown replication delivered", "key", key, "target", targetID)
+		}
+	}
+	return successes
 }
 
 //go:inline
@@ -2253,6 +2498,8 @@ func (gm *GossipManager) GetReplicaStatus() ReplicaStatus {
 	if gm.metrics != nil {
 		gm.metrics.SetClusterNodesTotal(int64(clusterSize))
 		gm.metrics.SetClusterNodesAlive(int64(healthyNodes))
+		gm.metrics.SetGossipLocalHealthyNodes(int64(healthyNodes))
+		gm.metrics.SetGossipLocalClusterSize(int64(clusterSize))
 
 		// Count suspect and dead nodes
 		suspectCount := int64(0)

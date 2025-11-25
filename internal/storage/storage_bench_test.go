@@ -34,12 +34,12 @@ func BenchmarkMemory_SmallValues(b *testing.B) {
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "ops/sec")
 }
 
-// BenchmarkMemory_LargeValues benchmarks Memory with large values (benefits from compression)
-func BenchmarkMemory_LargeValues(b *testing.B) {
+// BenchmarkMemory_MediumValues benchmarks Memory with medium values (~4KB)
+func BenchmarkMemory_MediumValues(b *testing.B) {
 	storage, _ := NewMemoryStorage(2048) // 2GB limit
 	defer storage.Close()
 
-	value := make([]byte, 4096) // 4KB (large, will be compressed)
+	value := make([]byte, 4096) // 4KB (medium, will be compressed)
 	// Fill with compressible data
 	for i := range value {
 		value[i] = byte(i % 10) // Highly compressible pattern
@@ -54,6 +54,44 @@ func BenchmarkMemory_LargeValues(b *testing.B) {
 		i := 0
 		for pb.Next() {
 			key := fmt.Sprintf("key-%d", i%1000)
+			storage.Set(key, item)
+			storage.Get(key)
+			i++
+		}
+	})
+
+	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "ops/sec")
+
+	stats := storage.Stats()
+	compressed := storage.compressedBytes.Load()
+	original := storage.originalBytes.Load()
+	if original > 0 {
+		compressionRatio := float64(compressed) / float64(original)
+		b.ReportMetric(compressionRatio*100, "compression%")
+		b.Logf("Compression: %d -> %d bytes (%.1f%%)", original, compressed, compressionRatio*100)
+	}
+	b.Logf("Keys: %d, Memory: %d MB", stats.KeyCount, stats.DBSize/1024/1024)
+}
+
+// BenchmarkMemory_LargeValues benchmarks Memory with large values (16KB)
+func BenchmarkMemory_LargeValues(b *testing.B) {
+	storage, _ := NewMemoryStorage(2048) // 2GB limit
+	defer storage.Close()
+
+	value := make([]byte, 16384) // 16KB (large, will be compressed)
+	for i := range value {
+		value[i] = byte(i % 10)
+	}
+	item := &StoredItem{
+		Version: 1,
+		Value:   value,
+	}
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			key := fmt.Sprintf("key-%d", i%500)
 			storage.Set(key, item)
 			storage.Get(key)
 			i++

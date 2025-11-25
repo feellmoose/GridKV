@@ -3,6 +3,7 @@ package tests
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +14,15 @@ import (
 	"github.com/feellmoose/gridkv/internal/utils/network"
 )
 
+// TestMain skips the heavy integration suite when -short is provided.
+func TestMain(m *testing.M) {
+	if testing.Short() {
+		fmt.Println("Skipping integration tests under -short")
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
 // Shared test helper functions
 
 func randomValue(n int) []byte {
@@ -20,6 +30,8 @@ func randomValue(n int) []byte {
 	rand.Read(b)
 	return b
 }
+
+var _ = randomValue
 
 func calculatePercentiles(latencies []time.Duration) (p50, p95, p99 time.Duration) {
 	n := len(latencies)
@@ -89,6 +101,23 @@ func networkTypeString(nt gridkv.NetworkType) string {
 	}
 }
 
+// networkTypeFromEnv allows overriding the default network type via GRIDKV_NETWORK env
+func networkTypeFromEnv(defaultType gridkv.NetworkType) gridkv.NetworkType {
+	env := strings.TrimSpace(strings.ToLower(os.Getenv("GRIDKV_NETWORK")))
+	switch env {
+	case "":
+		return defaultType
+	case "tcp":
+		return gridkv.TCP
+	case "quic":
+		return gridkv.QUIC
+	case "udp":
+		return gridkv.UDP
+	default:
+		return defaultType
+	}
+}
+
 // TestEnvironmentConfig configures test environment simulation
 type TestEnvironmentConfig struct {
 	NetworkProfile network.NetworkProfile
@@ -105,7 +134,7 @@ type TestEnvironmentConfig struct {
 func DefaultTestEnvironment() *TestEnvironmentConfig {
 	return &TestEnvironmentConfig{
 		NetworkProfile: network.ProfileLAN,
-		NetworkType:    gridkv.TCP,
+		NetworkType:    networkTypeFromEnv(gridkv.TCP),
 		NodeCount:      3,
 		ReplicaCount:   3,
 		BasePort:       20000,
@@ -120,6 +149,75 @@ type TestEnvironmentSimulator struct {
 	config *TestEnvironmentConfig
 	nodes  []*gridkv.GridKV
 	mu     sync.RWMutex
+}
+
+// WaitForReplicationSettle polls node readiness and sleeps briefly to give
+// replication a moment to converge. It replaces the old diagnostics-driven
+// pipeline flush with a best-effort heuristic. If no nodes are provided it
+// operates on the entire cluster snapshot.
+func (tes *TestEnvironmentSimulator) WaitForReplicationSettle(nodes ...*gridkv.GridKV) {
+	const (
+		readinessWait = 750 * time.Millisecond
+		pollInterval  = 25 * time.Millisecond
+		settleDelay   = 100 * time.Millisecond
+	)
+
+	targets := nodes
+	if len(targets) == 0 {
+		targets = tes.snapshotNodes()
+	}
+
+	deadline := time.Now().Add(readinessWait)
+	for time.Now().Before(deadline) {
+		if tes.nodesReady(targets) {
+			break
+		}
+		time.Sleep(pollInterval)
+	}
+
+	time.Sleep(settleDelay)
+}
+
+func (tes *TestEnvironmentSimulator) nodesReady(nodes []*gridkv.GridKV) bool {
+	ready := 0
+	total := 0
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		total++
+		status := node.GetReplicaStatus()
+		if status.Ready && status.HealthyNodes > 0 {
+			ready++
+		}
+	}
+	return total == 0 || ready == total
+}
+
+func (tes *TestEnvironmentSimulator) snapshotNodes() []*gridkv.GridKV {
+	tes.mu.RLock()
+	defer tes.mu.RUnlock()
+	out := make([]*gridkv.GridKV, len(tes.nodes))
+	copy(out, tes.nodes)
+	return out
+}
+
+// LogNodeDiagnostics logs replica status for all nodes (alive and down). Helper for debugging.
+func (tes *TestEnvironmentSimulator) LogNodeDiagnostics(tb testing.TB, label string) {
+	tb.Helper()
+	nodes := tes.snapshotNodes()
+	tb.Logf("=== node diagnostics: %s ===", label)
+	for idx, node := range nodes {
+		if node == nil {
+			tb.Logf("node-%d: down/unavailable", idx)
+			continue
+		}
+		status := node.GetReplicaStatus()
+		// Transport stats removed - use metrics instead if needed
+		tb.Logf("node-%d id=%s ready=%v healthy=%d cluster=%d peers=%d replica=%d",
+			idx, status.LocalNodeID, status.Ready, status.HealthyNodes,
+			status.ClusterSize, status.PeerCount, status.ReplicaFactor)
+	}
 }
 
 // NewTestEnvironmentSimulator creates a new environment simulator

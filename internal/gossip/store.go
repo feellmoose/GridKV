@@ -218,8 +218,10 @@ func storageSyncOpToProto(op *st.CacheSyncOperation) *CacheSyncOperation {
 	case "SET":
 		protoOp.Type = OperationType_OP_SET
 		if op.Data != nil {
+			setData := storageItemToProto(op.Data)
+			protoOp.SetData = setData
 			protoOp.DataPayload = &CacheSyncOperation_SetData{
-				SetData: storageItemToProto(op.Data),
+				SetData: setData,
 			}
 		}
 	case "DELETE":
