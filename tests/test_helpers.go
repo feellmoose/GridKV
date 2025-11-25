@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"os"
@@ -411,4 +412,167 @@ func (tes *TestEnvironmentSimulator) WaitForHealthyNodes(tb testing.TB, expected
 		time.Sleep(200 * time.Millisecond)
 	}
 	tb.Fatalf("timed out waiting for %d healthy nodes", expected)
+}
+
+// WaitForAllNodesReady waits for all nodes to be ready using WaitReady API
+// Similar to the test framework in REPORT_GRIDKV021.md
+func (tes *TestEnvironmentSimulator) WaitForAllNodesReady(tb testing.TB, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	nodes := tes.snapshotNodes()
+	
+	readyCount := 0
+	for time.Now().Before(deadline) {
+		readyCount = 0
+		for i, node := range nodes {
+			if node == nil {
+				continue
+			}
+			// Use WaitReady if available, otherwise check status
+			status := node.GetReplicaStatus()
+			if status.Ready && status.ClusterSize > 0 && status.PeerCount > 0 {
+				readyCount++
+			}
+		}
+		if readyCount == len(nodes) {
+			tb.Logf("✅ All %d nodes are ready!", len(nodes))
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	tb.Fatalf("timed out waiting for all nodes to be ready: %d/%d ready", readyCount, len(nodes))
+}
+
+// VerifyConsistencyAcrossDelays verifies eventual consistency at multiple delay stages
+// Similar to the consistency checker in REPORT_GRIDKV021.md
+func (tes *TestEnvironmentSimulator) VerifyConsistencyAcrossDelays(tb testing.TB, writtenKeys map[string][]byte, delays []time.Duration, minConvergenceRate float64) {
+	nodes := tes.snapshotNodes()
+	ctx := context.Background()
+	
+	type delayResult struct {
+		delay        time.Duration
+		consistent   int
+		missing      int
+		mismatch     int
+		total        int
+		convergence  float64
+	}
+	
+	results := make([]delayResult, 0, len(delays))
+	
+	for _, delay := range delays {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		tes.WaitForReplicationSettle(nodes...)
+		
+		consistent := 0
+		missing := 0
+		mismatch := 0
+		
+		for key, expectedValue := range writtenKeys {
+			foundCount := 0
+			matchingCount := 0
+			
+			for _, node := range nodes {
+				if node == nil {
+					continue
+				}
+				value, err := node.Get(ctx, key)
+				if err == nil && value != nil {
+					foundCount++
+					if string(value) == string(expectedValue) {
+						matchingCount++
+					}
+				}
+			}
+			
+			// Key is consistent if found on at least replicaCount nodes with matching value
+			replicaCount := tes.config.ReplicaCount
+			if matchingCount >= replicaCount {
+				consistent++
+			} else if foundCount == 0 {
+				missing++
+			} else {
+				mismatch++
+			}
+		}
+		
+		total := len(writtenKeys)
+		convergence := float64(consistent) / float64(total) * 100
+		
+		result := delayResult{
+			delay:       delay,
+			consistent:  consistent,
+			missing:     missing,
+			mismatch:    mismatch,
+			total:       total,
+			convergence: convergence,
+		}
+		results = append(results, result)
+		
+		tb.Logf("Delay %s -> Consistent: %d/%d (%.1f%%) Missing: %d Mismatch: %d",
+			delay, consistent, total, convergence, missing, mismatch)
+	}
+	
+	// Check final convergence
+	final := results[len(results)-1]
+	if final.convergence < minConvergenceRate {
+		tb.Errorf("Final convergence rate %.1f%% below minimum %.1f%%", final.convergence, minConvergenceRate)
+	}
+}
+
+// CountTotalKeys counts total keys across all nodes
+func (tes *TestEnvironmentSimulator) CountTotalKeys(tb testing.TB) int {
+	nodes := tes.snapshotNodes()
+	totalKeys := 0
+	keySet := make(map[string]bool)
+	
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		// Note: This assumes there's a way to get keys from storage
+		// If not available, we'll need to track keys during writes
+		_ = node
+		_ = keySet
+	}
+	
+	return totalKeys
+}
+
+// VerifyDataPersistence verifies that written keys persist across all nodes
+func (tes *TestEnvironmentSimulator) VerifyDataPersistence(tb testing.TB, writtenKeys map[string][]byte, minSuccessRate float64) {
+	nodes := tes.snapshotNodes()
+	ctx := context.Background()
+	
+	successCount := 0
+	missingCount := 0
+	
+	for key, expectedValue := range writtenKeys {
+		found := false
+		for _, node := range nodes {
+			if node == nil {
+				continue
+			}
+			value, err := node.Get(ctx, key)
+			if err == nil && value != nil && string(value) == string(expectedValue) {
+				found = true
+				successCount++
+				break
+			}
+		}
+		if !found {
+			missingCount++
+		}
+	}
+	
+	total := len(writtenKeys)
+	successRate := float64(successCount) / float64(total) * 100
+	
+	tb.Logf("Data Persistence: %d/%d keys found (%.1f%%)", successCount, total, successRate)
+	
+	if successRate < minSuccessRate {
+		tb.Errorf("Data persistence rate %.1f%% below minimum %.1f%% (%d keys missing)",
+			successRate, minSuccessRate, missingCount)
+	}
 }

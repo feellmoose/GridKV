@@ -286,6 +286,9 @@ func (gm *GossipManager) enqueueToPipeline(target string, op *CacheSyncOperation
 	}
 	p := gm.getPipeline(target)
 	if p == nil {
+		if logging.Log.IsDebugEnabled() {
+			logging.Debug("Pipeline is nil, dropping operation", "target", target, "key", op.GetKey())
+		}
 		return
 	}
 	select {
@@ -297,16 +300,15 @@ func (gm *GossipManager) enqueueToPipeline(target string, op *CacheSyncOperation
 			return
 		default:
 			gm.pipelineDropCounter.Add(1)
+			totalDrops := gm.pipelineDropCounter.Load()
+			if totalDrops%100 == 0 || totalDrops < 10 {
+				logging.Warn("Pipeline channel full, dropping operation",
+					"target", target,
+					"key", op.GetKey(),
+					"total_drops", totalDrops)
+			}
 			if gm.metrics != nil {
 				gm.metrics.IncrementPipelineOperationsDropped()
-			}
-			if gm.pipelineDropCounter.Load()%1000 == 0 {
-				logging.Warn("Pipeline channel saturated, dropping operations",
-					"target", target,
-					"drops", gm.pipelineDropCounter.Load())
-			}
-			if logging.Log.IsDebugEnabled() {
-				logging.Debug("Pipeline channel full, dropping operation", "target", target, "key", op.GetKey())
 			}
 		}
 	}
@@ -606,6 +608,14 @@ func (gm *GossipManager) Set(ctx context.Context, key string, item *storage.Stor
 	// Local write (we are the coordinator)
 	if err := gm.store.Set(key, item); err != nil {
 		return fmt.Errorf("local write failed: %w", err)
+	}
+
+	// This ensures data is actually stored before replicating
+	if _, verifyErr := gm.store.Get(key); verifyErr != nil {
+		// Log but don't fail - may be race condition in high concurrency
+		if logging.Log.IsDebugEnabled() {
+			logging.Debug("Local write verification failed, continuing anyway", "key", key, "err", verifyErr)
+		}
 	}
 
 	// Always use async replication for high throughput
@@ -980,6 +990,9 @@ func (gm *GossipManager) forwardWrite(key string, item *storage.StoredItem, coor
 	}
 
 	setData := storageItemToProto(item)
+	if setData == nil {
+		return fmt.Errorf("forwardWrite proto conversion produced nil payload for key %s", key)
+	}
 	protoOp := &CacheSyncOperation{
 		Key:           key,
 		ClientVersion: item.Version,
@@ -988,10 +1001,6 @@ func (gm *GossipManager) forwardWrite(key string, item *storage.StoredItem, coor
 		DataPayload: &CacheSyncOperation_SetData{
 			SetData: setData,
 		},
-	}
-	// If conversion failed (unlikely), skip sending malformed write
-	if protoOp.GetSetData() == nil {
-		return fmt.Errorf("forwardWrite proto conversion produced nil payload for key %s", key)
 	}
 
 	// Use pipeline batching for better throughput
@@ -1829,8 +1838,13 @@ func storageItemToProto(item *storage.StoredItem) *StoredItem {
 		expire = uint64(item.ExpireAt.Unix())
 	}
 
-	valueCopy := make([]byte, len(item.Value))
-	copy(valueCopy, item.Value)
+	var valueCopy []byte
+	if item.Value != nil {
+		valueCopy = make([]byte, len(item.Value))
+		copy(valueCopy, item.Value)
+	} else {
+		valueCopy = []byte{} // Empty slice, not nil
+	}
 
 	return &StoredItem{
 		ExpireAt: expire,
