@@ -610,10 +610,10 @@ func (gm *GossipManager) Set(ctx context.Context, key string, item *storage.Stor
 		return fmt.Errorf("local write failed: %w", err)
 	}
 
-	// This ensures data is actually stored before replicating
-	if _, verifyErr := gm.store.Get(key); verifyErr != nil {
-		// Log but don't fail - may be race condition in high concurrency
-		if logging.Log.IsDebugEnabled() {
+	// Optional verification (only in debug mode to avoid performance impact)
+	// In production, Set() returning nil is sufficient guarantee
+	if logging.Log.IsDebugEnabled() {
+		if _, verifyErr := gm.store.Get(key); verifyErr != nil {
 			logging.Debug("Local write verification failed, continuing anyway", "key", key, "err", verifyErr)
 		}
 	}
@@ -986,6 +986,19 @@ func (gm *GossipManager) forwardWrite(key string, item *storage.StoredItem, coor
 	}
 	n, ok := gm.getNode(coordinatorID)
 	if !ok {
+		// Diagnostic logging only in debug mode (zero cost in production)
+		if logging.Log.IsDebugEnabled() {
+			gm.mu.RLock()
+			availableCount := len(gm.liveNodes)
+			hashRingReady := gm.hashRing != nil
+			gm.mu.RUnlock()
+			logging.Debug("forwardWrite: coordinator not found",
+				"key", key,
+				"coordinatorID", coordinatorID,
+				"availableNodes", availableCount,
+				"hashRingReady", hashRingReady,
+				"localNodeID", gm.localNodeID)
+		}
 		return fmt.Errorf("coordinator %s unknown", coordinatorID)
 	}
 

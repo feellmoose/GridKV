@@ -1627,12 +1627,21 @@ func (gm *GossipManager) processLoop() {
 
 // Helper methods
 
-// getNode retrieves node info by ID (thread-safe, lock-free).
+// getNode retrieves node info by ID (thread-safe, lock-free with fallback).
 //
 //go:inline
 func (gm *GossipManager) getNode(id string) (*NodeInfo, bool) {
+	// Fast path: try lock-free structure first (zero allocation, zero lock)
 	if gm.liveNodesLF != nil {
-		return gm.liveNodesLF.Get(id)
+		if n, ok := gm.liveNodesLF.Get(id); ok {
+			return n, ok
+		}
+		// Fallback: node exists in liveNodes but not in liveNodesLF (sync issue)
+		// This is rare, so we only check when liveNodesLF lookup fails
+		gm.mu.RLock()
+		n, ok := gm.liveNodes[id]
+		gm.mu.RUnlock()
+		return n, ok
 	}
 	gm.mu.RLock()
 	defer gm.mu.RUnlock()
