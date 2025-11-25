@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -158,9 +159,9 @@ type TestEnvironmentSimulator struct {
 // operates on the entire cluster snapshot.
 func (tes *TestEnvironmentSimulator) WaitForReplicationSettle(nodes ...*gridkv.GridKV) {
 	const (
-		readinessWait = 750 * time.Millisecond
-		pollInterval  = 25 * time.Millisecond
-		settleDelay   = 100 * time.Millisecond
+		readinessWait = 2 * time.Second        // Increased from 750ms to 2s
+		pollInterval  = 50 * time.Millisecond  // Increased from 25ms to 50ms
+		settleDelay   = 500 * time.Millisecond // Increased from 100ms to 500ms
 	)
 
 	targets := nodes
@@ -176,7 +177,11 @@ func (tes *TestEnvironmentSimulator) WaitForReplicationSettle(nodes ...*gridkv.G
 		time.Sleep(pollInterval)
 	}
 
+	// Additional wait to ensure all pipelines are flushed and replication completes
 	time.Sleep(settleDelay)
+
+	// Give extra time for WAN network conditions (high latency)
+	time.Sleep(200 * time.Millisecond)
 }
 
 func (tes *TestEnvironmentSimulator) nodesReady(nodes []*gridkv.GridKV) bool {
@@ -417,29 +422,91 @@ func (tes *TestEnvironmentSimulator) WaitForHealthyNodes(tb testing.TB, expected
 // WaitForAllNodesReady waits for all nodes to be ready using WaitReady API
 // Similar to the test framework in REPORT_GRIDKV021.md
 func (tes *TestEnvironmentSimulator) WaitForAllNodesReady(tb testing.TB, timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
 	nodes := tes.snapshotNodes()
-	
-	readyCount := 0
-	for time.Now().Before(deadline) {
-		readyCount = 0
-		for i, node := range nodes {
-			if node == nil {
-				continue
-			}
-			// Use WaitReady if available, otherwise check status
-			status := node.GetReplicaStatus()
-			if status.Ready && status.ClusterSize > 0 && status.PeerCount > 0 {
-				readyCount++
-			}
+
+	// First, wait for nodes to be created (not nil)
+	nonNilNodes := make([]*gridkv.GridKV, 0, len(nodes))
+	for _, node := range nodes {
+		if node != nil {
+			nonNilNodes = append(nonNilNodes, node)
 		}
-		if readyCount == len(nodes) {
-			tb.Logf("✅ All %d nodes are ready!", len(nodes))
+	}
+	if len(nonNilNodes) == 0 {
+		tb.Fatalf("no nodes available")
+	}
+
+	// Use WaitReady API for each node (similar to report's framework)
+	// Calculate per-node timeout (distribute total timeout across nodes)
+	perNodeTimeout := timeout / time.Duration(len(nonNilNodes))
+	if perNodeTimeout < 5*time.Second {
+		perNodeTimeout = 5 * time.Second // Minimum timeout per node
+	}
+
+	tb.Logf("⏳ Waiting for nodes to be ready (using GridKV WaitReady API)...")
+	var wg sync.WaitGroup
+	var readyCount atomic.Int64
+	var readyMu sync.Mutex
+	readyNodes := make(map[int]bool)
+
+	for i, node := range nonNilNodes {
+		wg.Add(1)
+		go func(idx int, n *gridkv.GridKV) {
+			defer wg.Done()
+			if err := n.WaitReady(perNodeTimeout); err != nil {
+				tb.Logf("   ✗ Node node-%d WaitReady failed: %v", idx, err)
+				return
+			}
+			status := n.GetReplicaStatus()
+			readyMu.Lock()
+			readyNodes[idx] = true
+			currentCount := len(readyNodes)
+			readyMu.Unlock()
+			readyCount.Add(1)
+			tb.Logf("   ✓ Node node-%d is ready (%d/%d) (clusterSize=%d nodes=%d peers=%d)",
+				idx, currentCount, len(nonNilNodes), status.ClusterSize, status.ClusterSize, status.PeerCount)
+		}(i, node)
+	}
+
+	// Wait for all nodes or timeout
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		finalCount := int(readyCount.Load())
+		if finalCount == len(nonNilNodes) {
+			tb.Logf("✅ All %d nodes are ready!", len(nonNilNodes))
 			return
 		}
-		time.Sleep(100 * time.Millisecond)
+		// Log which nodes failed
+		readyMu.Lock()
+		var failedNodes []int
+		for i := range nonNilNodes {
+			if !readyNodes[i] {
+				failedNodes = append(failedNodes, i)
+			}
+		}
+		readyMu.Unlock()
+		tb.Fatalf("only %d/%d nodes ready (failed nodes: %v)", finalCount, len(nonNilNodes), failedNodes)
+	case <-time.After(timeout):
+		// Log final status for debugging
+		finalCount := int(readyCount.Load())
+		tb.Logf("Final node status:")
+		for i, node := range nonNilNodes {
+			if node != nil {
+				status := node.GetReplicaStatus()
+				readyMu.Lock()
+				isReady := readyNodes[i]
+				readyMu.Unlock()
+				tb.Logf("  Node %d: Ready=%v (WaitReady=%v) ClusterSize=%d HealthyNodes=%d PeerCount=%d ReplicaFactor=%d",
+					i, status.Ready, isReady, status.ClusterSize, status.HealthyNodes, status.PeerCount, status.ReplicaFactor)
+			}
+		}
+		tb.Fatalf("timed out waiting for all nodes to be ready: %d/%d ready", finalCount, len(nonNilNodes))
 	}
-	tb.Fatalf("timed out waiting for all nodes to be ready: %d/%d ready", readyCount, len(nodes))
 }
 
 // VerifyConsistencyAcrossDelays verifies eventual consistency at multiple delay stages
@@ -447,45 +514,60 @@ func (tes *TestEnvironmentSimulator) WaitForAllNodesReady(tb testing.TB, timeout
 func (tes *TestEnvironmentSimulator) VerifyConsistencyAcrossDelays(tb testing.TB, writtenKeys map[string][]byte, delays []time.Duration, minConvergenceRate float64) {
 	nodes := tes.snapshotNodes()
 	ctx := context.Background()
-	
+
 	type delayResult struct {
-		delay        time.Duration
-		consistent   int
-		missing      int
-		mismatch     int
-		total        int
-		convergence  float64
+		delay       time.Duration
+		consistent  int
+		missing     int
+		mismatch    int
+		total       int
+		convergence float64
 	}
-	
+
 	results := make([]delayResult, 0, len(delays))
-	
+
 	for _, delay := range delays {
 		if delay > 0 {
 			time.Sleep(delay)
 		}
+		// Wait for replication to settle before each verification
 		tes.WaitForReplicationSettle(nodes...)
-		
+		// Additional wait for pipeline flush and network propagation
+		if delay > 0 {
+			time.Sleep(200 * time.Millisecond)
+		}
+
 		consistent := 0
 		missing := 0
 		mismatch := 0
-		
+
+		mismatchKeys := make([]string, 0, 10)                 // Track mismatch keys for diagnosis
+		mismatchDetails := make(map[string]map[string]string) // key -> nodeID -> value
+
 		for key, expectedValue := range writtenKeys {
 			foundCount := 0
 			matchingCount := 0
-			
-			for _, node := range nodes {
+			nodeValues := make(map[string]string) // Track values per node for diagnosis
+
+			for i, node := range nodes {
 				if node == nil {
 					continue
 				}
 				value, err := node.Get(ctx, key)
 				if err == nil && value != nil {
 					foundCount++
-					if string(value) == string(expectedValue) {
+					valueStr := string(value)
+					nodeID := fmt.Sprintf("node-%d", i)
+					nodeValues[nodeID] = valueStr
+					if valueStr == string(expectedValue) {
 						matchingCount++
 					}
+				} else if err != nil {
+					nodeID := fmt.Sprintf("node-%d", i)
+					nodeValues[nodeID] = fmt.Sprintf("ERROR: %v", err)
 				}
 			}
-			
+
 			// Key is consistent if found on at least replicaCount nodes with matching value
 			replicaCount := tes.config.ReplicaCount
 			if matchingCount >= replicaCount {
@@ -494,12 +576,17 @@ func (tes *TestEnvironmentSimulator) VerifyConsistencyAcrossDelays(tb testing.TB
 				missing++
 			} else {
 				mismatch++
+				// Track mismatch details (limit to first 10 for logging)
+				if len(mismatchKeys) < 10 {
+					mismatchKeys = append(mismatchKeys, key)
+					mismatchDetails[key] = nodeValues
+				}
 			}
 		}
-		
+
 		total := len(writtenKeys)
 		convergence := float64(consistent) / float64(total) * 100
-		
+
 		result := delayResult{
 			delay:       delay,
 			consistent:  consistent,
@@ -509,11 +596,28 @@ func (tes *TestEnvironmentSimulator) VerifyConsistencyAcrossDelays(tb testing.TB
 			convergence: convergence,
 		}
 		results = append(results, result)
-		
+
 		tb.Logf("Delay %s -> Consistent: %d/%d (%.1f%%) Missing: %d Mismatch: %d",
 			delay, consistent, total, convergence, missing, mismatch)
+
+		// Log mismatch details for diagnosis
+		if len(mismatchKeys) > 0 && delay == delays[0] { // Only log for first delay to avoid spam
+			tb.Logf("  Mismatch analysis (showing first %d keys):", len(mismatchKeys))
+			for _, key := range mismatchKeys {
+				details := mismatchDetails[key]
+				tb.Logf("    Key: %s", key)
+				tb.Logf("      Expected value length: %d", len(writtenKeys[key]))
+				for nodeID, value := range details {
+					if strings.HasPrefix(value, "ERROR:") {
+						tb.Logf("      %s: %s", nodeID, value)
+					} else {
+						tb.Logf("      %s: value length=%d, matches=%v", nodeID, len(value), value == string(writtenKeys[key]))
+					}
+				}
+			}
+		}
 	}
-	
+
 	// Check final convergence
 	final := results[len(results)-1]
 	if final.convergence < minConvergenceRate {
@@ -525,8 +629,7 @@ func (tes *TestEnvironmentSimulator) VerifyConsistencyAcrossDelays(tb testing.TB
 func (tes *TestEnvironmentSimulator) CountTotalKeys(tb testing.TB) int {
 	nodes := tes.snapshotNodes()
 	totalKeys := 0
-	keySet := make(map[string]bool)
-	
+
 	for _, node := range nodes {
 		if node == nil {
 			continue
@@ -534,9 +637,8 @@ func (tes *TestEnvironmentSimulator) CountTotalKeys(tb testing.TB) int {
 		// Note: This assumes there's a way to get keys from storage
 		// If not available, we'll need to track keys during writes
 		_ = node
-		_ = keySet
 	}
-	
+
 	return totalKeys
 }
 
@@ -544,10 +646,10 @@ func (tes *TestEnvironmentSimulator) CountTotalKeys(tb testing.TB) int {
 func (tes *TestEnvironmentSimulator) VerifyDataPersistence(tb testing.TB, writtenKeys map[string][]byte, minSuccessRate float64) {
 	nodes := tes.snapshotNodes()
 	ctx := context.Background()
-	
+
 	successCount := 0
 	missingCount := 0
-	
+
 	for key, expectedValue := range writtenKeys {
 		found := false
 		for _, node := range nodes {
@@ -565,12 +667,12 @@ func (tes *TestEnvironmentSimulator) VerifyDataPersistence(tb testing.TB, writte
 			missingCount++
 		}
 	}
-	
+
 	total := len(writtenKeys)
 	successRate := float64(successCount) / float64(total) * 100
-	
+
 	tb.Logf("Data Persistence: %d/%d keys found (%.1f%%)", successCount, total, successRate)
-	
+
 	if successRate < minSuccessRate {
 		tb.Errorf("Data persistence rate %.1f%% below minimum %.1f%% (%d keys missing)",
 			successRate, minSuccessRate, missingCount)

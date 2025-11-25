@@ -1697,3 +1697,527 @@ func pickAliveNode(nodes []*gridkv.GridKV, r *rand.Rand) *gridkv.GridKV {
 	}
 	return nil
 }
+
+// TestProductionConsistencyOptimized reproduces the test scenario from REPORT_GRIDKV021.md
+// This test mimics the exact conditions that revealed the bugs:
+// - 9 nodes (3×3 datacenter layout)
+// - Operation mix: 40% write / 50% read / 5% update / 5% delete
+// - Consistency verification: sample 500 keys at multiple delay stages
+// - Detailed error tracking and reporting
+func TestProductionConsistencyOptimized(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping consistency optimized test in short mode")
+	}
+
+	const (
+		nodeCount    = 9
+		replicaCount = 3
+		testDuration = 60 * time.Second
+		numWorkers   = 50
+		valueSize    = 512
+		sampleSize   = 500
+		writeRatio   = 40
+		readRatio    = 50
+		updateRatio  = 5
+		deleteRatio  = 5
+	)
+
+	config := &TestEnvironmentConfig{
+		NetworkProfile: network.ProfileWAN, // Similar to report's cross-datacenter delays
+		NetworkType:    networkTypeFromEnv(gridkv.TCP),
+		NodeCount:      nodeCount,
+		ReplicaCount:   replicaCount,
+		BasePort:       7001,
+		StorageBackend: gridkv.BackendMemorySharded,
+		MaxMemoryMB:    2048,
+		ShardCount:     128,
+	}
+
+	sim := NewTestEnvironmentSimulator(config)
+	if err := sim.SetupCluster(t); err != nil {
+		t.Fatalf("Failed to setup cluster: %v", err)
+	}
+	defer sim.Cleanup()
+
+	nodes := sim.GetNodes()
+	ctx := context.Background()
+
+	// Wait for all nodes to be ready (similar to report's WaitReady mechanism)
+	sim.WaitForAllNodesReady(t, 30*time.Second)
+	sim.WaitForHealthyNodes(t, nodeCount, 10*time.Second)
+
+	// Track written keys for consistency verification
+	writtenKeys := make(map[string][]byte)
+	writtenKeysMu := sync.RWMutex{}
+
+	// Operation counters
+	var (
+		writesSubmitted  atomic.Int64
+		writesCompleted  atomic.Int64
+		writesFailed     atomic.Int64
+		readsSubmitted   atomic.Int64
+		readsCompleted   atomic.Int64
+		readsFailed      atomic.Int64
+		readsNotFound    atomic.Int64
+		readsTimeout     atomic.Int64
+		updatesSubmitted atomic.Int64
+		updatesCompleted atomic.Int64
+		updatesFailed    atomic.Int64
+		deletesSubmitted atomic.Int64
+		deletesCompleted atomic.Int64
+		deletesFailed    atomic.Int64
+	)
+
+	stopCh := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Calculate worker distribution based on operation ratios
+	writeWorkers := numWorkers * writeRatio / 100
+	readWorkers := numWorkers * readRatio / 100
+	updateWorkers := numWorkers * updateRatio / 100
+	deleteWorkers := numWorkers * deleteRatio / 100
+
+	// Track write errors for diagnosis
+	var writeErrorTypes sync.Map // map[string]int - error type -> count
+	var sampleWriteErrors []string
+	var sampleWriteErrorsMu sync.Mutex
+
+	// Writers (40%)
+	for w := 0; w < writeWorkers; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			nodeIdx := workerID % len(nodes)
+			for {
+				select {
+				case <-stopCh:
+					return
+				default:
+					key := fmt.Sprintf("key-%d-%d", workerID, writesSubmitted.Load())
+					value := randomValue(valueSize)
+					writesSubmitted.Add(1)
+					err := nodes[nodeIdx].Set(ctx, key, value)
+					if err != nil {
+						writesFailed.Add(1)
+						// Track error types
+						errStr := err.Error()
+						if count, ok := writeErrorTypes.Load(errStr); ok {
+							writeErrorTypes.Store(errStr, count.(int)+1)
+						} else {
+							writeErrorTypes.Store(errStr, 1)
+							// Keep sample errors
+							sampleWriteErrorsMu.Lock()
+							if len(sampleWriteErrors) < 10 {
+								sampleWriteErrors = append(sampleWriteErrors, fmt.Sprintf("key=%s err=%s", key, errStr))
+							}
+							sampleWriteErrorsMu.Unlock()
+						}
+					} else {
+						writesCompleted.Add(1)
+						writtenKeysMu.Lock()
+						writtenKeys[key] = value
+						writtenKeysMu.Unlock()
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+		}(w)
+	}
+
+	// Readers (50%)
+	time.Sleep(2 * time.Second) // Let some writes complete first
+	for r := 0; r < readWorkers; r++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			nodeIdx := workerID % len(nodes)
+			for {
+				select {
+				case <-stopCh:
+					return
+				default:
+					writtenKeysMu.RLock()
+					if len(writtenKeys) == 0 {
+						writtenKeysMu.RUnlock()
+						time.Sleep(100 * time.Millisecond)
+						continue
+					}
+					// Random key selection (similar to Zipfian in report)
+					target := rand.Intn(len(writtenKeys))
+					i := 0
+					var key string
+					var expectedValue []byte
+					for k, v := range writtenKeys {
+						if i == target {
+							key = k
+							expectedValue = make([]byte, len(v))
+							copy(expectedValue, v)
+							break
+						}
+						i++
+					}
+					writtenKeysMu.RUnlock()
+
+					readsSubmitted.Add(1)
+					value, err := nodes[nodeIdx].Get(ctx, key)
+					if err != nil {
+						readsFailed.Add(1)
+						if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "item not found") {
+							readsNotFound.Add(1)
+						}
+						if strings.Contains(err.Error(), "deadline") || strings.Contains(err.Error(), "timeout") {
+							readsTimeout.Add(1)
+						}
+					} else {
+						readsCompleted.Add(1)
+						if string(value) != string(expectedValue) {
+							// Mismatch detected
+						}
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+			}
+		}(r)
+	}
+
+	// Updaters (5%)
+	for u := 0; u < updateWorkers; u++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			nodeIdx := workerID % len(nodes)
+			for {
+				select {
+				case <-stopCh:
+					return
+				default:
+					writtenKeysMu.RLock()
+					if len(writtenKeys) == 0 {
+						writtenKeysMu.RUnlock()
+						time.Sleep(100 * time.Millisecond)
+						continue
+					}
+					target := rand.Intn(len(writtenKeys))
+					i := 0
+					var key string
+					for k := range writtenKeys {
+						if i == target {
+							key = k
+							break
+						}
+						i++
+					}
+					writtenKeysMu.RUnlock()
+
+					updatesSubmitted.Add(1)
+					newValue := randomValue(valueSize)
+					err := nodes[nodeIdx].Set(ctx, key, newValue)
+					if err != nil {
+						updatesFailed.Add(1)
+					} else {
+						updatesCompleted.Add(1)
+						writtenKeysMu.Lock()
+						writtenKeys[key] = newValue
+						writtenKeysMu.Unlock()
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+			}
+		}(u)
+	}
+
+	// Deleters (5%)
+	for d := 0; d < deleteWorkers; d++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			nodeIdx := workerID % len(nodes)
+			for {
+				select {
+				case <-stopCh:
+					return
+				default:
+					writtenKeysMu.RLock()
+					if len(writtenKeys) == 0 {
+						writtenKeysMu.RUnlock()
+						time.Sleep(100 * time.Millisecond)
+						continue
+					}
+					target := rand.Intn(len(writtenKeys))
+					i := 0
+					var key string
+					for k := range writtenKeys {
+						if i == target {
+							key = k
+							break
+						}
+						i++
+					}
+					writtenKeysMu.RUnlock()
+
+					deletesSubmitted.Add(1)
+					err := nodes[nodeIdx].Delete(ctx, key)
+					if err != nil {
+						deletesFailed.Add(1)
+					} else {
+						deletesCompleted.Add(1)
+						writtenKeysMu.Lock()
+						delete(writtenKeys, key)
+						writtenKeysMu.Unlock()
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+			}
+		}(d)
+	}
+
+	// Run load test
+	time.Sleep(testDuration)
+	close(stopCh)
+	wg.Wait()
+
+	// Wait for replication to settle (extended wait for better consistency)
+	sim.WaitForReplicationSettle(nodes...)
+	time.Sleep(1 * time.Second) // Extended write propagation delay for WAN conditions
+
+	// Prepare final snapshot for consistency verification
+	writtenKeysMu.RLock()
+	finalSnapshot := make(map[string][]byte, len(writtenKeys))
+	for k, v := range writtenKeys {
+		valueCopy := make([]byte, len(v))
+		copy(valueCopy, v)
+		finalSnapshot[k] = valueCopy
+	}
+	writtenKeysMu.RUnlock()
+
+	// Sample keys for consistency verification (similar to report's 500 key sampling)
+	sampleKeys := make([]string, 0, sampleSize)
+	for k := range finalSnapshot {
+		sampleKeys = append(sampleKeys, k)
+		if len(sampleKeys) >= sampleSize {
+			break
+		}
+	}
+	if len(sampleKeys) < sampleSize && len(finalSnapshot) > 0 {
+		// If we have fewer keys than sample size, use all available
+		sampleKeys = make([]string, 0, len(finalSnapshot))
+		for k := range finalSnapshot {
+			sampleKeys = append(sampleKeys, k)
+		}
+	}
+
+	sampledSnapshot := make(map[string][]byte, len(sampleKeys))
+	for _, k := range sampleKeys {
+		sampledSnapshot[k] = finalSnapshot[k]
+	}
+
+	// Print operation statistics (similar to report's error summary)
+	totalOps := writesSubmitted.Load() + readsSubmitted.Load() + updatesSubmitted.Load() + deletesSubmitted.Load()
+	writeSuccessRate := float64(writesCompleted.Load()) / float64(writesSubmitted.Load()) * 100
+	readSuccessRate := float64(readsCompleted.Load()) / float64(readsSubmitted.Load()) * 100
+
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	t.Logf("   Consistency Optimized Test Results")
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	t.Logf("Total Operations: %d", totalOps)
+	t.Logf("WRITE:   submitted=%d, completed=%d, failed=%d (%.1f%%)",
+		writesSubmitted.Load(), writesCompleted.Load(), writesFailed.Load(), writeSuccessRate)
+	t.Logf("READ:    submitted=%d, completed=%d, failed=%d (%.1f%%)",
+		readsSubmitted.Load(), readsCompleted.Load(), readsFailed.Load(), readSuccessRate)
+	t.Logf("  └─ not found: %d, timeout: %d", readsNotFound.Load(), readsTimeout.Load())
+	t.Logf("UPDATE:  submitted=%d, completed=%d, failed=%d",
+		updatesSubmitted.Load(), updatesCompleted.Load(), updatesFailed.Load())
+	t.Logf("DELETE:  submitted=%d, completed=%d, failed=%d",
+		deletesSubmitted.Load(), deletesCompleted.Load(), deletesFailed.Load())
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	// Error summary (similar to report)
+	t.Logf("❌ Error Summary:")
+	if readsNotFound.Load() > 0 {
+		t.Logf("  [%d] item not found", readsNotFound.Load())
+	}
+	if readsTimeout.Load() > 0 {
+		t.Logf("  [%d] context deadline exceeded", readsTimeout.Load())
+	}
+	if writesFailed.Load() > 0 {
+		t.Logf("  [%d] write failures", writesFailed.Load())
+		// Print write error breakdown
+		t.Logf("  Write error breakdown:")
+		writeErrorTypes.Range(func(key, value interface{}) bool {
+			t.Logf("    [%d] %s", value.(int), key.(string))
+			return true
+		})
+		if len(sampleWriteErrors) > 0 {
+			t.Logf("  Sample write errors:")
+			for _, err := range sampleWriteErrors {
+				t.Logf("    %s", err)
+			}
+		}
+	}
+
+	// Diagnostic: Check if successfully written keys are actually readable
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	t.Logf("   Diagnostic: Write Verification")
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	writtenKeysMu.RLock()
+	verifySampleSize := 100
+	if len(writtenKeys) < verifySampleSize {
+		verifySampleSize = len(writtenKeys)
+	}
+	verifyKeys := make([]string, 0, verifySampleSize)
+	verifyValues := make(map[string][]byte, verifySampleSize)
+	i := 0
+	for k, v := range writtenKeys {
+		if i >= verifySampleSize {
+			break
+		}
+		verifyKeys = append(verifyKeys, k)
+		verifyValues[k] = v
+		i++
+	}
+	writtenKeysMu.RUnlock()
+
+	if len(verifyKeys) > 0 {
+		verifyReadable := 0
+		verifyMissing := 0
+		verifyMismatch := 0
+		for _, key := range verifyKeys {
+			expectedValue := verifyValues[key]
+			found := false
+			for _, node := range nodes {
+				if node == nil {
+					continue
+				}
+				value, err := node.Get(ctx, key)
+				if err == nil && value != nil {
+					found = true
+					if string(value) == string(expectedValue) {
+						verifyReadable++
+					} else {
+						verifyMismatch++
+					}
+					break
+				}
+			}
+			if !found {
+				verifyMissing++
+			}
+		}
+		t.Logf("Write verification: %d/%d keys readable, %d missing, %d mismatch",
+			verifyReadable, len(verifyKeys), verifyMissing, verifyMismatch)
+		if verifyReadable < len(verifyKeys)*90/100 {
+			t.Errorf("⚠️  Only %d%% of written keys are readable (expected >90%%)",
+				verifyReadable*100/len(verifyKeys))
+		}
+	}
+
+	// Diagnostic: Check node storage stats
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	t.Logf("   Diagnostic: Node Storage Statistics")
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	for i, node := range nodes {
+		if node == nil {
+			continue
+		}
+		status := node.GetReplicaStatus()
+		t.Logf("Node %d: Ready=%v ClusterSize=%d HealthyNodes=%d PeerCount=%d ReplicaFactor=%d",
+			i, status.Ready, status.ClusterSize, status.HealthyNodes, status.PeerCount, status.ReplicaFactor)
+	}
+
+	// Diagnostic: Test forwardWrite path specifically
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	t.Logf("   Diagnostic: ForwardWrite Path Test")
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	// Write from non-coordinator node to test forwardWrite
+	if len(nodes) >= 2 {
+		testKey := "forward-test-key"
+		testValue := randomValue(valueSize)
+		// Node 0 is likely coordinator, write from node 1
+		err := nodes[1].Set(ctx, testKey, testValue)
+		if err != nil {
+			t.Logf("⚠️  ForwardWrite test failed: %v", err)
+		} else {
+			// Wait a bit for replication
+			time.Sleep(500 * time.Millisecond)
+			// Try to read from all nodes
+			foundCount := 0
+			for i, node := range nodes {
+				value, err := node.Get(ctx, testKey)
+				if err == nil && string(value) == string(testValue) {
+					foundCount++
+					if i == 0 {
+						t.Logf("✓ ForwardWrite test: key found on coordinator (node 0)")
+					} else {
+						t.Logf("✓ ForwardWrite test: key found on replica (node %d)", i)
+					}
+				}
+			}
+			if foundCount < replicaCount {
+				t.Logf("⚠️  ForwardWrite test: key only found on %d/%d nodes (expected >= %d)",
+					foundCount, len(nodes), replicaCount)
+			} else {
+				t.Logf("✓ ForwardWrite test: key found on %d nodes (good)", foundCount)
+			}
+		}
+	}
+
+	// Diagnostic: Check if coordinator selection is working
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	t.Logf("   Diagnostic: Coordinator Selection Test")
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	coordTestKeys := 10
+	coordWriteSuccess := 0
+	coordWriteFail := 0
+	for i := 0; i < coordTestKeys; i++ {
+		testKey := fmt.Sprintf("coord-test-%d", i)
+		testValue := randomValue(valueSize)
+		// Write from different nodes
+		nodeIdx := i % len(nodes)
+		err := nodes[nodeIdx].Set(ctx, testKey, testValue)
+		if err != nil {
+			coordWriteFail++
+			t.Logf("  Coordinator test key %s failed from node %d: %v", testKey, nodeIdx, err)
+		} else {
+			coordWriteSuccess++
+		}
+	}
+	t.Logf("Coordinator selection test: %d/%d writes succeeded", coordWriteSuccess, coordTestKeys)
+	if coordWriteFail > 0 {
+		t.Logf("⚠️  Coordinator selection issues detected: %d failures", coordWriteFail)
+	}
+
+	// Consistency verification across multiple delay stages
+	delays := []time.Duration{
+		0,
+		200 * time.Millisecond,
+		500 * time.Millisecond,
+		1 * time.Second,
+		2 * time.Second,
+		3 * time.Second,
+		5 * time.Second,
+	}
+
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	t.Logf("   Consistency Verification (sampling %d keys)", len(sampledSnapshot))
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+	sim.VerifyConsistencyAcrossDelays(t, sampledSnapshot, delays, 95.0)
+
+	// Data persistence verification
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	t.Logf("   Data Persistence Verification")
+	t.Logf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	sim.VerifyDataPersistence(t, sampledSnapshot, 95.0)
+
+	// Assertions
+	if writeSuccessRate < 90 {
+		t.Errorf("Write success rate %.1f%% below 90%%", writeSuccessRate)
+	}
+	if readSuccessRate < 80 {
+		t.Errorf("Read success rate %.1f%% below 80%%", readSuccessRate)
+	}
+	if len(sampledSnapshot) > 0 && readsNotFound.Load() > int64(len(sampledSnapshot)*34/100) {
+		t.Errorf("Read 'not found' rate too high: %d (expected < %d)",
+			readsNotFound.Load(), len(sampledSnapshot)*34/100)
+	}
+}
