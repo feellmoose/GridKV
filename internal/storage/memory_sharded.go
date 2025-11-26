@@ -20,7 +20,7 @@ package storage
 //   - CPU-adaptive sharding (256 shards default, configurable)
 //   - sync.Map for lock-free access per shard
 //   - Pre-allocated ring buffers for sync operations
-//   - xxhash for fast key distribution
+//   - xxh3 for fast key distribution (XXH3 algorithm, ~31 GB/s)
 //   - Object pools (sync.Pool) for reduced allocations
 //   - Inlined shard selection for zero-cost abstraction
 //   - Pre-allocated error objects
@@ -32,7 +32,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/cespare/xxhash/v2"
+	"github.com/zeebo/xxh3"
 )
 
 // ShardedMemoryStorage provides EXTREME high-performance, high-throughput in-memory caching
@@ -147,7 +147,7 @@ func (s *ShardedMemoryStorage) Set(key string, item *StoredItem) error {
 		return errNilItem
 	}
 
-	shard := s.shards[xxhash.Sum64String(key)&s.shardMask]
+	shard := s.shards[xxh3.HashString128(key).Lo&s.shardMask]
 
 	// Calculate item size
 	itemSize := int64(len(key) + len(item.Value) + 64)
@@ -209,7 +209,7 @@ func (s *ShardedMemoryStorage) Get(key string) (*StoredItem, error) {
 	}
 
 	s.getCount.Add(1)
-	shard := s.shards[xxhash.Sum64String(key)&s.shardMask]
+	shard := s.shards[xxh3.HashString128(key).Lo&s.shardMask]
 
 	value, ok := shard.data.Load(key)
 	if !ok {
@@ -257,7 +257,7 @@ func (s *ShardedMemoryStorage) GetNoCopy(key string) (*StoredItem, error) {
 	}
 
 	s.getCount.Add(1)
-	shard := s.shards[xxhash.Sum64String(key)&s.shardMask]
+	shard := s.shards[xxh3.HashString128(key).Lo&s.shardMask]
 
 	value, ok := shard.data.Load(key)
 	if !ok {
@@ -318,7 +318,7 @@ func (s *ShardedMemoryStorage) BatchGet(keys []string) (map[string]*StoredItem, 
 			continue
 		}
 
-		hash := xxhash.Sum64String(key)
+		hash := xxh3.HashString128(key).Lo
 		shardIdx := int(hash & s.shardMask)
 
 		batch := shardBatches[shardIdx]
@@ -394,7 +394,7 @@ func (s *ShardedMemoryStorage) BatchGetNoCopy(keys []string) (map[string]*Stored
 			continue
 		}
 
-		hash := xxhash.Sum64String(key)
+		hash := xxh3.HashString128(key).Lo
 		shardIdx := int(hash & s.shardMask)
 
 		batch := shardBatches[shardIdx]
@@ -461,7 +461,7 @@ func (s *ShardedMemoryStorage) BatchSet(items map[string]*StoredItem) error {
 			continue
 		}
 
-		hash := xxhash.Sum64String(key)
+		hash := xxh3.HashString128(key).Lo
 		shardIdx := int(hash & s.shardMask)
 
 		batch := shardBatches[shardIdx]
@@ -540,7 +540,7 @@ func (s *ShardedMemoryStorage) Delete(key string, version int64) error {
 		return errEmptyKey
 	}
 
-	shard := s.shards[xxhash.Sum64String(key)&s.shardMask]
+	shard := s.shards[xxh3.HashString128(key).Lo&s.shardMask]
 
 	// Load and delete atomically
 	value, loaded := shard.data.LoadAndDelete(key)
@@ -711,7 +711,7 @@ func (s *ShardedMemoryStorage) ApplyFullSyncSnapshot(snapshot []*FullStateItem, 
 
 	for _, item := range snapshot {
 		if item.Item != nil {
-			shard := s.shards[xxhash.Sum64String(item.Key)&s.shardMask]
+			shard := s.shards[xxh3.HashString128(item.Key).Lo&s.shardMask]
 			shard.data.Store(item.Key, item.Item)
 
 			itemSize := int64(len(item.Key) + len(item.Item.Value) + 64)

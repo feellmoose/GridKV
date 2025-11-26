@@ -16,16 +16,17 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/cespare/xxhash/v2"
+	"github.com/zeebo/xxh3"
 )
 
 // Hash is a function type that computes a 32-bit hash from a byte slice.
 // Custom hash functions can be provided for testing or specific requirements.
 //
-// Default implementation uses xxHash (XXH64) which provides:
-//   - Speed: ~10 GB/s on modern CPUs
-//   - Quality: Good distribution properties
+// Default implementation uses XXH3 which provides:
+//   - Speed: ~31 GB/s on modern CPUs (faster than XXH64)
+//   - Quality: Excellent distribution properties
 //   - Simplicity: No cryptographic overhead needed for load balancing
+//   - Optimization: Optimized for small data (0-16 bytes)
 type Hash func(data []byte) uint32
 
 // ConsistentHash implements Dynamo-style consistent hashing with virtual nodes.
@@ -71,7 +72,7 @@ type ConsistentHash struct {
 	mu sync.RWMutex
 
 	// hashFunc computes the hash for keys and virtual nodes
-	// Default: xxHash (fast, non-cryptographic)
+	// Default: XXH3 (fast, non-cryptographic)
 	hashFunc Hash
 
 	// replicas is the number of virtual nodes per physical node
@@ -100,7 +101,7 @@ type ConsistentHash struct {
 //     Higher values improve load distribution but increase memory usage.
 //     Recommended: 150 (good balance of distribution and memory)
 //     Memory per node: ~replicas * (8 bytes hash + 16 bytes string pointer)
-//   - fn: Hash function for keys and nodes (nil = use default xxHash)
+//   - fn: Hash function for keys and nodes (nil = use default XXH3)
 //     Custom functions useful for testing or specific requirements.
 //
 // Returns:
@@ -112,7 +113,7 @@ type ConsistentHash struct {
 //
 // Example:
 //
-//	// Default configuration (xxHash, 150 replicas)
+//	// Default configuration (XXH3, 150 replicas)
 //	ring := NewConsistentHash(150, nil)
 //
 //	// Custom hash function (for testing)
@@ -124,11 +125,12 @@ type ConsistentHash struct {
 // Safe to call concurrently.
 func NewConsistentHash(replicas int, fn Hash) *ConsistentHash {
 	if fn == nil {
-		// Default: xxHash (XXH64) truncated to 32 bits
-		// xxHash provides excellent speed (~10 GB/s) and distribution
+		// Default: XXH3 truncated to 32 bits
+		// XXH3 provides excellent speed (~31 GB/s) and distribution
 		// without cryptographic overhead (vs SHA256: ~500 MB/s)
+		// Optimized for small data (0-16 bytes) which is common for keys
 		fn = func(data []byte) uint32 {
-			return uint32(xxhash.Sum64(data))
+			return uint32(xxh3.Hash128(data).Lo)
 		}
 	}
 

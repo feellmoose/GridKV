@@ -25,8 +25,8 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/cespare/xxhash/v2"
 	"github.com/klauspost/compress/zstd"
+	"github.com/zeebo/xxh3"
 )
 
 // MemoryStorage provides memory-efficient in-memory caching with aggressive compression.
@@ -296,7 +296,7 @@ func (m *MemoryStorage) evictLRU() bool {
 // touchLRU marks key as recently used (sharded for reduced lock contention)
 func (m *MemoryStorage) touchLRU(key string) {
 	// Hash key to select shard
-	hash := xxhash.Sum64String(key)
+	hash := xxh3.HashString128(key).Lo
 	shard := m.lru.shards[hash&m.lru.shardMask]
 
 	shard.mu.Lock()
@@ -312,7 +312,7 @@ func (m *MemoryStorage) touchLRU(key string) {
 
 // removeFromLRU removes a key from LRU (sharded)
 func (m *MemoryStorage) removeFromLRU(key string) {
-	hash := xxhash.Sum64String(key)
+	hash := xxh3.HashString128(key).Lo
 	shard := m.lru.shards[hash&m.lru.shardMask]
 
 	shard.mu.Lock()
