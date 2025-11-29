@@ -304,16 +304,35 @@ func (gmm *gradualMigrationManager) getMigrationStatus(nodeID string) (progress 
 }
 
 // stop stops all active migrations and waits for them to complete
+// Stage 2 Sleep优化: 使用context超时替代固定sleep轮询
 func (gmm *gradualMigrationManager) stop() {
 	gmm.stopOnce.Do(func() {
 		close(gmm.stopCh)
 	})
 
-	// Wait for active migrations to complete (with timeout)
-	maxWaitTime := 2 * time.Second
-	deadline := time.Now().Add(maxWaitTime)
-	for gmm.activeCount.Load() > 0 && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
+	// Wait for active migrations to complete with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Poll with context cancellation instead of fixed sleep
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if gmm.activeCount.Load() == 0 {
+			return // All migrations completed
+		}
+
+		select {
+		case <-ctx.Done():
+			// Timeout reached
+			if gmm.activeCount.Load() > 0 {
+				logging.Warn("Migration stop timeout - some migrations may still be active")
+			}
+			return
+		case <-ticker.C:
+			// Continue polling
+		}
 	}
 }
 

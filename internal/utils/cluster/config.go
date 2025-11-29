@@ -149,30 +149,65 @@ func (p *ClusterProfile) applyDefaults() {
 		p.MaxReplicators = clampInt(p.ReplicaCount*2, 4, 16)
 	}
 
-	baseFailure := defaultDuration(p.FailureTimeout, p.GossipInterval*5)
-	if baseFailure < 5*time.Second {
-		baseFailure = 5 * time.Second
-	}
-	p.FailureTimeout = baseFailure
+	// Stage 2.1: Scale gossip/SWIM parameters by cluster size
+	// Base values are set by profile preset above, then adjusted by cluster size
+	// This replaces the old hardcoded defaults and prevents linear scaling
+	p.adjustGossipParamsByClusterSize()
 
-	baseSuspect := defaultDuration(p.SuspectTimeout, p.FailureTimeout*2)
-	if baseSuspect < 10*time.Second {
-		baseSuspect = 10 * time.Second
-	}
-	p.SuspectTimeout = baseSuspect
-
-	// Increased default read timeout for better reliability under high load
-	readTimeout := defaultDuration(p.ReadTimeout, maxDuration(5*time.Second, p.GossipInterval*8))
-	if readTimeout > 15*time.Second {
-		readTimeout = 15 * time.Second // Increased max for high load scenarios
-	}
-	// Ensure minimum timeout for stability
-	if readTimeout < 3*time.Second {
-		readTimeout = 3 * time.Second
+	// Network profile-based timeout configuration (Stage 1.3)
+	// LAN: 0.5-0.8s, WAN: 1-2s, Global: 2-3s
+	var readTimeout, replicationTimeout time.Duration
+	switch p.Preset {
+	case ProfileEdge:
+		// LAN profile: tight timeouts for low latency
+		readTimeout = defaultDuration(p.ReadTimeout, 600*time.Millisecond)
+		if readTimeout < 500*time.Millisecond {
+			readTimeout = 500 * time.Millisecond
+		}
+		if readTimeout > 800*time.Millisecond {
+			readTimeout = 800 * time.Millisecond
+		}
+		replicationTimeout = defaultDuration(p.ReplicationTimeout, readTimeout)
+		if replicationTimeout < 500*time.Millisecond {
+			replicationTimeout = 500 * time.Millisecond
+		}
+		if replicationTimeout > 800*time.Millisecond {
+			replicationTimeout = 800 * time.Millisecond
+		}
+	case ProfileGlobal:
+		// Global profile: relaxed timeouts for cross-region
+		readTimeout = defaultDuration(p.ReadTimeout, 2*time.Second)
+		if readTimeout < 2*time.Second {
+			readTimeout = 2 * time.Second
+		}
+		if readTimeout > 3*time.Second {
+			readTimeout = 3 * time.Second
+		}
+		replicationTimeout = defaultDuration(p.ReplicationTimeout, readTimeout)
+		if replicationTimeout < 2*time.Second {
+			replicationTimeout = 2 * time.Second
+		}
+		if replicationTimeout > 3*time.Second {
+			replicationTimeout = 3 * time.Second
+		}
+	default: // ProfileRegional (WAN)
+		// WAN profile: moderate timeouts
+		readTimeout = defaultDuration(p.ReadTimeout, 1*time.Second)
+		if readTimeout < 1*time.Second {
+			readTimeout = 1 * time.Second
+		}
+		if readTimeout > 2*time.Second {
+			readTimeout = 2 * time.Second
+		}
+		replicationTimeout = defaultDuration(p.ReplicationTimeout, readTimeout)
+		if replicationTimeout < 1*time.Second {
+			replicationTimeout = 1 * time.Second
+		}
+		if replicationTimeout > 2*time.Second {
+			replicationTimeout = 2 * time.Second
+		}
 	}
 	p.ReadTimeout = readTimeout
-
-	replicationTimeout := defaultDuration(p.ReplicationTimeout, p.ReadTimeout)
 	p.ReplicationTimeout = replicationTimeout
 
 	if p.Network.MaxIdle == 0 {
@@ -256,4 +291,90 @@ func maxDuration(a, b time.Duration) time.Duration {
 		return a
 	}
 	return b
+}
+
+// adjustGossipParamsByClusterSize adjusts gossip/SWIM parameters based on cluster size (Stage 2.1).
+// This prevents parameters from scaling linearly with cluster size.
+// Profile preset already sets base values, this function adjusts them by cluster size tier.
+func (p *ClusterProfile) adjustGossipParamsByClusterSize() {
+	size := p.ClusterSizeHint
+	if size <= 0 {
+		size = 3
+	}
+
+	// Get current values (may be set by profile preset or user)
+	baseGossipInterval := p.GossipInterval
+	baseFailureTimeout := p.FailureTimeout
+	baseSuspectTimeout := p.SuspectTimeout
+
+	// Stage 2.1: Adjust by cluster size tier while respecting profile base values
+	// Small (≤10): tight intervals for fast convergence
+	// Medium (10-50): moderate intervals
+	// Large (>50): relaxed intervals to reduce overhead
+	switch {
+	case size <= 10:
+		// Small cluster: 200-400ms gossip, 1.5-2s failure, 3-5s suspect
+		if baseGossipInterval == 0 {
+			baseGossipInterval = 300 * time.Millisecond
+		}
+		baseGossipInterval = clampDuration(baseGossipInterval, 200*time.Millisecond, 400*time.Millisecond)
+		
+		if baseFailureTimeout == 0 {
+			baseFailureTimeout = baseGossipInterval * 5
+		}
+		baseFailureTimeout = clampDuration(baseFailureTimeout, 1500*time.Millisecond, 2*time.Second)
+		
+		if baseSuspectTimeout == 0 {
+			baseSuspectTimeout = baseFailureTimeout * 2
+		}
+		baseSuspectTimeout = clampDuration(baseSuspectTimeout, 3*time.Second, 5*time.Second)
+
+	case size <= 50:
+		// Medium cluster: 400-750ms gossip, 2-2.5s failure, 5-8s suspect
+		if baseGossipInterval == 0 {
+			baseGossipInterval = 500 * time.Millisecond
+		}
+		baseGossipInterval = clampDuration(baseGossipInterval, 400*time.Millisecond, 750*time.Millisecond)
+		
+		if baseFailureTimeout == 0 {
+			baseFailureTimeout = baseGossipInterval * 5
+		}
+		baseFailureTimeout = clampDuration(baseFailureTimeout, 2*time.Second, 2500*time.Millisecond)
+		
+		if baseSuspectTimeout == 0 {
+			baseSuspectTimeout = baseFailureTimeout * 2
+		}
+		baseSuspectTimeout = clampDuration(baseSuspectTimeout, 5*time.Second, 8*time.Second)
+
+	default:
+		// Large cluster (>50): 750-1000ms gossip, 2.5-3s failure, 8-10s suspect
+		if baseGossipInterval == 0 {
+			baseGossipInterval = 850 * time.Millisecond
+		}
+		baseGossipInterval = clampDuration(baseGossipInterval, 750*time.Millisecond, 1000*time.Millisecond)
+		
+		if baseFailureTimeout == 0 {
+			baseFailureTimeout = baseGossipInterval * 5
+		}
+		baseFailureTimeout = clampDuration(baseFailureTimeout, 2500*time.Millisecond, 3*time.Second)
+		
+		if baseSuspectTimeout == 0 {
+			baseSuspectTimeout = baseFailureTimeout * 2
+		}
+		baseSuspectTimeout = clampDuration(baseSuspectTimeout, 8*time.Second, 10*time.Second)
+	}
+
+	p.GossipInterval = baseGossipInterval
+	p.FailureTimeout = baseFailureTimeout
+	p.SuspectTimeout = baseSuspectTimeout
+}
+
+func clampDuration(value, minVal, maxVal time.Duration) time.Duration {
+	if value < minVal {
+		return minVal
+	}
+	if value > maxVal {
+		return maxVal
+	}
+	return value
 }

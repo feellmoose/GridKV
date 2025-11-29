@@ -166,6 +166,11 @@ type GossipManager struct {
 	lastBatchSize  atomic.Int32 // Last calculated batch size
 	lastRateCheck  atomic.Int64 // Last time we checked message rate
 
+	// QPS counters for metrics (Stage 0.3)
+	gossipMsgCounter atomic.Int64 // Gossip messages sent
+	cacheSyncCounter atomic.Int64 // CACHE_SYNC messages sent
+	lastQPSUpdate    atomic.Int64 // Last QPS update timestamp
+
 	replicationPool     *workerpool.Pool
 	inboundPool         *workerpool.Pool
 	inboundPriorityPool *workerpool.PriorityPool
@@ -218,6 +223,10 @@ type GossipManager struct {
 
 	// Rate limiter for gossip messages to prevent network congestion
 	gossipRateLimiter *gossipRateLimiter
+
+	// Process loop restart tracking to prevent infinite restart leaks
+	processLoopRestartCount atomic.Int32
+	maxProcessLoopRestarts  int32
 }
 
 // gossipRateLimiter limits the rate of non-critical gossip messages
@@ -388,6 +397,7 @@ func NewGossipManager(opts *GossipOptions, hashRing *ConsistentHash, network Net
 		gossipInterval:       opts.GossipInterval,
 		replicaCount:         opts.ReplicaCount,
 		maxReplicators:       opts.MaxReplicators,
+		maxProcessLoopRestarts: 5, // Limit restart attempts to prevent leaks
 		replicationTimeout:   opts.ReplicationTimeout,
 		readTimeout:          opts.ReadTimeout,
 		clusterSyncChunkSize: opts.ClusterSyncChunkSize,
@@ -471,18 +481,18 @@ func NewGossipManager(opts *GossipOptions, hashRing *ConsistentHash, network Net
 	gm.replicationPool = pool
 
 	// Dynamic inbound pool sizing: optimized for high-throughput scenarios
-	// Balanced approach: increase size but not too aggressively to avoid goroutine explosion
-	// Base size: MaxReplicators * 48 (balanced between 32 and 64)
-	inboundSize := opts.MaxReplicators * 48
-	if inboundSize < 384 { // Balanced between 256 and 512
-		inboundSize = 384
+	// Reduced initial size to prevent excessive goroutine creation
+	// Base size: MaxReplicators * 24 (reduced from 48)
+	inboundSize := opts.MaxReplicators * 24
+	if inboundSize < 128 { // Reduced from 384
+		inboundSize = 128
 	}
-	// Start with 1.5x base size for better initial concurrency
-	initialSize := inboundSize + inboundSize/2 // 1.5x
-	if initialSize < 768 {                     // Balanced between 512 and 1024
-		initialSize = 768
+	// Start with 1.2x base size (reduced from 1.5x)
+	initialSize := inboundSize + inboundSize/5 // 1.2x
+	if initialSize < 256 {                     // Reduced from 768
+		initialSize = 256
 	}
-	const maxInitialSize = 12288 // Balanced between 8192 and 16384
+	const maxInitialSize = 12288 // Keep max for scaling
 	if initialSize > maxInitialSize {
 		initialSize = maxInitialSize
 	}
@@ -580,20 +590,16 @@ func NewGossipManager(opts *GossipOptions, hashRing *ConsistentHash, network Net
 		gm.hotCacheTTL = 1 * time.Second
 	}
 
-	// Initialize read batch manager
-	// OPTIMIZED for 1M+ QPS: Larger batches, balanced window for maximum throughput
-	// Increased batch size to 200 for better batching efficiency
-	// Increased window to 10ms for better batching while maintaining low latency
-	readBatchSize := 200                     // Increased from 50 for better throughput
-	readBatchWindow := 10 * time.Millisecond // Increased from 5ms for better batching
-	enableAdaptive := true                   // Enable adaptive tuning by default
+	// Initialize read batch manager with fixed、简单的参数。
+	// LAN 场景下偏向更短的 window 以降低读延迟：2ms。
+	readBatchSize := 120                     // Target 100–150 keys per batch
+	readBatchWindow := 2 * time.Millisecond  // 1–3ms window per OPTZ 方案
 	gm.readBatchManager = NewReadBatchManager(
 		gm.sendBatchReadRequest,
 		gm.generateOpID,
 		readBatchSize,
 		readBatchWindow,
 		gm.metrics,
-		enableAdaptive,
 	)
 
 	return gm, nil
@@ -677,57 +683,84 @@ func (gm *GossipManager) Stop() {
 		gm.readBatchManager.Stop()
 	}
 
-	// Stop event scheduler and loop - may trigger network operations
+	// Stage 2 Sleep优化: 使用WaitGroup和Context替代固定sleep
+	// EventLoop和Pool的Stop/Release已经包含内部WaitGroup等待
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer shutdownCancel()
+
+	var shutdownWg sync.WaitGroup
+
+	// Stop event scheduler (just stops timers, no wait needed)
 	if gm.eventScheduler != nil {
 		gm.eventScheduler.Stop()
-		time.Sleep(10 * time.Millisecond)
 	}
 
+	// Stop event loop concurrently - Stop() internally waits with WaitGroup
 	if gm.eventLoop != nil {
-		gm.eventLoop.Stop()
-		time.Sleep(10 * time.Millisecond)
+		shutdownWg.Add(1)
+		go func() {
+			defer shutdownWg.Done()
+			gm.eventLoop.Stop() // Blocks until event loop goroutine exits
+		}()
 	}
 
-	// Release worker pools with minimal wait - pools should drain quickly
+	// Release worker pools concurrently - Release() internally waits with WaitGroup
 	if gm.inboundPriorityPool != nil {
-		gm.inboundPriorityPool.Release()
-		time.Sleep(10 * time.Millisecond)
+		shutdownWg.Add(1)
+		go func() {
+			defer shutdownWg.Done()
+			gm.inboundPriorityPool.Release() // Blocks until all workers exit
+		}()
 	}
 	if gm.inboundPool != nil {
-		gm.inboundPool.Release()
-		time.Sleep(20 * time.Millisecond)
+		shutdownWg.Add(1)
+		go func() {
+			defer shutdownWg.Done()
+			gm.inboundPool.Release() // Blocks until all workers exit
+		}()
 	}
-
 	if gm.replicationPool != nil {
-		gm.replicationPool.Release()
-		time.Sleep(20 * time.Millisecond)
+		shutdownWg.Add(1)
+		go func() {
+			defer shutdownWg.Done()
+			gm.replicationPool.Release() // Blocks until all workers exit
+		}()
 	}
 
-	// Now safe to stop network - all components that use it are stopped
+	// Wait for pools and event loop to drain before stopping network
+	// Use context timeout to avoid indefinite blocking
+	poolDone := make(chan struct{})
+	go func() {
+		shutdownWg.Wait()
+		close(poolDone)
+	}()
+
+	select {
+	case <-poolDone:
+		// Pools and event loop drained, safe to stop network
+	case <-shutdownCtx.Done():
+		logging.Warn("Component drain timeout, continuing with network stop")
+	}
+
+	// Stop network after pools are drained
+	// Network.Stop() will handle its own cleanup and goroutine shutdown
 	if gm.network != nil {
 		gm.network.Stop()
-		// Increased wait time to ensure network goroutines exit
-		time.Sleep(100 * time.Millisecond)
+		// Network.Stop() internally handles cleanup, no need for additional wait
 	}
 
+	// Stop pipelines (will be optimized to use WaitGroup)
 	gm.FlushAllPipelines()
-	// Stop all pipelines to prevent goroutine leaks
 	gm.StopAllPipelines()
-	// Additional wait to ensure all pipeline goroutines have exited
-	time.Sleep(200 * time.Millisecond)
 
-	// Flush and stop all batch timers to prevent goroutine leaks
-	gm.flushAllBatches()
-
+	// Stop batch cleanup and migration (synchronous cleanup, no wait needed)
 	if gm.batchCleanup != nil {
 		gm.batchCleanup.stop()
 	}
-
-	// Stop gradual migration manager
 	if gm.gradualMigration != nil {
 		gm.gradualMigration.stop()
-		time.Sleep(10 * time.Millisecond)
 	}
+	gm.flushAllBatches()
 
 	// Stop token bucket limiters
 	gm.migrateLimiter.stop()
@@ -901,41 +934,70 @@ func (gm *GossipManager) gossipPeriodically() {
 		return
 	}
 
-	var wg sync.WaitGroup
+	// Stage 2.2: Async submission with timeout protection instead of sync WaitGroup
+	// This prevents long-tail nodes from blocking the entire gossip cycle
+	timeoutDuration := gm.gossipInterval * 3 // 3x interval for timeout protection
+	if timeoutDuration < 2*time.Second {
+		timeoutDuration = 2 * time.Second
+	}
+	if timeoutDuration > 10*time.Second {
+		timeoutDuration = 10 * time.Second
+	}
+
 	for _, target := range gossipTargets {
 		target := target
-		wg.Add(1)
+		// Share chunks reference - chunks are read-only during gossip
+		// Each goroutine builds messages independently, avoiding race conditions
 
 		if err := gm.replicationPool.Submit(func() {
-			defer wg.Done()
-			if peer, ok := gm.getNode(target); ok && peer != nil && gm.network != nil {
-				for _, chunk := range chunks {
-					syncMsg := gm.buildClusterSyncMessage(chunk)
-					// Increased timeout for gossip sync to avoid I/O timeout errors under load
-					if err := gm.network.SendWithTimeout(peer.Address, syncMsg, 5*time.Second); err == nil {
-						if gm.metrics != nil {
-							gm.metrics.IncrementGossipSent()
-						}
-					}
-					putGossipMessage(syncMsg)
+			ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration)
+			defer cancel()
+
+			peer, ok := gm.getNode(target)
+			if !ok || peer == nil || gm.network == nil {
+				return
+			}
+
+			sendTimeout := timeoutDuration / time.Duration(len(chunks)+1)
+			if sendTimeout < 1*time.Second {
+				sendTimeout = 1 * time.Second
+			}
+
+			for _, chunk := range chunks {
+				// Check cancellation before each send
+				select {
+				case <-ctx.Done():
+					return
+				default:
 				}
+
+				syncMsg := gm.buildClusterSyncMessage(chunk)
+				if err := gm.network.SendWithTimeout(peer.Address, syncMsg, sendTimeout); err == nil {
+					if gm.metrics != nil {
+						gm.metrics.IncrementGossipSent()
+					}
+					gm.gossipMsgCounter.Add(1)
+				}
+				putGossipMessage(syncMsg)
 			}
 		}); err != nil {
-			// Pool full - don't create goroutine, just skip
-			// This prevents goroutine leaks when pools are exhausted
-			wg.Done()
+			// Pool full - skip this target
 			if logging.Log.IsDebugEnabled() {
 				logging.Debug("Skipped gossip sync: pool exhausted", "target", target)
 			}
 		}
 	}
-	wg.Wait()
 
+	// Stage 2.2: Don't wait for completion - async fire-and-forget with timeout protection
+	// Put members back immediately, don't wait for all sends to complete
 	nodeInfoSlicePool.Put(membersPtr)
 
 	if len(gossipTargets) > 0 {
 		gm.gossipCachePeriodically(gossipTargets[0])
 	}
+
+	// Update QPS metrics (Stage 0.3)
+	gm.updateQPSMetrics()
 }
 
 func (gm *GossipManager) newCacheSyncOperation(key string, item *storage.StoredItem) *CacheSyncOperation {
@@ -1228,6 +1290,8 @@ func (gm *GossipManager) gossipCachePeriodically(targetNodeID string) {
 			// Increased timeout for cache sync to avoid I/O timeout errors under load
 			gm.network.SendWithTimeout(peer.Address, msg, 8*time.Second)
 			gm.msgRateCounter.Add(1)
+			// Update cache sync QPS counter (Stage 0.3)
+			gm.cacheSyncCounter.Add(1)
 		}
 	}
 }
@@ -1502,14 +1566,27 @@ func (gm *GossipManager) decrementPendingReads() {
 func (gm *GossipManager) processLoop() {
 	defer gm.wg.Done()
 
-	// Recover from panics and restart the loop
+	// Recover from panics with restart limit to prevent leaks
 	defer func() {
 		if r := recover(); r != nil {
-			logging.Error(fmt.Errorf("panic in processLoop: %v", r),
-				"Gossip processLoop panic recovered - restarting")
+			restartCount := gm.processLoopRestartCount.Add(1)
+			if restartCount > gm.maxProcessLoopRestarts {
+				logging.Error(fmt.Errorf("panic in processLoop: %v", r),
+					"Gossip processLoop panic - max restarts reached, stopping")
+				return
+			}
 
-			// Wait a bit before restarting to avoid rapid panic loops
-			time.Sleep(1 * time.Second)
+			logging.Error(fmt.Errorf("panic in processLoop: %v", r),
+				"Gossip processLoop panic recovered - restarting",
+				"restartCount", restartCount,
+				"maxRestarts", gm.maxProcessLoopRestarts)
+
+			// Use context-based delay instead of time.Sleep
+			select {
+			case <-gm.stopCh:
+				return
+			case <-time.After(1 * time.Second):
+			}
 
 			// Restart the process loop
 			gm.wg.Add(1)
@@ -1929,7 +2006,7 @@ func (gm *GossipManager) submitInboundTaskWithPriority(task func(), ctx context.
 		if gm.inboundPoolResizer != nil {
 			for retry := 0; retry < 3; retry++ {
 				gm.inboundPoolResizer.emergencyResize()
-				time.Sleep(10 * time.Millisecond) // Allow resize to take effect
+				// Stage 2 Sleep优化: emergencyResize是同步的，无需等待
 				_, err = gm.inboundPriorityPool.SubmitTask(func(runCtx context.Context) {
 					select {
 					case <-runCtx.Done():
@@ -1955,7 +2032,7 @@ func (gm *GossipManager) submitInboundTaskWithPriority(task func(), ctx context.
 		if gm.inboundPoolResizer != nil {
 			for retry := 0; retry < 3; retry++ {
 				gm.inboundPoolResizer.emergencyResize()
-				time.Sleep(10 * time.Millisecond) // Allow resize to take effect
+				// Stage 2 Sleep优化: emergencyResize是同步的，无需等待
 				if err := gm.inboundPool.Submit(task); err == nil {
 					return nil
 				}
@@ -2207,14 +2284,33 @@ func (gm *GossipManager) connectToSingleSeed(seedAddr string) {
 		})
 
 		if err == nil {
-			// Successfully submitted, check if we got a response
-			time.Sleep(200 * time.Millisecond) // Brief wait for response
-			gm.mu.RLock()
-			peerCount := len(gm.liveNodes) - 1
-			gm.mu.RUnlock()
-			if peerCount > 0 {
-				return // Successfully connected
+			// Stage 2 Sleep优化: 使用短轮询替代固定sleep
+			// Check for connection with short intervals instead of fixed sleep
+			checkCtx, checkCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer checkCancel()
+
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+
+			for {
+				gm.mu.RLock()
+				peerCount := len(gm.liveNodes) - 1
+				gm.mu.RUnlock()
+				if peerCount > 0 {
+					return // Successfully connected
+				}
+
+				select {
+				case <-checkCtx.Done():
+					// Timeout, continue to next attempt
+					goto nextAttempt
+				case <-ticker.C:
+					// Continue checking
+				case <-gm.stopCh:
+					return
+				}
 			}
+		nextAttempt:
 		}
 
 		// Pool full or connection failed - retry with backoff
@@ -2309,7 +2405,7 @@ func (gm *GossipManager) connectToSeeds() {
 			wg.Done()
 			if gm.replicationPoolResizer != nil {
 				gm.replicationPoolResizer.emergencyResize()
-				time.Sleep(10 * time.Millisecond)
+				// Stage 2 Sleep优化: emergencyResize是同步的，无需等待
 				if err := gm.replicationPool.Submit(func() {
 					gm.network.SendWithTimeout(addrCopy, connectMsg, 1*time.Second)
 				}); err != nil {
@@ -2738,17 +2834,33 @@ func copyStorageItem(item *storage.StoredItem) *storage.StoredItem {
 
 	// Use object pool to reduce allocations
 	copyItem := storage.GetStoredItem()
+	if copyItem == nil {
+		// Fallback if pool exhausted
+		copyItem = &storage.StoredItem{}
+	}
+
+	// Defensive copy: handle concurrent modification
+	// Copy fields atomically to avoid race conditions
 	copyItem.Version = item.Version
 	copyItem.ExpireAt = item.ExpireAt
 
-	if len(item.Value) > 0 {
+	// Safely copy value (defensive against concurrent modification)
+	// Capture item.Value reference atomically to avoid race
+	var itemValue []byte
+	if item.Value != nil {
+		// Make a snapshot copy to avoid concurrent modification
+		itemValue = make([]byte, len(item.Value))
+		copy(itemValue, item.Value)
+	}
+
+	if len(itemValue) > 0 {
 		// Reuse existing capacity if available
-		if cap(copyItem.Value) >= len(item.Value) {
-			copyItem.Value = copyItem.Value[:len(item.Value)]
-			copy(copyItem.Value, item.Value)
+		if cap(copyItem.Value) >= len(itemValue) {
+			copyItem.Value = copyItem.Value[:len(itemValue)]
+			copy(copyItem.Value, itemValue)
 		} else {
-			copyItem.Value = make([]byte, len(item.Value))
-			copy(copyItem.Value, item.Value)
+			copyItem.Value = make([]byte, len(itemValue))
+			copy(copyItem.Value, itemValue)
 		}
 	} else {
 		copyItem.Value = nil
@@ -2902,4 +3014,29 @@ func logPanicWithStack(context string, r interface{}) {
 		return
 	}
 	logging.Error(nil, context, "panic", r, "stack", string(debug.Stack()))
+}
+
+// updateQPSMetrics calculates and updates QPS metrics (Stage 0.3).
+// Called periodically from gossipPeriodically to update gossip and cache sync QPS.
+func (gm *GossipManager) updateQPSMetrics() {
+	if gm.metrics == nil {
+		return
+	}
+
+	now := time.Now().Unix()
+	lastUpdate := gm.lastQPSUpdate.Load()
+
+	// Update every second
+	if now <= lastUpdate {
+		return
+	}
+
+	// Calculate QPS from counters (reset after reading)
+	gossipCount := gm.gossipMsgCounter.Swap(0)
+	cacheSyncCount := gm.cacheSyncCounter.Swap(0)
+	gm.lastQPSUpdate.Store(now)
+
+	// Update metrics
+	gm.metrics.SetGossipQPS(gossipCount)
+	gm.metrics.SetCacheSyncQPS(cacheSyncCount)
 }

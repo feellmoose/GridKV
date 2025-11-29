@@ -73,7 +73,8 @@ func UnmarshalBinaryMessage(data []byte) (*BinaryMessage, error) {
 
 // convertBinaryToGossipMessage converts BinaryMessage to GossipMessage
 const (
-	cacheSyncCompressThreshold = 128 * 1024
+	// Stage 2.5: Reduced threshold from 128KB to 32KB to expand compression coverage
+	cacheSyncCompressThreshold = 32 * 1024
 	cacheSyncCompressedMagic   = 0xEACEEA5E
 )
 

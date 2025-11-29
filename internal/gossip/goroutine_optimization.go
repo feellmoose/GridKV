@@ -27,8 +27,7 @@ func (gm *GossipManager) submitWithResize(task func(), pool *workerpool.Pool, re
 	if resizer != nil {
 		for retry := 0; retry < 3; retry++ {
 			resizer.emergencyResize()
-			// Small delay to allow resize to take effect
-			time.Sleep(10 * time.Millisecond)
+			// Stage 2 Sleep优化: emergencyResize是同步操作，pool大小立即调整，无需等待
 			if err := pool.Submit(task); err == nil {
 				return nil
 			}

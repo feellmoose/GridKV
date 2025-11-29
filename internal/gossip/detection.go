@@ -70,6 +70,11 @@ func (gm *GossipManager) updateNode(nodeID, address string, newState NodeState, 
 		existing.LastActiveTs = now
 		existing.Version = version
 
+		// Record state transition (Stage 0.3)
+		if oldState != newState && gm.metrics != nil {
+			gm.metrics.IncrementSWIMStateTransitions()
+		}
+
 		if newState == NodeState_NODE_STATE_DEAD && oldState != NodeState_NODE_STATE_DEAD {
 			remove = true
 		}
@@ -209,6 +214,11 @@ func (gm *GossipManager) markNodeAliveFromProbe(nodeID string) {
 		n.State = NodeState_NODE_STATE_ALIVE
 		n.LastActiveTs = time.Now()
 		n.Version = gm.incrementLocalVersion()
+		// Record false positive (recovery from SUSPECT indicates false positive) (Stage 0.3)
+		if gm.metrics != nil {
+			gm.metrics.IncrementSWIMFalsePositives()
+			gm.metrics.IncrementSWIMStateTransitions()
+		}
 		logging.Debug("MEMBER RECOVER via probe", "node", nodeID)
 	}
 }

@@ -164,7 +164,8 @@ func (gm *GossipManager) handleConnect(msg *GossipMessage) {
 				// Both pools full - retry with resize or skip
 				if gm.replicationPoolResizer != nil {
 					gm.replicationPoolResizer.emergencyResize()
-					time.Sleep(10 * time.Millisecond)
+					// Stage 2 Sleep优化: pool resize是同步的，无需等待
+					// emergencyResize会立即调整pool大小，可以直接重试
 					if err := gm.replicationPool.Submit(sendConnectResponse); err != nil {
 						<-gm.connectRateLimiter
 						gm.connectingNodes.Delete(nodeId)
@@ -528,52 +529,30 @@ func (gm *GossipManager) verifyMessageCanonical(msg *GossipMessage) bool {
 		return true
 	}
 
-	// Always allow cluster formation messages
-	switch msg.Type {
-	case GossipMessageType_MESSAGE_TYPE_CONNECT,
-		GossipMessageType_MESSAGE_TYPE_CLUSTER_SYNC,
-		GossipMessageType_MESSAGE_TYPE_PROBE_REQUEST,
-		GossipMessageType_MESSAGE_TYPE_PROBE_RESPONSE:
-		return true
-	}
-
 	// For messages that don't require signature, allow them
 	if msg.Signature == nil {
-		return !gm.requiresSignature(msg)
+		// Enforce signatures for all messages that require auth.
+		// For backward-compatibility during controlled bootstrap, callers
+		// should explicitly set DisableAuth or use a dedicated bootstrap
+		// configuration rather than relying on implicit grace windows.
+		if gm.requiresSignature(msg) {
+			if gm.metrics != nil {
+				gm.metrics.IncrementSecurityUnauthenticatedMessages()
+			}
+			return false
+		}
+		return true
 	}
 
 	gm.mu.RLock()
 	pub, ok := gm.peerPubkeys[msg.Sender]
-	clusterSize := len(gm.liveNodes)
 	gm.mu.RUnlock()
 
 	if !ok {
-		// During cluster formation, allow messages without pubkey for a grace period
-		// This is required for initial message exchange before pubkeys are established
-		// Check if this is during cluster formation (recent startup or small cluster)
-		if clusterSize < 20 {
-			// During bootstrap (< 20 nodes), allow messages without pubkey
-			// This allows initial CACHE_SYNC and other messages during cluster formation
-			// Only log at debug level to reduce noise
-			if logging.Log.IsDebugEnabled() {
-				logging.Debug("Accepting message without pubkey during cluster formation",
-					"sender", msg.Sender, "clusterSize", clusterSize, "type", msg.Type)
-			}
-			return true
+		// Unknown sender or missing public key: treat as unauthenticated.
+		if gm.metrics != nil {
+			gm.metrics.IncrementSecurityUnauthenticatedMessages()
 		}
-
-		// For established clusters, only allow critical messages without pubkey
-		if msg.Type == GossipMessageType_MESSAGE_TYPE_CONNECT ||
-			msg.Type == GossipMessageType_MESSAGE_TYPE_CLUSTER_SYNC {
-			if logging.Log.IsDebugEnabled() {
-				logging.Debug("Accepting message without pubkey",
-					"sender", msg.Sender, "clusterSize", clusterSize, "type", msg.Type)
-			}
-			return true
-		}
-
-		// For other messages in established clusters, reject silently (no log spam)
-		// This prevents excessive warnings while maintaining security
 		return false
 	}
 
@@ -589,19 +568,19 @@ func (gm *GossipManager) verifyMessageCanonical(msg *GossipMessage) bool {
 		logging.Debug("Signature verification failed",
 			"sender", msg.Sender, "type", msg.Type)
 	}
+	if !verified && gm.metrics != nil {
+		gm.metrics.IncrementSecuritySignatureFailures()
+	}
 	return verified
 }
 
 func (gm *GossipManager) requiresSignature(msg *GossipMessage) bool {
-	if len(gm.peerPubkeys) > 1 {
-		return true
-	}
-
 	switch msg.Type {
-	case CONNECT, CLUSTER_SYNC, PROBE_REQUEST, PROBE_RESPONSE:
+	case CONNECT, CLUSTER_SYNC, PROBE_REQUEST, PROBE_RESPONSE,
+		READ_REQUEST, READ_RESPONSE,
+		BATCH_READ_REQUEST, BATCH_READ_RESPONSE,
+		CACHE_SYNC, FULL_SYNC_REQUEST, FULL_SYNC_RESPONSE:
 		return true
-	case CACHE_SYNC:
-		return gm.hasMultipleNodes()
 	default:
 		return false
 	}

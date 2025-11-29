@@ -151,6 +151,36 @@ func registerGridKVMetrics(e *MetricsExporter) {
 	// Gossip diagnostics
 	e.RegisterGauge("gossip_local_healthy_nodes", "Healthy nodes from local perspective", "nodes", nil)
 	e.RegisterGauge("gossip_local_cluster_size", "Cluster size from local perspective", "nodes", nil)
+
+	// Security / auth diagnostics
+	e.RegisterCounter("security_signature_failures_total", "Total number of failed message signature verifications", "events", nil)
+	e.RegisterCounter("security_unauthenticated_messages_total", "Messages rejected due to missing or invalid authentication", "events", nil)
+	e.RegisterGauge("security_unauthenticated_message_ratio", "Ratio of unauthenticated messages over total gossip messages", "ratio", nil)
+
+	// Read path metrics (Stage 0.3)
+	e.RegisterCounter("read_success", "Successful read operations", "reads", nil)
+	e.RegisterCounter("read_fail", "Failed read operations", "reads", nil)
+	e.RegisterCounter("read_timeout", "Read operation timeouts", "reads", nil)
+	e.RegisterCounter("read_fast_fail", "Read fast-fail (resource limit exceeded)", "reads", nil)
+	e.RegisterCounter("read_fallback", "Read fallback to alternative replica", "reads", nil)
+
+	// Multi-replica read metrics (Stage 0.3)
+	e.RegisterCounter("read_multi_replica_hits", "Multi-replica read hits", "reads", nil)
+	e.RegisterCounter("read_multi_replica_fallbacks", "Multi-replica read fallbacks", "reads", nil)
+
+	// Replication convergence metrics (Stage 0.3)
+	e.RegisterCounter("replication_visibility_0ms", "Replication visible at T=0ms", "replications", nil)
+	e.RegisterCounter("replication_visibility_50ms", "Replication visible at T=50ms", "replications", nil)
+	e.RegisterCounter("replication_visibility_100ms", "Replication visible at T=100ms", "replications", nil)
+	e.RegisterCounter("replication_visibility_200ms", "Replication visible at T=200ms", "replications", nil)
+	e.RegisterCounter("replication_never_converged", "Replications that never converged", "replications", nil)
+
+	// SWIM metrics (Stage 0.3)
+	e.RegisterCounter("swim_state_transitions", "SWIM node state transitions", "transitions", nil)
+	e.RegisterCounter("swim_false_positives", "SWIM false positive detections", "detections", nil)
+	e.RegisterGauge("swim_self_heal_time_ms", "SWIM self-heal time in milliseconds", "milliseconds", nil)
+	e.RegisterGauge("gossip_qps", "Gossip messages per second", "messages_per_second", nil)
+	e.RegisterGauge("cache_sync_qps", "CACHE_SYNC messages per second", "messages_per_second", nil)
 }
 
 // Cluster Metrics (Gauges)
@@ -438,6 +468,24 @@ func (m *GridKVMetrics) SetGossipLocalClusterSize(count int64) {
 	m.exporter.SetGauge("gossip_local_cluster_size", count)
 }
 
+// Security / auth metrics
+//
+//go:inline
+func (m *GridKVMetrics) IncrementSecuritySignatureFailures() {
+	m.exporter.IncrementCounter("security_signature_failures_total")
+}
+
+//go:inline
+func (m *GridKVMetrics) IncrementSecurityUnauthenticatedMessages() {
+	m.exporter.IncrementCounter("security_unauthenticated_messages_total")
+}
+
+//go:inline
+func (m *GridKVMetrics) SetSecurityUnauthenticatedMessageRatio(ratio float64) {
+	// Store ratio as integer scaled by 1e6 to avoid float handling in exporter
+	m.exporter.SetGauge("security_unauthenticated_message_ratio", int64(ratio*1_000_000))
+}
+
 // Export collects all metrics and sends them to the configured export function.
 //
 // This triggers the exportFunc provided to NewGridKVMetrics, which formats
@@ -526,4 +574,97 @@ func (m *GridKVMetrics) StartPeriodicExport(ctx context.Context, interval time.D
 			return
 		}
 	}
+}
+
+// Read Path Metrics (Stage 0.3)
+
+//go:inline
+func (m *GridKVMetrics) IncrementReadSuccess() {
+	m.exporter.IncrementCounter("read_success")
+}
+
+//go:inline
+func (m *GridKVMetrics) IncrementReadFail() {
+	m.exporter.IncrementCounter("read_fail")
+}
+
+//go:inline
+func (m *GridKVMetrics) IncrementReadTimeout() {
+	m.exporter.IncrementCounter("read_timeout")
+}
+
+//go:inline
+func (m *GridKVMetrics) IncrementReadFastFail() {
+	m.exporter.IncrementCounter("read_fast_fail")
+}
+
+//go:inline
+func (m *GridKVMetrics) IncrementReadFallback() {
+	m.exporter.IncrementCounter("read_fallback")
+}
+
+// Multi-Replica Read Metrics (Stage 0.3)
+
+//go:inline
+func (m *GridKVMetrics) IncrementReadMultiReplicaHits() {
+	m.exporter.IncrementCounter("read_multi_replica_hits")
+}
+
+//go:inline
+func (m *GridKVMetrics) IncrementReadMultiReplicaFallbacks() {
+	m.exporter.IncrementCounter("read_multi_replica_fallbacks")
+}
+
+// Replication Convergence Metrics (Stage 0.3)
+
+//go:inline
+func (m *GridKVMetrics) IncrementReplicationVisibility0ms() {
+	m.exporter.IncrementCounter("replication_visibility_0ms")
+}
+
+//go:inline
+func (m *GridKVMetrics) IncrementReplicationVisibility50ms() {
+	m.exporter.IncrementCounter("replication_visibility_50ms")
+}
+
+//go:inline
+func (m *GridKVMetrics) IncrementReplicationVisibility100ms() {
+	m.exporter.IncrementCounter("replication_visibility_100ms")
+}
+
+//go:inline
+func (m *GridKVMetrics) IncrementReplicationVisibility200ms() {
+	m.exporter.IncrementCounter("replication_visibility_200ms")
+}
+
+//go:inline
+func (m *GridKVMetrics) IncrementReplicationNeverConverged() {
+	m.exporter.IncrementCounter("replication_never_converged")
+}
+
+// SWIM Metrics (Stage 0.3)
+
+//go:inline
+func (m *GridKVMetrics) IncrementSWIMStateTransitions() {
+	m.exporter.IncrementCounter("swim_state_transitions")
+}
+
+//go:inline
+func (m *GridKVMetrics) IncrementSWIMFalsePositives() {
+	m.exporter.IncrementCounter("swim_false_positives")
+}
+
+//go:inline
+func (m *GridKVMetrics) SetSWIMSelfHealTime(ms int64) {
+	m.exporter.SetGauge("swim_self_heal_time_ms", ms)
+}
+
+//go:inline
+func (m *GridKVMetrics) SetGossipQPS(qps int64) {
+	m.exporter.SetGauge("gossip_qps", qps)
+}
+
+//go:inline
+func (m *GridKVMetrics) SetCacheSyncQPS(qps int64) {
+	m.exporter.SetGauge("cache_sync_qps", qps)
 }

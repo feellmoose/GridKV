@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 var (
@@ -176,7 +177,21 @@ func (p *Pool) Release() {
 
 	close(p.stopCh)
 	close(p.taskCh)
-	p.wg.Wait()
+	
+	// Wait for workers with timeout to prevent indefinite blocking
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	
+	select {
+	case <-done:
+		// All workers exited
+	case <-time.After(5 * time.Second):
+		// Timeout - some workers may still be running
+		// This is acceptable as tasks may be long-running
+	}
 }
 
 // Stats returns current pool statistics.

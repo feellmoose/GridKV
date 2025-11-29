@@ -31,7 +31,7 @@ func TestStabilityExtremeLatency(t *testing.T) {
 				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      5,
 				ReplicaCount:   3,
-				BasePort:       80000,
+				BasePort:       45000, // Fixed: was 80000 (invalid port > 65535)
 				StorageBackend: gridkv.BackendMemorySharded,
 				MaxMemoryMB:    2048,
 				ShardCount:     128,
@@ -46,7 +46,7 @@ func TestStabilityExtremeLatency(t *testing.T) {
 				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      10,
 				ReplicaCount:   3,
-				BasePort:       81000,
+				BasePort:       46000, // Fixed: was 81000 (invalid port > 65535)
 				StorageBackend: gridkv.BackendMemorySharded,
 				MaxMemoryMB:    4096,
 				ShardCount:     256,
@@ -178,7 +178,7 @@ func TestStabilityNodeFailures(t *testing.T) {
 				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      5,
 				ReplicaCount:   3,
-				BasePort:       90000,
+				BasePort:       47000, // Fixed: was 90000 (invalid port > 65535)
 				StorageBackend: gridkv.BackendMemorySharded,
 				MaxMemoryMB:    2048,
 				ShardCount:     128,
@@ -195,7 +195,7 @@ func TestStabilityNodeFailures(t *testing.T) {
 				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      10,
 				ReplicaCount:   3,
-				BasePort:       91000,
+				BasePort:       48000, // Fixed: was 91000 (invalid port > 65535)
 				StorageBackend: gridkv.BackendMemorySharded,
 				MaxMemoryMB:    4096,
 				ShardCount:     256,
@@ -212,7 +212,7 @@ func TestStabilityNodeFailures(t *testing.T) {
 				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      8,
 				ReplicaCount:   3,
-				BasePort:       92000,
+				BasePort:       49000, // Fixed: was 92000 (invalid port > 65535)
 				StorageBackend: gridkv.BackendMemorySharded,
 				MaxMemoryMB:    4096,
 				ShardCount:     256,
@@ -413,7 +413,7 @@ func TestStabilitySuddenShutdown(t *testing.T) {
 				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      10,
 				ReplicaCount:   3,
-				BasePort:       93000,
+				BasePort:       50000, // Fixed: was 93000 (invalid port > 65535)
 				StorageBackend: gridkv.BackendMemorySharded,
 				MaxMemoryMB:    4096,
 				ShardCount:     256,
@@ -430,7 +430,7 @@ func TestStabilitySuddenShutdown(t *testing.T) {
 				NetworkType:    networkTypeFromEnv(gridkv.TCP),
 				NodeCount:      10,
 				ReplicaCount:   3,
-				BasePort:       94000,
+				BasePort:       51000, // Fixed: was 94000 (invalid port > 65535)
 				StorageBackend: gridkv.BackendMemorySharded,
 				MaxMemoryMB:    4096,
 				ShardCount:     256,

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/metrics"
@@ -72,13 +73,14 @@ type NetworkOptions struct {
 }
 
 type TransportProtocol struct {
-	opts      *NetworkOptions
-	transport transport.Transport
-	listener  transport.TransportListener
-	pools     sync.Map
-	stopOnce  sync.Once
-	poolMu    sync.RWMutex
-	maxPools  int
+	opts           *NetworkOptions
+	transport      transport.Transport
+	listener       transport.TransportListener
+	pools          sync.Map
+	stopOnce       sync.Once
+	poolMu         sync.RWMutex
+	maxPools       int
+	cleanupRunning atomic.Bool // ensure only one cleanup runs at a time
 }
 
 func NewTransportProtocol(opts *NetworkOptions) (*TransportProtocol, error) {
@@ -183,12 +185,24 @@ func (p *TransportProtocol) getPool(address string) *transport.ConnPool {
 		p.poolMu.RUnlock()
 
 		if needsCleanup {
-			// Run cleanup in background to avoid blocking
-			go p.cleanupOldPools()
+			// Schedule cleanup with single-flight guard to avoid goroutine explosion.
+			p.scheduleCleanup()
 		}
 	}
 
 	return pool
+}
+
+// scheduleCleanup starts cleanupOldPools if no other cleanup is running.
+// This prevents unbounded goroutine growth under high churn.
+func (p *TransportProtocol) scheduleCleanup() {
+	if !p.cleanupRunning.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer p.cleanupRunning.Store(false)
+		p.cleanupOldPools()
+	}()
 }
 
 func (p *TransportProtocol) cleanupOldPools() {
@@ -319,10 +333,10 @@ func (p *TransportProtocol) Listen(handler func(message []byte) error) error {
 
 func (p *TransportProtocol) Stop() {
 	p.stopOnce.Do(func() {
+		// Stage 2 Sleep优化: Listener.Stop()和ConnPool.Close()已有内部等待机制
 		if p.listener != nil {
-			p.listener.Stop()
-			// Wait longer for listener goroutines to exit and port release
-			time.Sleep(500 * time.Millisecond)
+			// Listener.Stop() internally waits with WaitGroup (tcp.go, quic.go, udp.go)
+			_ = p.listener.Stop()
 		}
 
 		var pools []*transport.ConnPool
@@ -332,15 +346,11 @@ func (p *TransportProtocol) Stop() {
 			return true
 		})
 
-		// Close pools sequentially to avoid creating many goroutines during shutdown
-		// Sequential closing is acceptable during shutdown and prevents goroutine leaks
+		// Close pools sequentially - ConnPool.Close() has internal wait logic
 		for _, pool := range pools {
-			pool.Close()
+			_ = pool.Close() // Has internal polling wait for in-use connections
 		}
-
-		// Wait for connections to fully close, goroutines to exit, and ports to be released
-		// Increased wait time for better cleanup
-		time.Sleep(500 * time.Millisecond)
+		// No additional sleep needed - Close() handles cleanup
 	})
 }
 

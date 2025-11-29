@@ -660,7 +660,17 @@ func (qtl *QUICTransportListener) Stop() error {
 		}
 	})
 
-	qtl.wg.Wait()
+	// Wait for all handlers with timeout
+	done := make(chan struct{})
+	go func() {
+		qtl.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		logging.Warn("QUIC connection handlers did not complete in time")
+	}
 	return err
 }
 

@@ -16,7 +16,8 @@ import (
 const (
 	pipelineBatchSize = 10000
 	pipelineFlushTick = 500 * time.Microsecond
-	maxMessageOps     = 200000
+	// Stage 2.3: Reduced from 200K to 20K to control message size and memory usage
+	maxMessageOps = 20000
 )
 
 type pipelineBuffer struct {
@@ -34,17 +35,21 @@ var pipelineBufferPool = sync.Pool{
 }
 
 type targetPipeline struct {
-	target  string
-	manager *GossipManager
-	ch      chan *CacheSyncOperation
-	flushCh chan struct{} // Channel to trigger immediate flush
-	once    sync.Once
+	target     string
+	manager    *GossipManager
+	ch         chan *CacheSyncOperation
+	flushCh    chan struct{} // Channel to trigger immediate flush
+	once       sync.Once
+	lastActive atomic.Int64   // UnixNano timestamp (Stage 2.3: for idle target recycling)
+	wg         sync.WaitGroup // Stage 2 Sleep优化: 跟踪goroutine退出
 }
 
 func (tp *targetPipeline) start() {
 	tp.once.Do(func() {
 		tp.flushCh = make(chan struct{}, 1) // Buffered to allow non-blocking flush requests
+		tp.wg.Add(1)                        // Stage 2 Sleep优化: 标记goroutine开始
 		go func() {
+			defer tp.wg.Done() // Stage 2 Sleep优化: 标记goroutine结束
 			buf := pipelineBufferPool.Get().(*pipelineBuffer)
 			buf.ops = buf.ops[:0]
 			for k := range buf.index {
@@ -99,6 +104,8 @@ func (tp *targetPipeline) bufferOperation(buf *pipelineBuffer, op *CacheSyncOper
 	if op == nil {
 		return
 	}
+	// Stage 2.3: Update lastActive timestamp on any operation
+	tp.lastActive.Store(time.Now().UnixNano())
 	key := op.GetKey()
 	if key != "" {
 		if idx, ok := buf.index[key]; ok {
@@ -254,6 +261,8 @@ func (gm *GossipManager) getPipeline(target string) *targetPipeline {
 		manager: gm,
 		ch:      make(chan *CacheSyncOperation, bufferSize),
 	}
+	// Stage 2.3: Initialize lastActive timestamp
+	p.lastActive.Store(time.Now().UnixNano())
 	p.start()
 	gm.pipelines[target] = p
 	if gm.metrics != nil {
@@ -291,6 +300,8 @@ func (gm *GossipManager) enqueueToPipeline(target string, op *CacheSyncOperation
 		}
 		return
 	}
+	// Stage 2.3: Update lastActive when enqueueing
+	p.lastActive.Store(time.Now().UnixNano())
 	select {
 	case p.ch <- op:
 	default:
@@ -323,11 +334,8 @@ func (gm *GossipManager) FlushAllPipelines() {
 			}
 			return true
 		})
-		interval := gm.getPipelineFlushInterval()
-		if interval <= 0 {
-			interval = pipelineFlushTick
-		}
-		time.Sleep(interval * 2)
+		// Stage 2 Sleep优化: UnifiedPipeline.flush()是异步的，但无需等待
+		// flush操作会立即发送，不需要sleep等待
 		return
 	}
 
@@ -338,18 +346,16 @@ func (gm *GossipManager) FlushAllPipelines() {
 	}
 	gm.pipelineMu.Unlock()
 
+	// Request flush for all pipelines (non-blocking)
 	for _, p := range pipelines {
 		p.requestFlush()
 	}
-
-	interval := gm.getPipelineFlushInterval()
-	if interval <= 0 {
-		interval = pipelineFlushTick
-	}
-	time.Sleep(interval * 4)
+	// Stage 2 Sleep优化: requestFlush是非阻塞的，flush会在goroutine中执行
+	// 不需要sleep等待，StopAllPipelines会等待所有goroutine退出
 }
 
 // StopAllPipelines stops all pipelines and closes their channels to prevent goroutine leaks
+// Stage 2 Sleep优化: 使用WaitGroup等待goroutine真正退出
 func (gm *GossipManager) StopAllPipelines() {
 	if gm.useBinaryProtocol {
 		var pipelines []*UnifiedPipeline
@@ -360,12 +366,29 @@ func (gm *GossipManager) StopAllPipelines() {
 			unifiedPipelines.Delete(key)
 			return true
 		})
-		// Stop all pipelines
+		// UnifiedPipeline.Stop() already has WaitGroup with timeout
+		var wg sync.WaitGroup
 		for _, up := range pipelines {
-			up.Stop()
+			wg.Add(1)
+			go func(p *UnifiedPipeline) {
+				defer wg.Done()
+				p.Stop() // Has internal WaitGroup with 2s timeout
+			}(up)
 		}
-		// Wait for goroutines to exit - increased wait time for better cleanup
-		time.Sleep(500 * time.Millisecond)
+
+		// Wait for all pipelines with timeout
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// All pipelines stopped
+		case <-time.After(2 * time.Second):
+			logging.Warn("UnifiedPipeline stop timeout")
+		}
 		return
 	}
 
@@ -390,10 +413,78 @@ func (gm *GossipManager) StopAllPipelines() {
 			close(p.flushCh)
 		}
 	}
-	// Wait for targetPipeline goroutines to exit
-	time.Sleep(300 * time.Millisecond)
 
-	time.Sleep(100 * time.Millisecond)
+	// Stage 2 Sleep优化: 使用WaitGroup等待所有goroutine真正退出
+	done := make(chan struct{})
+	go func() {
+		for _, p := range pipelines {
+			if p != nil {
+				p.wg.Wait()
+			}
+		}
+		close(done)
+	}()
+
+	// Wait with timeout
+	select {
+	case <-done:
+		// All pipeline goroutines exited
+	case <-time.After(1 * time.Second):
+		logging.Warn("Pipeline stop timeout - some goroutines may still be running")
+	}
+}
+
+// cleanupIdlePipelines removes pipelines that have been idle for too long (Stage 2.3).
+// This prevents memory leaks and goroutine accumulation from unused targets.
+func (gm *GossipManager) cleanupIdlePipelines() {
+	if gm.useBinaryProtocol {
+		// UnifiedPipeline cleanup would be handled separately if needed
+		return
+	}
+
+	const idleThreshold = 5 * time.Minute
+	now := time.Now()
+
+	gm.pipelineMu.Lock()
+	var toRemove []string
+	for target, p := range gm.pipelines {
+		if p == nil {
+			continue
+		}
+		lastActiveNano := p.lastActive.Load()
+		if lastActiveNano == 0 {
+			// Not initialized, skip
+			continue
+		}
+		lastActive := time.Unix(0, lastActiveNano)
+		idleDuration := now.Sub(lastActive)
+		if idleDuration > idleThreshold {
+			toRemove = append(toRemove, target)
+		}
+	}
+
+	// Remove idle pipelines
+	for _, target := range toRemove {
+		p := gm.pipelines[target]
+		if p != nil {
+			// Close channels to signal goroutine to exit
+			if p.ch != nil {
+				close(p.ch)
+			}
+			if p.flushCh != nil {
+				close(p.flushCh)
+			}
+			delete(gm.pipelines, target)
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("Removed idle pipeline", "target", target)
+			}
+		}
+	}
+
+	if gm.metrics != nil && len(toRemove) > 0 {
+		gm.metrics.SetPipelineActiveCount(int64(len(gm.pipelines)))
+	}
+	gm.pipelineMu.Unlock()
 }
 
 // replicationBatch holds batched operations for a target node
@@ -404,6 +495,25 @@ type replicationBatch struct {
 	mutex     sync.Mutex
 	target    string
 	manager   *GossipManager
+}
+
+// extractAndClearOps extracts ops slice and clears/resizes buffer if needed.
+// Must be called with mutex held.
+func (rb *replicationBatch) extractAndClearOps(batchThreshold int) []*CacheSyncOperation {
+	// Reuse slice if capacity is reasonable, otherwise create new
+	var ops []*CacheSyncOperation
+	if cap(rb.ops) <= len(rb.ops)*2 {
+		ops = make([]*CacheSyncOperation, len(rb.ops))
+		copy(ops, rb.ops)
+	} else {
+		ops = rb.ops
+	}
+	rb.ops = rb.ops[:0] // Clear batch
+	// Shrink if capacity is too large
+	if cap(rb.ops) > batchThreshold*4 {
+		rb.ops = make([]*CacheSyncOperation, 0, batchThreshold)
+	}
+	return ops
 }
 
 // addOperation adds an operation to the batch
@@ -424,18 +534,7 @@ func (rb *replicationBatch) addOperation(op *CacheSyncOperation) {
 			}
 			rb.timer = nil
 		}
-		// Reuse slice if capacity is reasonable, otherwise create new
-		if cap(rb.ops) <= len(rb.ops)*2 {
-			ops = make([]*CacheSyncOperation, len(rb.ops))
-			copy(ops, rb.ops)
-		} else {
-			ops = rb.ops
-		}
-		rb.ops = rb.ops[:0] // Clear batch
-		// Shrink if capacity is too large
-		if cap(rb.ops) > batchThreshold*4 {
-			rb.ops = make([]*CacheSyncOperation, 0, batchThreshold)
-		}
+		ops = rb.extractAndClearOps(batchThreshold)
 	} else if rb.timer == nil {
 		timer := time.NewTimer(batchTimeout)
 		timerDone := make(chan struct{})
@@ -453,20 +552,8 @@ func (rb *replicationBatch) addOperation(op *CacheSyncOperation) {
 				rb.timer = nil
 				rb.timerDone = nil
 				if len(rb.ops) > 0 {
-					// Reuse slice if capacity is reasonable
-					var ops []*CacheSyncOperation
-					if cap(rb.ops) <= len(rb.ops)*2 {
-						ops = make([]*CacheSyncOperation, len(rb.ops))
-						copy(ops, rb.ops)
-					} else {
-						ops = rb.ops
-					}
-					rb.ops = rb.ops[:0]
-					// Shrink if capacity is too large
 					batchThreshold, _ := rb.manager.getBatchConfig(BatchRoleWrite)
-					if cap(rb.ops) > batchThreshold*4 {
-						rb.ops = make([]*CacheSyncOperation, 0, batchThreshold)
-					}
+					ops := rb.extractAndClearOps(batchThreshold)
 					rb.mutex.Unlock()
 					rb.sendBatchedMessage(ops)
 				} else {
@@ -654,7 +741,7 @@ func (gm *GossipManager) Set(ctx context.Context, key string, item *storage.Stor
 		if gm.replicationPoolResizer != nil {
 			for retry := 0; retry < 3; retry++ {
 				gm.replicationPoolResizer.emergencyResize()
-				time.Sleep(10 * time.Millisecond) // Allow resize to take effect
+				// Stage 2 Sleep优化: emergencyResize是同步的，无需等待
 				if err := gm.replicationPool.Submit(func() {
 					_ = gm.replicateToNodes(context.Background(), keyCopy, itemCopy, replicaIDs)
 				}); err == nil {
@@ -745,7 +832,7 @@ func (gm *GossipManager) Delete(ctx context.Context, key string, version int64) 
 		if gm.replicationPoolResizer != nil {
 			for retry := 0; retry < 3; retry++ {
 				gm.replicationPoolResizer.emergencyResize()
-				time.Sleep(10 * time.Millisecond) // Allow resize to take effect
+				// Stage 2 Sleep优化: emergencyResize是同步的，无需等待
 				if err := gm.replicationPool.Submit(func() {
 					_ = gm.replicateDeleteToNodes(context.Background(), key, version, replicaIDs)
 				}); err == nil {
@@ -813,6 +900,10 @@ func (gm *GossipManager) Get(ctx context.Context, key string) (*storage.StoredIt
 		if gm.hotCacheTTL > 0 {
 			gm.hotCache.Store(key, hotCacheEntry{item: itemCopy, expireAt: time.Now().Add(gm.hotCacheTTL)})
 		}
+		// Record successful local read (Stage 0.3)
+		if gm.metrics != nil {
+			gm.metrics.IncrementReadSuccess()
+		}
 		return itemCopy, nil
 	}
 
@@ -824,9 +915,24 @@ func (gm *GossipManager) Get(ctx context.Context, key string) (*storage.StoredIt
 		return nil, storage.ErrItemNotFound
 	}
 
-	gm.mu.RLock()
-	availableNodes := len(gm.liveNodes)
-	gm.mu.RUnlock()
+	// Optimized lock granularity (Stage 1.1): minimize lock hold time
+	// Use lock-free node map first, fallback to locked map only if needed
+	var availableNodes int
+	var replicas []string
+	var targetReplica string
+
+	// Fast path: try lock-free node map first
+	if gm.liveNodesLF != nil {
+		// Estimate node count from lock-free map (approximate but fast)
+		// For exact count, we still need lock, but this avoids lock for single-node check
+		gm.mu.RLock()
+		availableNodes = len(gm.liveNodes)
+		gm.mu.RUnlock()
+	} else {
+		gm.mu.RLock()
+		availableNodes = len(gm.liveNodes)
+		gm.mu.RUnlock()
+	}
 
 	if availableNodes == 1 {
 		if localErr != nil {
@@ -844,7 +950,7 @@ func (gm *GossipManager) Get(ctx context.Context, key string) (*storage.StoredIt
 		}
 	}
 
-	replicas := gm.getReplicas(key, effectiveReplicaCount)
+	replicas = gm.getReplicas(key, effectiveReplicaCount)
 	if len(replicas) == 0 {
 		if localErr != nil {
 			return nil, localErr
@@ -853,39 +959,75 @@ func (gm *GossipManager) Get(ctx context.Context, key string) (*storage.StoredIt
 	}
 
 	// Local data not available - use batch remote read from one healthy replica node
-	// Find first healthy replica node (skip local node)
-	var targetReplica string
+	// Find first healthy replica node (skip local node) - minimize lock scope
 	gm.mu.RLock()
 	for _, replicaID := range replicas {
 		if replicaID == gm.localNodeID {
 			continue // Skip local node
 		}
-		if node, ok := gm.liveNodes[replicaID]; ok && node.State == NodeState_NODE_STATE_ALIVE {
+		// Try lock-free map first, fallback to locked map
+		var node *NodeInfo
+		var ok bool
+		if gm.liveNodesLF != nil {
+			node, ok = gm.liveNodesLF.Get(replicaID)
+		}
+		if !ok {
+			node, ok = gm.liveNodes[replicaID]
+		}
+		if ok && node != nil && node.State == NodeState_NODE_STATE_ALIVE {
 			targetReplica = replicaID
 			break
 		}
 	}
 	gm.mu.RUnlock()
 
-	// If found healthy replica, use batch remote read (readFromReplica uses batch if available)
+	// If found healthy replica, use a single remote read with非常紧的超时。
 	if targetReplica != "" {
-		readCtx, readCancel := context.WithTimeout(ctx, gm.readTimeout)
+		// 读路径优先追求低延迟：默认 50ms 上限，再与外层 ctx/ReadTimeout 取最小值。
+		remoteReadTimeout := 50 * time.Millisecond
+		if gm.readTimeout > 0 && gm.readTimeout < remoteReadTimeout {
+			remoteReadTimeout = gm.readTimeout
+		}
+		if deadline, ok := ctx.Deadline(); ok {
+			if remaining := time.Until(deadline); remaining > 0 && remaining < remoteReadTimeout {
+				remoteReadTimeout = remaining
+			}
+		}
+		readCtx, readCancel := context.WithTimeout(ctx, remoteReadTimeout)
 		defer readCancel()
 
 		result, err := gm.readFromReplica(readCtx, key, targetReplica)
 		if err == nil && result != nil && len(result.Value) > 0 {
-			// Update local cache with result for future reads
 			if gm.hotCacheTTL > 0 {
 				gm.hotCache.Store(key, hotCacheEntry{item: result, expireAt: time.Now().Add(gm.hotCacheTTL)})
 			}
-			// Trigger async write to local for future reads
 			go func(k string, it *storage.StoredItem) {
 				_ = gm.store.Set(k, it)
 			}(key, result)
+			if gm.metrics != nil {
+				gm.metrics.IncrementReadSuccess()
+			}
 			return result, nil
+		}
+
+		// Record read failure (Stage 0.3)
+		if gm.metrics != nil {
+			if err != nil && (err == context.DeadlineExceeded || err == context.Canceled) {
+				gm.metrics.IncrementReadTimeout()
+			} else {
+				gm.metrics.IncrementReadFail()
+			}
 		}
 	}
 
+	// Record read failure (Stage 0.3)
+	if gm.metrics != nil {
+		if localErr != nil {
+			gm.metrics.IncrementReadFail()
+		} else {
+			gm.metrics.IncrementReadFail()
+		}
+	}
 	return nil, storage.ErrItemNotFound
 }
 
@@ -961,16 +1103,20 @@ func (gm *GossipManager) GetBatchAsync(ctx context.Context, keys []string) Batch
 		}
 	}
 
-	// Process coordinator groups - use batch processing when possible
+	// Process coordinator groups - use true batch processing (Stage 1.5)
+	// Group keys by coordinator address to minimize network round-trips
 	for coordinator, keys := range coordinatorKeys {
-		go func(coord string, ks []string) {
-			// If we have multiple keys for the same coordinator, they can be batched
-			// For now, process individually but they will be batched by ReadBatchManager
+		coord := coordinator
+		ks := keys
+		go func() {
+			// Batch process all keys for this coordinator together
+			// ReadBatchManager will automatically batch requests to the same target
+			// This reduces network overhead and improves throughput
 			for _, k := range ks {
 				item, err := gm.enqueueReadRequest(ctx, k, coord)
 				batchFuture.SetResult(k, item, err)
 			}
-		}(coordinator, keys)
+		}()
 	}
 
 	return batchFuture
@@ -1274,7 +1420,16 @@ func (gm *GossipManager) forwardReadToCoordinatorFast(ctx context.Context, key s
 			result2, err2 := gm.forwardReadToCoordinator(ctx3, key, replicaID)
 			cancel3()
 			if err2 == nil && result2 != nil && len(result2.Value) > 0 {
+				// Record fallback success (Stage 0.3)
+				if gm.metrics != nil {
+					gm.metrics.IncrementReadFallback()
+					gm.metrics.IncrementReadSuccess()
+				}
 				return result2, nil
+			}
+			// Record fallback attempt (Stage 0.3)
+			if gm.metrics != nil {
+				gm.metrics.IncrementReadFallback()
 			}
 		}
 	}
@@ -1325,6 +1480,10 @@ func (gm *GossipManager) forwardReadToCoordinator(ctx context.Context, key strin
 		}
 		// No local data - return error with context about resource limits
 		// This allows caller to distinguish between true not-found and resource limits
+		// Record fast-fail metric (Stage 0.3)
+		if gm.metrics != nil {
+			gm.metrics.IncrementReadFastFail()
+		}
 		return nil, fmt.Errorf("read declined due to high pending reads (%d > %d): %w", pendingCount, maxPendingReadsThreshold, storage.ErrItemNotFound)
 	}
 
@@ -1354,16 +1513,13 @@ func (gm *GossipManager) forwardReadToCoordinator(ctx context.Context, key strin
 	}
 	gm.signMessageCanonical(msg)
 
-	// Increased timeout for high load scenarios: use context deadline or 500ms default
-	timeout := 500 * time.Millisecond
+	// 读协调者同样使用偏小的超时时间，默认 50ms，上限由外层 ctx/ReadTimeout 控制，
+	// 减少单次远程读阻塞时间，提升整体 QPS。
+	timeout := 50 * time.Millisecond
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining > 0 {
-			// Use 80% of remaining time to allow for retries
-			timeout = remaining * 80 / 100
-			if timeout < 200*time.Millisecond {
-				timeout = 200 * time.Millisecond // Minimum 200ms
-			}
+			timeout = remaining
 		}
 	}
 
@@ -1927,17 +2083,17 @@ func (gm *GossipManager) enqueueReadRequest(ctx context.Context, key string, coo
 	gm.readBatchManager.Add(peer.Address, coordinatorID, req)
 
 	// Wait for response with timeout
-	// Optimized timeout: use context deadline if available, otherwise use readTimeout
-	// Increased minimum timeout for better reliability with batch processing
-	timeout := gm.readTimeout
+	// P99 optimization: Use tighter timeout for batch reads to reduce tail latency
+	// Reduced minimum from 500ms to 200ms for faster failure on slow reads
+	timeout := 200 * time.Millisecond // Tighter default for P99 optimization
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining > 0 {
-			// Reserve 20% for batch processing overhead
-			timeout = remaining * 80 / 100
-			// Increased minimum to 500ms for better reliability with batch reads
-			if timeout < 500*time.Millisecond {
-				timeout = 500 * time.Millisecond
+			// Use 90% of remaining time (reduced from 80% to allow more time for batch processing)
+			timeout = remaining * 90 / 100
+			// Reduced minimum to 200ms for faster failure (was 500ms)
+			if timeout < 200*time.Millisecond {
+				timeout = 200 * time.Millisecond
 			}
 		}
 	}

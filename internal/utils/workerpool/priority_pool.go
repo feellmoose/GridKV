@@ -205,7 +205,12 @@ func NewPriorityPool(opts PriorityPoolOptions) (*PriorityPool, error) {
 
 	dispatchers := opts.Dispatchers
 	if dispatchers <= 0 {
+		// Limit dispatchers to prevent excessive goroutine creation
+		// Use min of baseCapacity and 128 to cap initial goroutines
 		dispatchers = baseCapacity
+		if dispatchers > 128 {
+			dispatchers = 128
+		}
 		if dispatchers < 4 {
 			dispatchers = 4
 		}
@@ -392,17 +397,17 @@ func (pp *PriorityPool) executeTask(task *taskWrapper) {
 	}
 
 	// Execute task in base pool
+	// No fallback goroutine to prevent leaks - rely on adaptive resizer
 	err := pp.basePool.Submit(func() {
 		defer task.finish()
 		pp.runTask(task)
 	})
 
-	// Fallback to goroutine if pool is full
+	// If pool is full, cancel task and return error
+	// Adaptive resizer will handle pool expansion
 	if err != nil {
-		go func() {
-			defer task.finish()
-			pp.runTask(task)
-		}()
+		task.finish()
+		pp.incrementDropped(task.priority)
 	}
 }
 

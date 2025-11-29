@@ -17,6 +17,7 @@ import (
 
 	"github.com/feellmoose/gridkv/internal/gossip"
 	"github.com/feellmoose/gridkv/internal/storage"
+	"github.com/feellmoose/gridkv/internal/transport"
 	"github.com/feellmoose/gridkv/internal/utils/crypto"
 	"github.com/feellmoose/gridkv/internal/utils/logging"
 )
@@ -700,6 +701,9 @@ func (g *GridKV) CloseWithTimeout(timeout time.Duration) error {
 				errs = append(errs, fmt.Errorf("store close failed: %w", err))
 			}
 		}
+
+		// Stop global pool cleaner to prevent goroutine leak
+		transport.StopPoolCleaner()
 
 		if len(errs) > 0 {
 			closeErr = fmt.Errorf("errors during close: %v", errs)

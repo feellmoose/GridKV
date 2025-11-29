@@ -9,6 +9,7 @@ import (
 )
 
 // WorkerPoolRecorder periodically records worker pool statistics into GridKV metrics.
+// Uses sampling to reduce overhead (Stage 0.3).
 type WorkerPoolRecorder struct {
 	exporter *MetricsExporter
 
@@ -24,6 +25,9 @@ type WorkerPoolRecorder struct {
 	lastSubmitted uint64
 	lastCompleted uint64
 	lastDropped   uint64
+
+	// Sampling for high-frequency updates (Stage 0.3)
+	sampler *Sampler
 }
 
 // RegisterWorkerPoolRecorder registers metrics for a named worker pool and returns a recorder.
@@ -54,6 +58,9 @@ func (m *GridKVMetrics) RegisterWorkerPoolRecorder(poolName string) *WorkerPoolR
 	e.RegisterCounter(completedCounter, helpPrefix+" completed tasks", "tasks", nil)
 	e.RegisterCounter(droppedCounter, helpPrefix+" dropped tasks", "tasks", nil)
 
+	// Use sampling to reduce overhead: sample 1 in 10 calls (10% sampling) (Stage 0.3)
+	sampler := NewSampler(10)
+
 	return &WorkerPoolRecorder{
 		exporter:         e,
 		capacityGauge:    capacityGauge,
@@ -62,18 +69,26 @@ func (m *GridKVMetrics) RegisterWorkerPoolRecorder(poolName string) *WorkerPoolR
 		submittedCounter: submittedCounter,
 		completedCounter: completedCounter,
 		droppedCounter:   droppedCounter,
+		sampler:          sampler,
 	}
 }
 
 // RecordStats updates metrics using the provided worker pool stats.
+// Uses sampling to reduce lock contention (Stage 0.3).
 func (r *WorkerPoolRecorder) RecordStats(stats workerpool.Stats) {
 	if r == nil || r.exporter == nil {
 		return
 	}
 
+	// Always update gauges (low overhead, atomic operations)
 	r.exporter.SetGauge(r.capacityGauge, int64(stats.Capacity))
 	r.exporter.SetGauge(r.runningGauge, int64(stats.Running))
 	r.exporter.SetGauge(r.queueGauge, int64(stats.QueueLen))
+
+	// Sample counter updates to reduce lock contention (Stage 0.3)
+	if r.sampler != nil && !r.sampler.ShouldSample() {
+		return
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()

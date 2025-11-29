@@ -468,3 +468,106 @@ func LoadConfigFromFile(path string) (*GridKVOptions, error) {
 func parseDuration(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
+
+// SaveConfigToFile saves GridKVOptions to a JSON file (Stage 0.1: baseline config export).
+// This is useful for creating baseline.yaml for rollback scenarios.
+func SaveConfigToFile(opts *GridKVOptions, path string) error {
+	if opts == nil {
+		return fmt.Errorf("GridKVOptions cannot be nil")
+	}
+
+	cfg := &configFile{
+		LocalNodeID:  opts.LocalNodeID,
+		LocalAddress: opts.LocalAddress,
+		SeedAddrs:    opts.SeedAddrs,
+		DataCenter:   opts.DataCenter,
+		DisableAuth:  opts.DisableAuth,
+	}
+
+	if opts.Profile != nil {
+		cfg.Profile = &profileConfig{
+			Preset:          string(opts.Profile.Preset),
+			Transport:       string(opts.Profile.Transport),
+			ClusterSizeHint: opts.Profile.ClusterSizeHint,
+		}
+	}
+
+	if opts.Network != nil {
+		networkType := "tcp"
+		switch opts.Network.Type {
+		case QUIC:
+			networkType = "quic"
+		case UDP:
+			networkType = "udp"
+		}
+		cfg.Network = &networkConfig{
+			Type:         networkType,
+			BindAddr:     opts.Network.BindAddr,
+			MaxIdle:      opts.Network.MaxIdle,
+			MaxConns:     opts.Network.MaxConns,
+			Timeout:      formatDuration(opts.Network.Timeout),
+			ReadTimeout:  formatDuration(opts.Network.ReadTimeout),
+			WriteTimeout: formatDuration(opts.Network.WriteTimeout),
+		}
+	}
+
+	if opts.Storage != nil {
+		cfg.Storage = &storageConfig{
+			Backend:     string(opts.Storage.Backend),
+			MaxMemoryMB: opts.Storage.MaxMemoryMB,
+			ShardCount:  opts.Storage.ShardCount,
+		}
+	}
+
+	if opts.Log != nil {
+		cfg.Log = &logConfig{
+			Level:       opts.Log.Level,
+			Format:      opts.Log.Format,
+			EnableDebug: opts.Log.EnableDebug,
+		}
+	}
+
+	if opts.ReplicaCount > 0 {
+		cfg.ReplicaCount = opts.ReplicaCount
+	}
+	if opts.VirtualNodes > 0 {
+		cfg.VirtualNodes = opts.VirtualNodes
+	}
+	if opts.MaxReplicators > 0 {
+		cfg.MaxReplicators = opts.MaxReplicators
+	}
+	if opts.MigrateRateLimitPerSec > 0 {
+		cfg.MigrateRateLimit = opts.MigrateRateLimitPerSec
+	}
+	if opts.ReadRepairRateLimitPerSec > 0 {
+		cfg.ReadRepairRateLimit = opts.ReadRepairRateLimitPerSec
+	}
+
+	cfg.ReplicationTimeout = formatDuration(opts.ReplicationTimeout)
+	cfg.ReadTimeout = formatDuration(opts.ReadTimeout)
+	cfg.FailureTimeout = formatDuration(opts.FailureTimeout)
+	cfg.SuspectTimeout = formatDuration(opts.SuspectTimeout)
+	cfg.GossipInterval = formatDuration(opts.GossipInterval)
+	cfg.StartupGracePeriod = formatDuration(opts.StartupGracePeriod)
+	cfg.TTL = formatDuration(opts.TTL)
+	cfg.HotReadCacheTTL = formatDuration(opts.HotReadCacheTTL)
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("failed to write config file: %w", err)
+	}
+
+	return nil
+}
+
+// formatDuration formats a duration as a string (e.g., "500ms", "2s").
+func formatDuration(d time.Duration) string {
+	if d == 0 {
+		return ""
+	}
+	return d.String()
+}

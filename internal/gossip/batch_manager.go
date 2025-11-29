@@ -35,12 +35,13 @@ type BatchManager struct {
 }
 
 func newBatchManager() *BatchManager {
+	// Stage 2.3: Adjusted flush intervals - min 500µs, max 2-5ms
 	baseProfiles := []batchProfile{
-		{maxClusterSize: 10, batchSize: 20000, flushInterval: 100 * time.Microsecond},
-		{maxClusterSize: 20, batchSize: 35000, flushInterval: 200 * time.Microsecond},
-		{maxClusterSize: 50, batchSize: 50000, flushInterval: 500 * time.Microsecond},
-		{maxClusterSize: 100, batchSize: 65000, flushInterval: 1 * time.Millisecond},
-		{maxClusterSize: math.MaxInt32, batchSize: 80000, flushInterval: 2 * time.Millisecond},
+		{maxClusterSize: 10, batchSize: 20000, flushInterval: 500 * time.Microsecond},
+		{maxClusterSize: 20, batchSize: 35000, flushInterval: 1 * time.Millisecond},
+		{maxClusterSize: 50, batchSize: 50000, flushInterval: 2 * time.Millisecond},
+		{maxClusterSize: 100, batchSize: 65000, flushInterval: 3 * time.Millisecond},
+		{maxClusterSize: math.MaxInt32, batchSize: 80000, flushInterval: 5 * time.Millisecond},
 	}
 
 	return &BatchManager{
@@ -49,7 +50,7 @@ func newBatchManager() *BatchManager {
 			BatchRoleWrite: {
 				profiles:     cloneProfiles(baseProfiles, 1.0, 1.0),
 				minBatchSize: 10000,
-				minInterval:  100 * time.Microsecond,
+				minInterval:  500 * time.Microsecond, // Stage 2.3: Fixed minimum at 500µs
 			},
 			BatchRoleReadRequest: {
 				profiles:     cloneProfiles(baseProfiles, 0.3, 0.4), // Smaller batches, shorter intervals for requests

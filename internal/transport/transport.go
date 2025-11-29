@@ -175,10 +175,22 @@ func (p *ConnPool) Prewarm(count int) int {
 		}()
 	}
 
-	// Wait for all dials to complete
+	// Wait for all dials to complete with timeout
+	done := make(chan struct{})
 	go func() {
 		wg.Wait()
-		close(results)
+		close(done)
+	}()
+	
+	// Close results channel after all dials complete or timeout
+	go func() {
+		select {
+		case <-done:
+			close(results)
+		case <-time.After(5 * time.Second):
+			// Timeout - close results to prevent goroutine leak
+			close(results)
+		}
 	}()
 
 	// Collect successful connections

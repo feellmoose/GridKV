@@ -349,10 +349,9 @@ func (up *UnifiedPipeline) requeueOps(ops []*CacheSyncOperation) {
 	up.ops = append(ops, up.ops...)
 	up.opsMu.Unlock()
 	up.pendingOps.Add(int64(len(ops)))
-	go func() {
-		time.Sleep(5 * time.Millisecond)
-		up.flush()
-	}()
+	// Stage 2 Sleep优化: 直接触发flush，无需延迟
+	// flush是异步的，直接调用即可，内部的batching机制会处理
+	go up.flush()
 }
 
 func (up *UnifiedPipeline) Stop() {

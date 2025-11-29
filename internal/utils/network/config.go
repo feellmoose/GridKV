@@ -121,23 +121,65 @@ func GetConfigForLatency(avgRTT time.Duration, clusterSize int) *LatencyConfig {
 //
 // Returns optimized LatencyConfig for the specified profile
 func GetConfigForProfile(profile NetworkProfile, clusterSize int) *LatencyConfig {
+	var cfg *LatencyConfig
+
 	switch profile {
 	case ProfileLAN:
 		// LAN: Low latency, fast detection
-		return GetConfigForLatency(1*time.Millisecond, clusterSize)
+		cfg = GetConfigForLatency(1*time.Millisecond, clusterSize)
 	case ProfileWAN:
 		// WAN: Moderate latency, balanced
-		return GetConfigForLatency(50*time.Millisecond, clusterSize)
+		cfg = GetConfigForLatency(50*time.Millisecond, clusterSize)
 	case ProfileGlobal:
 		// Global: High latency, patient timeouts
-		return GetConfigForLatency(200*time.Millisecond, clusterSize)
+		cfg = GetConfigForLatency(200*time.Millisecond, clusterSize)
 	case ProfileSatellite:
 		// Satellite: Very high latency, very patient timeouts
-		return GetConfigForLatency(600*time.Millisecond, clusterSize)
+		cfg = GetConfigForLatency(600*time.Millisecond, clusterSize)
 	default:
 		// Default to WAN profile
-		return GetConfigForLatency(10*time.Millisecond, clusterSize)
+		cfg = GetConfigForLatency(10*time.Millisecond, clusterSize)
 	}
+
+	// Stage 1.3 alignment: tighten timeouts by profile with clear bands.
+	// This ensures tests using NetworkProfile align with ClusterProfile defaults.
+	switch profile {
+	case ProfileLAN:
+		// LAN: 0.5–0.8s
+		if cfg.ReadTimeout < 800*time.Millisecond {
+			cfg.ReadTimeout = 800 * time.Millisecond
+		}
+		if cfg.ReplicationTimeout < 800*time.Millisecond {
+			cfg.ReplicationTimeout = 800 * time.Millisecond
+		}
+		// Slightly enlarge connection pool for high-concurrency tests.
+		if clusterSize <= 10 {
+			if cfg.MaxConnections < clusterSize*6 {
+				cfg.MaxConnections = clusterSize * 6
+			}
+			if cfg.MaxIdleConnections < clusterSize*3 {
+				cfg.MaxIdleConnections = clusterSize * 3
+			}
+		}
+	case ProfileWAN:
+		// WAN: 1–2s
+		if cfg.ReadTimeout < 1500*time.Millisecond {
+			cfg.ReadTimeout = 1500 * time.Millisecond
+		}
+		if cfg.ReplicationTimeout < 1500*time.Millisecond {
+			cfg.ReplicationTimeout = 1500 * time.Millisecond
+		}
+	case ProfileGlobal, ProfileSatellite:
+		// Global/Satellite: 2–3s+
+		if cfg.ReadTimeout < 2500*time.Millisecond {
+			cfg.ReadTimeout = 2500 * time.Millisecond
+		}
+		if cfg.ReplicationTimeout < 2500*time.Millisecond {
+			cfg.ReplicationTimeout = 2500 * time.Millisecond
+		}
+	}
+
+	return cfg
 }
 
 // ApplyToOptions applies the latency configuration to GridKVOptions.
@@ -211,18 +253,43 @@ func nextPowerOf2(n int) int {
 	return n
 }
 
-// EstimateGossipLoad estimates the Gossip message load for a given configuration.
+// EstimateGossipLoad estimates the Gossip message load for a given configuration (Stage 2.5).
 // This helps predict network overhead before deployment.
+//
+// Improvements:
+// - Considers actual fan-out (not all nodes, typically 1-3 targets)
+// - Accounts for retry attempts (assumes 5-10% failure rate)
+// - Uses actual gossip interval (may vary by cluster size)
 //
 // Returns estimated messages per second per node
 func EstimateGossipLoad(clusterSize int, gossipInterval time.Duration) int {
-	if gossipInterval == 0 {
+	if gossipInterval == 0 || clusterSize <= 1 {
 		return 0
 	}
 
-	// Each node gossips to all other nodes
-	messagesPerRound := clusterSize
+	// Stage 2.5: Calculate actual fan-out based on cluster size
+	// Small clusters gossip to all, medium to 3, large to 1
+	var fanOut int
+	switch {
+	case clusterSize <= 3:
+		fanOut = clusterSize - 1 // All other nodes
+	case clusterSize <= 10:
+		fanOut = 3 // Fixed fan-out
+	case clusterSize <= 50:
+		fanOut = 2 // Reduced fan-out
+	default:
+		fanOut = 1 // Single target for large clusters
+	}
+
+	// Base messages per round
+	messagesPerRound := fanOut
 	roundsPerSecond := float64(time.Second) / float64(gossipInterval)
 
-	return int(float64(messagesPerRound) * roundsPerSecond)
+	// Stage 2.5: Account for retry attempts (assume 8% failure rate with 1 retry)
+	retryFactor := 1.08
+
+	// Stage 2.5: Account for CACHE_SYNC messages (roughly 10-20% of gossip messages)
+	cacheSyncFactor := 1.15
+
+	return int(float64(messagesPerRound) * roundsPerSecond * retryFactor * cacheSyncFactor)
 }

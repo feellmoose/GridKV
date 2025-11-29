@@ -193,7 +193,10 @@ func (rb *ReadBatch) Stop() {
 	}
 }
 
-// ReadBatchManager manages read batches per target coordinator
+// ReadBatchManager manages read batches per target coordinator.
+// Implementation intentionally keeps configuration simple and fixed-size:
+// batch size and flush window are static per manager to avoid hidden
+// adaptive complexity on the hot path.
 type ReadBatchManager struct {
 	mu          sync.RWMutex
 	batches     map[string]*ReadBatch
@@ -202,16 +205,25 @@ type ReadBatchManager struct {
 	flushWindow time.Duration
 	idGen       func() string
 	metrics     *metrics.GridKVMetrics
-	tuner       *AdaptiveReadBatchTuner
 }
 
-// NewReadBatchManager creates a new read batch manager
-func NewReadBatchManager(sender func(string, string, []*PendingReadRequest) error, idGen func() string, flushSize int, flushWindow time.Duration, m *metrics.GridKVMetrics, enableAdaptive bool) *ReadBatchManager {
+// NewReadBatchManager creates a new read batch manager using fixed
+// batch size and window parameters (no adaptive tuning).
+//
+// Recommended defaults for production:
+//   - flushSize:   100–150
+//   - flushWindow: 2–5ms
+//
+// These values provide stable latency with good batching efficiency
+// without introducing additional moving parts.
+func NewReadBatchManager(sender func(string, string, []*PendingReadRequest) error, idGen func() string, flushSize int, flushWindow time.Duration, m *metrics.GridKVMetrics) *ReadBatchManager {
 	if flushSize <= 0 {
-		flushSize = 200 // Increased default batch size for 1M+ QPS
+		// Conservative default that balances batching efficiency and tail latency.
+		flushSize = 120
 	}
 	if flushWindow <= 0 {
-		flushWindow = 10 * time.Millisecond // Increased to 10ms for better batching
+		// Short window to keep queuing delay low while still allowing batching.
+		flushWindow = 3 * time.Millisecond
 	}
 	if idGen == nil {
 		// Fallback ID generator using timestamp
@@ -229,46 +241,16 @@ func NewReadBatchManager(sender func(string, string, []*PendingReadRequest) erro
 		metrics:     m,
 	}
 
-	// Initialize adaptive tuner if enabled
-	if enableAdaptive && m != nil {
-		tuner := NewAdaptiveReadBatchTuner(&AdaptiveReadBatchTunerOptions{
-			InitialBatchSize:   flushSize,
-			InitialWindow:      flushWindow,
-			MinBatchSize:       50,                    // Increased minimum for better throughput
-			MaxBatchSize:       1000,                  // Increased maximum for 1M+ QPS scenarios
-			MinWindow:          2 * time.Millisecond,  // Reduced for lower latency
-			MaxWindow:          50 * time.Millisecond, // Reduced maximum window
-			AdjustInterval:     10 * time.Second,
-			TargetAvgBatchSize: 150, // Increased target for better throughput
-			TargetErrorRate:    0.05,
-			Metrics:            m,
-		})
-		rbm.tuner = tuner
-		tuner.Start()
-	}
-
 	return rbm
 }
 
 // Add adds a read request to the appropriate batch
 func (rbm *ReadBatchManager) Add(target string, coordinator string, req *PendingReadRequest) bool {
-	// Get current batch size and window (may be adjusted by tuner)
-	batchSize := rbm.flushSize
-	window := rbm.flushWindow
-	if rbm.tuner != nil {
-		batchSize = rbm.tuner.GetBatchSize()
-		window = rbm.tuner.GetWindow()
-	}
-
 	rbm.mu.Lock()
 	batch, exists := rbm.batches[target]
 	if !exists {
-		batch = NewReadBatch(target, coordinator, rbm.sender, rbm.idGen, batchSize, window, rbm.metrics)
+		batch = NewReadBatch(target, coordinator, rbm.sender, rbm.idGen, rbm.flushSize, rbm.flushWindow, rbm.metrics)
 		rbm.batches[target] = batch
-	} else {
-		// Update batch parameters if tuner changed them
-		// We don't update existing batches dynamically to avoid race conditions
-		// New batches will use the updated parameters
 	}
 	rbm.mu.Unlock()
 
@@ -336,11 +318,6 @@ func (rbm *ReadBatchManager) Remove(target string) {
 
 // Stop stops all batches
 func (rbm *ReadBatchManager) Stop() {
-	// Stop adaptive tuner
-	if rbm.tuner != nil {
-		rbm.tuner.Stop()
-	}
-
 	rbm.mu.Lock()
 	defer rbm.mu.Unlock()
 

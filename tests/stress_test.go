@@ -243,9 +243,13 @@ func testStressGoroutineLeakScenario(t *testing.T, config *TestEnvironmentConfig
 	close(monitorStop)
 	monitorWg.Wait()
 
+	// Extended cleanup wait to allow connection handlers to timeout and exit
+	// Connection handlers have 30s timeout, so we wait longer for proper cleanup
+	time.Sleep(10 * time.Second)
+	runtime.GC()
 	time.Sleep(5 * time.Second)
 	runtime.GC()
-	time.Sleep(3 * time.Second)
+	time.Sleep(2 * time.Second)
 	runtime.GC()
 	time.Sleep(1 * time.Second)
 
@@ -365,7 +369,7 @@ func TestStressPerformanceOperations(t *testing.T) {
 		NetworkType:    networkTypeFromEnv(gridkv.TCP),
 		NodeCount:      3,
 		ReplicaCount:   3,
-		BasePort:       100000,
+		BasePort:       52000, // Fixed: was 100000 (invalid port > 65535)
 		StorageBackend: gridkv.BackendMemorySharded,
 		MaxMemoryMB:    1024,
 		ShardCount:     128,
@@ -491,7 +495,7 @@ func TestStressBatchOperations(t *testing.T) {
 		NetworkType:    networkTypeFromEnv(gridkv.TCP),
 		NodeCount:      3,
 		ReplicaCount:   3,
-		BasePort:       101000,
+		BasePort:       53000, // Fixed: was 101000 (invalid port > 65535)
 		StorageBackend: gridkv.BackendMemorySharded,
 		MaxMemoryMB:    512,
 		ShardCount:     128,
@@ -588,7 +592,7 @@ func TestStressAsyncRead(t *testing.T) {
 		NetworkType:    networkTypeFromEnv(gridkv.TCP),
 		NodeCount:      3,
 		ReplicaCount:   3,
-		BasePort:       102000,
+		BasePort:       54000, // Fixed: was 102000 (invalid port > 65535)
 		StorageBackend: gridkv.BackendMemorySharded,
 		MaxMemoryMB:    512,
 		ShardCount:     128,

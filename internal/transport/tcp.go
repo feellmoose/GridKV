@@ -414,7 +414,7 @@ func NewTCPTransportListener(addr string) (*TCPTransportListener, error) {
 
 	// Optimize maxWorkers: start smaller, connections are handled per-connection
 	// Reduced to prevent excessive goroutine creation - connections are short-lived
-	maxWorkers := 500 // Reduced from 2000 - connections are handled quickly
+	maxWorkers := 256 // Reduced from 500 - connections are handled quickly
 	connPool := make(chan struct{}, maxWorkers)
 
 	return &TCPTransportListener{
@@ -445,18 +445,33 @@ func (l *TCPTransportListener) Stop() error {
 			addr := l.listener.Addr()
 			l.listener.Close()
 			logging.Debug("listener[net] stop gracefully", "listen_addr", addr.String())
-			// Wait for port to be released
-			time.Sleep(100 * time.Millisecond)
 		}
 	})
 
+	// Wait for acceptConnections to exit with timeout
 	select {
 	case <-l.doneCh:
 	case <-time.After(2 * time.Second):
 		logging.Warn("acceptConnections did not exit in time")
 	}
 
-	l.wg.Wait()
+	// Wait for all connection handlers to complete with timeout
+	// Increase timeout for high-load scenarios
+	done := make(chan struct{})
+	go func() {
+		l.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		logging.Warn("connection handlers did not complete in time")
+		// Force close remaining connections by closing the listener
+		// This will cause all pending reads to fail
+		if l.listener != nil {
+			l.listener.Close()
+		}
+	}
 	return nil
 }
 
@@ -585,12 +600,33 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 	handler := l.handler
 
 	lengthPrefix := make([]byte, 4)
+	readTimeout := 30 * time.Second // Connection read timeout
 
 	for {
+		// Check if listener is stopping
+		select {
+		case <-l.stopCh:
+			return
+		default:
+		}
+
+		// Set read deadline to prevent blocking forever
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
+
 		// Read the length prefix (4 bytes) - MUST use io.ReadFull to guarantee full read
 		if _, err := io.ReadFull(reader, lengthPrefix); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				return
+			}
+			// Check for timeout - if listener is stopping, exit immediately
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				select {
+				case <-l.stopCh:
+					return
+				default:
+					// Timeout but not stopping, continue
+					continue
+				}
 			}
 			// Cold path: unexpected error (connection may be closing)
 			logging.Debug("connect[net], error reading length prefix", "err", err, "remote_addr", conn.RemoteAddr().String())
@@ -614,6 +650,12 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 				discardBuf := make([]byte, 8192)
 				remaining := int64(dataLength)
 				for remaining > 0 {
+					// Check if listener is stopping
+					select {
+					case <-l.stopCh:
+						return
+					default:
+					}
 					toRead := int64(len(discardBuf))
 					if toRead > remaining {
 						toRead = remaining
@@ -633,8 +675,25 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 
 		// MUST use io.ReadFull to guarantee reading exactly dataLength bytes
 		if _, err := io.ReadFull(reader, data); err != nil {
+			// Check for timeout - if listener is stopping, exit immediately
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				select {
+				case <-l.stopCh:
+					return
+				default:
+					// Timeout but not stopping, continue
+					continue
+				}
+			}
 			logging.Debug("connect[net], error reading message", "err", err, "remote_addr", conn.RemoteAddr().String())
 			return
+		}
+
+		// Check if listener is stopping before handling message
+		select {
+		case <-l.stopCh:
+			return
+		default:
 		}
 
 		// Handle the message with the provided handler

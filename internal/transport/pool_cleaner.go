@@ -2,23 +2,42 @@ package transport
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type poolCleaner struct {
-	mu    sync.RWMutex
-	pools map[*ConnPool]struct{}
-	once  sync.Once
+	mu      sync.RWMutex
+	pools   map[*ConnPool]struct{}
+	once    sync.Once
+	stopCh  chan struct{}
+	stopped atomic.Bool
+	wg      sync.WaitGroup
 }
 
 var globalPoolCleaner = newPoolCleaner()
 
 func newPoolCleaner() *poolCleaner {
 	pc := &poolCleaner{
-		pools: make(map[*ConnPool]struct{}),
+		pools:  make(map[*ConnPool]struct{}),
+		stopCh: make(chan struct{}),
 	}
+	pc.wg.Add(1)
 	go pc.run()
 	return pc
+}
+
+func (pc *poolCleaner) stop() {
+	if pc.stopped.CompareAndSwap(false, true) {
+		close(pc.stopCh)
+		pc.wg.Wait()
+	}
+}
+
+// StopPoolCleaner stops the global pool cleaner goroutine
+// Should be called during application shutdown to prevent leaks
+func StopPoolCleaner() {
+	globalPoolCleaner.stop()
 }
 
 func (pc *poolCleaner) register(pool *ConnPool) {
@@ -34,13 +53,20 @@ func (pc *poolCleaner) unregister(pool *ConnPool) {
 }
 
 func (pc *poolCleaner) run() {
+	defer pc.wg.Done()
+
 	// Increased frequency for better connection health monitoring
 	// 100ms interval provides better responsiveness while not being too aggressive
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		pc.clean()
+	for {
+		select {
+		case <-pc.stopCh:
+			return
+		case <-ticker.C:
+			pc.clean()
+		}
 	}
 }
 

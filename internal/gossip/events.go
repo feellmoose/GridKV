@@ -20,6 +20,7 @@ const (
 	EventTypeStateSync
 	EventTypeConnectToSeeds
 	EventTypeAdaptiveBatchConfig
+	EventTypePipelineCleanup // Stage 2.3: Cleanup idle pipelines
 )
 
 type Event struct {
@@ -130,6 +131,7 @@ type EventScheduler struct {
 	schedules map[EventType]*time.Timer
 	eventLoop *UnifiedEventLoop
 	intervals map[EventType]time.Duration
+	stopped   atomic.Bool
 }
 
 func NewEventScheduler(eventLoop *UnifiedEventLoop) *EventScheduler {
@@ -144,6 +146,10 @@ func (s *EventScheduler) Schedule(eventType EventType, interval time.Duration, e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.stopped.Load() {
+		return
+	}
+
 	if timer, exists := s.schedules[eventType]; exists {
 		timer.Stop()
 	}
@@ -151,6 +157,10 @@ func (s *EventScheduler) Schedule(eventType EventType, interval time.Duration, e
 	s.intervals[eventType] = interval
 
 	timer := time.AfterFunc(interval, func() {
+		if s.stopped.Load() {
+			return
+		}
+
 		event := &Event{
 			Type:      eventType,
 			Timestamp: time.Now(),
@@ -159,12 +169,17 @@ func (s *EventScheduler) Schedule(eventType EventType, interval time.Duration, e
 		s.eventLoop.Submit(event)
 
 		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		if s.stopped.Load() {
+			return
+		}
+
 		if interval := s.intervals[eventType]; interval > 0 {
 			s.schedules[eventType] = time.AfterFunc(interval, func() {
 				s.Schedule(eventType, interval, eventData)
 			})
 		}
-		s.mu.Unlock()
 	})
 
 	s.schedules[eventType] = timer
@@ -184,6 +199,8 @@ func (s *EventScheduler) Cancel(eventType EventType) {
 func (s *EventScheduler) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.stopped.Store(true)
 
 	for _, timer := range s.schedules {
 		if timer != nil {
@@ -507,10 +524,17 @@ func (gm *GossipManager) registerEventHandlers() {
 		return nil
 	})
 
+	gm.eventLoop.RegisterHandler(EventTypePipelineCleanup, func(event *Event) error {
+		gm.cleanupIdlePipelines()
+		return nil
+	})
+
 	if gm.eventScheduler != nil {
 		gm.eventScheduler.Schedule(EventTypeFailureDetection, gm.failureTimeout/4, nil)
 		gm.eventScheduler.Schedule(EventTypeGossipBroadcast, gm.gossipInterval, nil)
 		gm.eventScheduler.Schedule(EventTypeCleanup, 200*time.Millisecond, nil)
+		// Stage 2.3: Schedule pipeline cleanup every 30 seconds
+		gm.eventScheduler.Schedule(EventTypePipelineCleanup, 30*time.Second, nil)
 	}
 }
 
