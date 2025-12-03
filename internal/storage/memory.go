@@ -195,21 +195,26 @@ func NewMemoryStorage(maxMemoryMB int64) (*MemoryStorage, error) {
 // compress compresses data if compression is enabled and size > threshold
 // Returns compressed data and whether compression was applied
 func (m *MemoryStorage) compress(data []byte) ([]byte, bool) {
-	if !m.compressionEnabled || len(data) < m.compressionThresh {
+	dataLen := len(data)
+	if !m.compressionEnabled || dataLen < m.compressionThresh {
 		return data, false
 	}
 
 	// Fast path: Skip compression for very small values that won't benefit
 	// Compression overhead is typically 20-50 bytes, so values < 100 bytes
 	// are unlikely to compress well
-	if len(data) < 100 {
+	if dataLen < 100 {
 		return data, false
 	}
 
 	// Quick check: If data looks like it's already compressed (starts with zstd magic),
 	// skip compression attempt to avoid double compression
-	if len(data) >= 4 && data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD {
-		return data, false
+	// Check first 4 bytes in one comparison
+	if dataLen >= 4 {
+		magic := uint32(data[0]) | uint32(data[1])<<8 | uint32(data[2])<<16 | uint32(data[3])<<24
+		if magic == 0xFD2FB528 { // zstd magic in little-endian
+			return data, false
+		}
 	}
 
 	encoder := m.encoderPool.Get().(*zstd.Encoder)
@@ -518,17 +523,20 @@ func (m *MemoryStorage) Get(key string) (*StoredItem, error) {
 
 	compItem := value.(*compressedItem)
 
-	// Check expiration
-	if !compItem.ExpireAt.IsZero() && time.Now().After(compItem.ExpireAt) {
-		m.missCount.Add(1)
-		// Lazy deletion: remove expired item
-		m.data.Delete(key)
-		m.keyCount.Add(-1)
-
-		// Update LRU
-		m.removeFromLRU(key)
-
-		return nil, ErrItemExpired
+	// Fast path: skip expiration check if no expiry (saves ~20ns/read)
+	if !compItem.ExpireAt.IsZero() {
+		// Optimized: use UnixNano for faster comparison
+		nowNano := time.Now().UnixNano()
+		expireNano := compItem.ExpireAt.UnixNano()
+		if nowNano > expireNano {
+			m.missCount.Add(1)
+			// Lazy deletion: remove expired item
+			m.data.Delete(key)
+			m.keyCount.Add(-1)
+			// Update LRU
+			m.removeFromLRU(key)
+			return nil, ErrItemExpired
+		}
 	}
 
 	m.hitCount.Add(1)
@@ -846,12 +854,16 @@ func (m *MemoryStorage) GetNoCopy(key string) (*StoredItem, error) {
 
 	citem := value.(*compressedItem)
 
-	// Check expiration
-	if !citem.ExpireAt.IsZero() && time.Now().After(citem.ExpireAt) {
-		m.missCount.Add(1)
-		m.data.Delete(key)
-		m.keyCount.Add(-1)
-		return nil, ErrItemExpired
+	// Check expiration (optimized: use UnixNano for faster comparison)
+	if !citem.ExpireAt.IsZero() {
+		nowNano := time.Now().UnixNano()
+		expireNano := citem.ExpireAt.UnixNano()
+		if nowNano > expireNano {
+			m.missCount.Add(1)
+			m.data.Delete(key)
+			m.keyCount.Add(-1)
+			return nil, ErrItemExpired
+		}
 	}
 
 	m.hitCount.Add(1)

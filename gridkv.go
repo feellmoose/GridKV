@@ -22,8 +22,23 @@ import (
 	"github.com/feellmoose/gridkv/internal/utils/logging"
 )
 
-// ErrShuttingDown indicates the node has begun graceful shutdown and no longer accepts new operations.
-var ErrShuttingDown = errors.New("gridkv shutting down")
+// Error constants exported for application error handling
+var (
+	// ErrShuttingDown indicates the node has begun graceful shutdown and no longer accepts new operations.
+	ErrShuttingDown = errors.New("gridkv shutting down")
+
+	// ErrItemNotFound indicates the requested key was not found in storage.
+	ErrItemNotFound = storage.ErrItemNotFound
+
+	// ErrVersionMismatch indicates a version conflict during optimistic locking operations.
+	ErrVersionMismatch = storage.ErrVersionMismatch
+
+	// ErrItemExpired indicates the requested item has expired due to TTL.
+	ErrItemExpired = storage.ErrItemExpired
+
+	// ErrMemoryLimitExceeded indicates the storage backend has reached its memory limit.
+	ErrMemoryLimitExceeded = storage.ErrMemoryLimitExceeded
+)
 
 // GridKV is the distributed key-value cache instance.
 //
@@ -45,10 +60,27 @@ func (g *GridKV) isShuttingDown() bool {
 	return g != nil && g.shuttingDown.Load()
 }
 
-// NewGridKV initializes a GridKV instance.
+// NewGridKV initializes a GridKV instance with the provided options.
 //
-// Required: LocalNodeID, LocalAddress. Optional: Network (default QUIC), Storage (default MemorySharded),
-// SeedAddrs (empty for first node), ReplicaCount (default 3). Setup time: ~10-50ms.
+// Required fields: LocalNodeID, LocalAddress
+// Optional fields: Use Profile for automatic configuration, or configure individual settings
+//
+// Defaults:
+//   - Network: QUIC (high-performance, recommended)
+//   - Storage: MemorySharded (high throughput, recommended)
+//   - ReplicaCount: 3
+//   - SeedAddrs: empty for first node in cluster
+//
+// Setup time: ~10-50ms depending on cluster size and configuration.
+//
+// Example:
+//
+//	opts := &gridkv.GridKVOptions{
+//	    LocalNodeID:  "node-1",
+//	    LocalAddress: "localhost:8080",
+//	    SeedAddrs:    []string{"localhost:8081"},
+//	}
+//	kv, err := gridkv.NewGridKV(opts)
 func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 	if opts == nil {
 		return nil, errors.New("GridKVOptions cannot be nil")
@@ -62,7 +94,7 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 		return nil, errors.New("LocalAddress is required")
 	}
 
-	// Apply all defaults (profile, network, storage)
+	// Apply all defaults based on profile
 	applyDefaults(opts)
 
 	// Initialize logging (optional)
@@ -72,13 +104,16 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 
 	// Convert public NetworkOptions to internal gossip.NetworkOptions
 	networkType := gossip.TCP
-	if opts.Network.Type == QUIC {
+	switch opts.Network.Type {
+	case QUIC:
 		networkType = gossip.QUIC
-	} else if opts.Network.Type == UDP {
+	case UDP:
 		networkType = gossip.UDP
+	default:
+		networkType = gossip.TCP
 	}
 
-	// Set default network options if not specified
+	// Build internal network options
 	internalNetworkOpts := &gossip.NetworkOptions{
 		Type:         networkType,
 		BindAddr:     opts.Network.BindAddr,
@@ -306,20 +341,20 @@ func (g *GridKV) Get(ctx context.Context, key string) (value []byte, err error) 
 	}
 	// Defensive: ensure non-nil item on success to avoid nil dereference
 	if item == nil {
-		return nil, storage.ErrItemNotFound
+		return nil, ErrItemNotFound
 	}
 
 	// Check expiration first (fastest check)
 	now := time.Now()
 	if !item.ExpireAt.IsZero() && now.After(item.ExpireAt) {
 		storage.PutStoredItem(item)
-		return nil, storage.ErrItemExpired
+		return nil, ErrItemExpired
 	}
 
 	// Defensive: ensure Value is not nil to avoid panic on append
 	if len(item.Value) == 0 {
 		storage.PutStoredItem(item)
-		return nil, storage.ErrItemNotFound
+		return nil, ErrItemNotFound
 	}
 
 	// SAFETY: Make a deep copy of Value to ensure user can safely modify it
@@ -332,156 +367,6 @@ func (g *GridKV) Get(ctx context.Context, key string) (value []byte, err error) 
 	return value, nil
 }
 
-// ReadFuture represents an asynchronous read operation.
-type ReadFuture interface {
-	Get(ctx context.Context) ([]byte, error)
-	GetWithTimeout(timeout time.Duration) ([]byte, error)
-	Done() <-chan struct{}
-	Cancel()
-	IsDone() bool
-}
-
-type readFutureWrapper struct {
-	inner gossip.ReadFuture
-}
-
-func (rf *readFutureWrapper) Get(ctx context.Context) ([]byte, error) {
-	if rf.inner == nil {
-		return nil, errors.New("read future is nil")
-	}
-	item, err := rf.inner.Get(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if item == nil {
-		return nil, storage.ErrItemNotFound
-	}
-	// Defensive: ensure Value is not nil
-	if item.Value == nil {
-		storage.PutStoredItem(item)
-		return nil, storage.ErrItemNotFound
-	}
-	value := make([]byte, len(item.Value))
-	copy(value, item.Value)
-	storage.PutStoredItem(item)
-	return value, nil
-}
-
-func (rf *readFutureWrapper) GetWithTimeout(timeout time.Duration) ([]byte, error) {
-	item, err := rf.inner.GetWithTimeout(timeout)
-	if err != nil {
-		return nil, err
-	}
-	if item == nil {
-		return nil, storage.ErrItemNotFound
-	}
-	value := make([]byte, len(item.Value))
-	copy(value, item.Value)
-	storage.PutStoredItem(item)
-	return value, nil
-}
-
-func (rf *readFutureWrapper) Done() <-chan struct{} {
-	return rf.inner.Done()
-}
-
-func (rf *readFutureWrapper) Cancel() {
-	rf.inner.Cancel()
-}
-
-func (rf *readFutureWrapper) IsDone() bool {
-	return rf.inner.IsDone()
-}
-
-// GetAsync performs an asynchronous read, returning a Future for concurrent batch operations.
-func (g *GridKV) GetAsync(ctx context.Context, key string) (ReadFuture, error) {
-	if g.gm == nil {
-		return nil, errors.New("GridKV not initialized")
-	}
-	if key == "" {
-		return nil, errors.New("key cannot be empty")
-	}
-	if g.isShuttingDown() {
-		return nil, ErrShuttingDown
-	}
-
-	return &readFutureWrapper{inner: g.gm.GetAsync(ctx, key)}, nil
-}
-
-// BatchReadFuture represents multiple asynchronous read operations.
-type BatchReadFuture interface {
-	GetAll(ctx context.Context) (map[string][]byte, map[string]error)
-	GetAllWithTimeout(timeout time.Duration) (map[string][]byte, map[string]error)
-	GetAny(ctx context.Context) (string, []byte, error)
-	Cancel()
-	Done() <-chan struct{}
-	Count() int
-}
-
-type batchReadFutureWrapper struct {
-	inner gossip.BatchReadFuture
-}
-
-func (brf *batchReadFutureWrapper) GetAll(ctx context.Context) (map[string][]byte, map[string]error) {
-	items, errs := brf.inner.GetAll(ctx)
-	results := make(map[string][]byte, len(items))
-	for key, item := range items {
-		if item != nil {
-			value := make([]byte, len(item.Value))
-			copy(value, item.Value)
-			results[key] = value
-			storage.PutStoredItem(item)
-		}
-	}
-	return results, errs
-}
-
-func (brf *batchReadFutureWrapper) GetAllWithTimeout(timeout time.Duration) (map[string][]byte, map[string]error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return brf.GetAll(ctx)
-}
-
-func (brf *batchReadFutureWrapper) GetAny(ctx context.Context) (string, []byte, error) {
-	key, item, err := brf.inner.GetAny(ctx)
-	if err != nil {
-		return key, nil, err
-	}
-	if item == nil {
-		return key, nil, storage.ErrItemNotFound
-	}
-	value := make([]byte, len(item.Value))
-	copy(value, item.Value)
-	storage.PutStoredItem(item)
-	return key, value, nil
-}
-
-func (brf *batchReadFutureWrapper) Cancel() {
-	brf.inner.Cancel()
-}
-
-func (brf *batchReadFutureWrapper) Done() <-chan struct{} {
-	return brf.inner.Done()
-}
-
-func (brf *batchReadFutureWrapper) Count() int {
-	return brf.inner.Count()
-}
-
-// GetBatchAsync performs asynchronous batch reads with automatic batching.
-func (g *GridKV) GetBatchAsync(ctx context.Context, keys []string) (BatchReadFuture, error) {
-	if g.gm == nil {
-		return nil, errors.New("GridKV not initialized")
-	}
-	if g.isShuttingDown() {
-		return nil, ErrShuttingDown
-	}
-	if len(keys) == 0 {
-		return &batchReadFutureWrapper{inner: g.gm.GetBatchAsync(ctx, nil)}, nil
-	}
-
-	return &batchReadFutureWrapper{inner: g.gm.GetBatchAsync(ctx, keys)}, nil
-}
 
 // Delete removes a key-value pair.
 //
@@ -509,7 +394,7 @@ func (g *GridKV) Delete(ctx context.Context, key string) (err error) {
 	// Get current version for optimistic locking
 	item, err := g.store.Get(key)
 	if err != nil {
-		if err == storage.ErrItemNotFound {
+		if err == ErrItemNotFound {
 			return nil // Already deleted
 		}
 		return err

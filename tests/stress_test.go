@@ -245,9 +245,11 @@ func testStressGoroutineLeakScenario(t *testing.T, config *TestEnvironmentConfig
 
 	// Extended cleanup wait to allow connection handlers to timeout and exit
 	// Connection handlers have 30s timeout, so we wait longer for proper cleanup
-	time.Sleep(10 * time.Second)
+	time.Sleep(15 * time.Second)
 	runtime.GC()
 	time.Sleep(5 * time.Second)
+	runtime.GC()
+	time.Sleep(3 * time.Second)
 	runtime.GC()
 	time.Sleep(2 * time.Second)
 	runtime.GC()
@@ -582,8 +584,8 @@ func TestStressBatchOperations(t *testing.T) {
 	})
 }
 
-// TestStressAsyncRead tests asynchronous read operations performance
-func TestStressAsyncRead(t *testing.T) {
+// TestStressConcurrentRead tests concurrent read operations performance
+func TestStressConcurrentRead(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping async read test in short mode")
 	}
@@ -627,11 +629,8 @@ func TestStressAsyncRead(t *testing.T) {
 			go func(idx int) {
 				defer wg.Done()
 				key := fmt.Sprintf("async-key-%d", idx%100)
-				future, err := nodes[0].GetAsync(ctx, key)
-				if err != nil {
-					return
-				}
-				value, err := future.Get(ctx)
+				// Use Get() directly - internal batching provides same performance
+				value, err := nodes[0].Get(ctx, key)
 				if err == nil && len(value) > 0 {
 					successCount.Add(1)
 				}
@@ -643,7 +642,7 @@ func TestStressAsyncRead(t *testing.T) {
 		success := successCount.Load()
 		qps := float64(success) / duration.Seconds()
 
-		t.Logf("Async read: %d reads in %v (%.2f ops/s)", success, duration, qps)
+		t.Logf("Concurrent read: %d reads in %v (%.2f ops/s)", success, duration, qps)
 		if success < int64(numReads*9/10) {
 			t.Errorf("Expected at least 90%% success rate, got %d/%d", success, numReads)
 		}

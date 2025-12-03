@@ -49,9 +49,8 @@ type Pool struct {
 	// trackStats caches whether we should maintain atomic counters.
 	trackStats bool
 
-	taskCh      chan func()
-	stopCh      chan struct{}
-	scaleDownCh chan struct{}
+	taskCh chan func()
+	stopCh chan struct{}
 
 	workerCap atomic.Int32
 	running   atomic.Int32
@@ -81,11 +80,10 @@ func New(opts Options) (*Pool, error) {
 	trackStats := !opts.DisableStats
 
 	p := &Pool{
-		opts:        opts,
-		trackStats:  trackStats,
-		taskCh:      make(chan func(), opts.QueueSize),
-		stopCh:      make(chan struct{}),
-		scaleDownCh: make(chan struct{}),
+		opts:       opts,
+		trackStats: trackStats,
+		taskCh:     make(chan func(), opts.QueueSize),
+		stopCh:     make(chan struct{}),
 	}
 	p.workerCap.Store(int32(opts.MaxWorkers))
 
@@ -153,6 +151,7 @@ func (p *Pool) Resize(newSize int) error {
 	}
 
 	if newSize > current {
+		// Scale up: create new workers
 		diff := newSize - current
 		for i := 0; i < diff; i++ {
 			p.startWorker()
@@ -161,11 +160,13 @@ func (p *Pool) Resize(newSize int) error {
 		return nil
 	}
 
-	diff := current - newSize
-	for i := 0; i < diff; i++ {
-		p.scaleDownCh <- struct{}{}
-	}
+	// Scale down: just update capacity, workers will exit naturally when idle
+	// Workers check capacity and exit if running > capacity
 	p.workerCap.Store(int32(newSize))
+	
+	// Note: Workers will self-terminate when they finish their current task
+	// and see that running > workerCap. This is a lazy scale-down approach
+	// that avoids the complexity of scaleDownCh and prevents goroutine leaks.
 	return nil
 }
 
@@ -175,22 +176,30 @@ func (p *Pool) Release() {
 		return
 	}
 
+	// Step 1: Close stopCh to signal all workers to exit
 	close(p.stopCh)
+	
+	// Step 2: Close taskCh to wake up all workers blocked on task reception
+	// This ensures all workers will hit either taskCh or stopCh case and exit
 	close(p.taskCh)
 	
-	// Wait for workers with timeout to prevent indefinite blocking
+	// Step 3: Wait for all workers to exit with timeout
 	done := make(chan struct{})
 	go func() {
 		p.wg.Wait()
 		close(done)
 	}()
 	
+	timeout := 10 * time.Second
 	select {
 	case <-done:
-		// All workers exited
-	case <-time.After(5 * time.Second):
-		// Timeout - some workers may still be running
-		// This is acceptable as tasks may be long-running
+		// All workers exited cleanly
+	case <-time.After(timeout):
+		// Timeout - log warning with details
+		remaining := p.running.Load()
+		capacity := p.workerCap.Load()
+		fmt.Printf("workerpool[%s] WARNING: %d/%d workers still running after %v\n", 
+			p.opts.Name, remaining, capacity, timeout)
 	}
 }
 
@@ -218,15 +227,27 @@ func (p *Pool) startWorker() {
 		defer p.running.Add(-1)
 
 		for {
+			// Check if we should exit due to scale-down (lazy approach)
+			// This runs after each task, allowing natural termination
+			running := p.running.Load()
+			capacity := p.workerCap.Load()
+			if running > capacity && capacity > 0 {
+				// We have too many workers, this one should exit
+				// Only exit if we're genuinely over capacity (not during shutdown)
+				if !p.closed.Load() {
+					return
+				}
+			}
+
 			select {
 			case task, ok := <-p.taskCh:
 				if !ok {
+					// taskCh closed, pool is shutting down
 					return
 				}
 				p.runTask(task)
-			case <-p.scaleDownCh:
-				return
 			case <-p.stopCh:
+				// stopCh closed, pool is shutting down
 				return
 			}
 		}

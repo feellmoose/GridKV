@@ -21,15 +21,18 @@ const (
 	UDP  NetworkType = 4
 )
 
-// NetworkOptions configures the network transport layer. All fields optional (defaults from profile).
+// NetworkOptions configures the network transport layer.
+//
+// All fields are optional. If not specified, defaults are derived from the configured Profile.
+// Defaults: Type=QUIC, BindAddr=LocalAddress, other values from profile.
 type NetworkOptions struct {
-	Type         NetworkType   // Transport protocol (0 = profile default, default QUIC)
+	Type         NetworkType   // Transport protocol (0 = profile default, QUIC recommended)
 	BindAddr     string        // Local bind address (default: LocalAddress)
-	MaxIdle      int           // Max idle connections per peer
-	MaxConns     int           // Max total connections per peer
-	Timeout      time.Duration // Connection timeout
-	ReadTimeout  time.Duration // Read operation timeout
-	WriteTimeout time.Duration // Write operation timeout
+	MaxIdle      int           // Max idle connections per peer (default: profile-based)
+	MaxConns     int           // Max total connections per peer (default: profile-based)
+	Timeout      time.Duration // Connection timeout (default: profile-based)
+	ReadTimeout  time.Duration // Read operation timeout (default: profile-based)
+	WriteTimeout time.Duration // Write operation timeout (default: profile-based)
 }
 
 // StorageBackendType identifies the storage backend implementation.
@@ -40,11 +43,14 @@ const (
 	BackendMemorySharded StorageBackendType = "MemorySharded" // Sharded backend (1-2M+ ops/s, production)
 )
 
-// StorageOptions configures the storage backend. All fields optional (defaults from profile).
+// StorageOptions configures the storage backend.
+//
+// All fields are optional. If not specified, defaults are derived from the configured Profile.
+// Defaults: Backend=MemorySharded, MaxMemoryMB=4096, ShardCount=256 (MemorySharded) or 1 (Memory).
 type StorageOptions struct {
-	Backend     StorageBackendType // Storage implementation ("" = profile default, default MemorySharded)
-	MaxMemoryMB int64              // Memory limit in MB (0 = profile default, default 4096)
-	ShardCount  int                // Shards for MemorySharded (0 = profile default, default 256)
+	Backend     StorageBackendType // Storage implementation ("" = profile default, MemorySharded recommended)
+	MaxMemoryMB int64              // Memory limit in MB (0 = profile default, 4096 MB)
+	ShardCount  int                // Shards for MemorySharded (0 = profile default, 256 for high concurrency)
 }
 
 // ClusterProfile exports automatic configuration profile types.
@@ -77,47 +83,64 @@ func NewClusterProfile(preset ProfilePreset, transport TransportPreset, clusterS
 }
 
 // GridKVOptions configures a GridKV instance.
+//
+// Required fields: LocalNodeID, LocalAddress
+// Optional fields: Use Profile for automatic configuration, or set individual options
 type GridKVOptions struct {
-	// Required
-	LocalNodeID  string
-	LocalAddress string
-	SeedAddrs    []string
+	// Required: Unique node identifier and network address
+	LocalNodeID  string   // Unique node identifier (e.g., "node-1")
+	LocalAddress string   // Network address (e.g., "localhost:8080")
+	SeedAddrs    []string // Bootstrap seed addresses (empty for first node)
 
-	// Configuration
-	Profile *ClusterProfile
-	Network *NetworkOptions
-	Storage *StorageOptions
-	Log     *logging.LogOptions
+	// Configuration profiles and overrides
+	Profile *ClusterProfile  // Automatic configuration profile (recommended)
+	Network *NetworkOptions  // Network transport configuration
+	Storage *StorageOptions  // Storage backend configuration
+	Log     *logging.LogOptions // Logging configuration
 
-	// Replication
-	ReplicaCount       int
-	VirtualNodes       int
-	MaxReplicators     int
-	ReplicationTimeout time.Duration
-	ReadTimeout        time.Duration
+	// Replication settings
+	ReplicaCount       int           // Number of replicas per key (default: 3)
+	VirtualNodes       int           // Virtual nodes per physical node for consistent hashing (default: 150)
+	MaxReplicators     int           // Max concurrent replication operations (default: profile-based)
+	ReplicationTimeout time.Duration // Replication operation timeout (default: profile-based)
+	ReadTimeout        time.Duration // Read operation timeout (default: profile-based)
 
-	// Failure detection
-	FailureTimeout     time.Duration
-	SuspectTimeout     time.Duration
-	GossipInterval     time.Duration
-	StartupGracePeriod time.Duration
+	// Failure detection (SWIM protocol)
+	FailureTimeout     time.Duration // Time before marking node as failed (default: profile-based)
+	SuspectTimeout     time.Duration // Time before suspecting node failure (default: profile-based)
+	GossipInterval     time.Duration // Interval between gossip messages (default: profile-based)
+	StartupGracePeriod time.Duration // Grace period after startup before strict checks (default: profile-based)
 
-	// Data
-	DataCenter string
-	TTL        time.Duration
+	// Data configuration
+	DataCenter string        // Data center identifier for multi-DC deployments
+	TTL        time.Duration // Default TTL for stored items (0 = no expiration)
 
 	// Security
-	KeyPair        *crypto.KeyPair
-	PeerPublicKeys map[string]crypto.PublicKey
-	DisableAuth    bool
+	KeyPair        *crypto.KeyPair             // Cryptographic key pair for message signing (auto-generated if nil)
+	PeerPublicKeys map[string]crypto.PublicKey // Peer public keys for signature verification
+	DisableAuth    bool                        // Disable message authentication (development/testing only)
 
-	// Advanced tuning
-	MigrateRateLimitPerSec    int64
-	ReadRepairRateLimitPerSec int64
-	HotReadCacheTTL           time.Duration
+	// Bootstrap configuration for secure cluster formation
+	Bootstrap *BootstrapConfig // Bootstrap mode configuration (optional)
 
-	// Metrics
-	Metrics *metrics.GridKVMetrics
+	// Advanced performance tuning
+	MigrateRateLimitPerSec    int64         // Rate limit for data migration operations (default: profile-based)
+	ReadRepairRateLimitPerSec int64         // Rate limit for read-repair operations (default: profile-based)
+	HotReadCacheTTL           time.Duration // TTL for hot read cache (0 = disabled, default: profile-based)
+
+	// Observability
+	Metrics *metrics.GridKVMetrics // Metrics collector (nil = disabled)
+}
+
+// BootstrapConfig configures bootstrap mode for secure cluster formation.
+// This is a wrapper around gossip.BootstrapConfig for public API.
+type BootstrapConfig struct {
+	Enabled    bool          // Enable bootstrap mode
+	Token      string        // Bootstrap token (one-time use, base64 encoded)
+	CertFile   string        // Path to temporary certificate file (optional)
+	CertExpiry time.Duration // Certificate validity period (default: 1 hour)
+	MaxNodes   int           // Maximum nodes allowed during bootstrap (default: 20)
+	ExpiresAt  time.Time     // Token expiration time
 }
 
 // applyDefaults applies default values to GridKVOptions based on profile.
@@ -297,6 +320,17 @@ type configFile struct {
 	MigrateRateLimit    int64  `json:"migrate_rate_limit_per_sec,omitempty"`
 	ReadRepairRateLimit int64  `json:"read_repair_rate_limit_per_sec,omitempty"`
 	HotReadCacheTTL     string `json:"hot_read_cache_ttl,omitempty"`
+
+	Bootstrap *bootstrapConfig `json:"bootstrap,omitempty"`
+}
+
+type bootstrapConfig struct {
+	Enabled    bool   `json:"enabled,omitempty"`
+	Token      string `json:"token,omitempty"`
+	CertFile   string `json:"cert_file,omitempty"`
+	CertExpiry string `json:"cert_expiry,omitempty"`
+	MaxNodes   int    `json:"max_nodes,omitempty"`
+	ExpiresAt  string `json:"expires_at,omitempty"`
 }
 
 type profileConfig struct {
@@ -461,6 +495,31 @@ func LoadConfigFromFile(path string) (*GridKVOptions, error) {
 		}
 	}
 
+	// Load bootstrap configuration
+	if cfg.Bootstrap != nil {
+		bootstrap := &BootstrapConfig{
+			Enabled:  cfg.Bootstrap.Enabled,
+			Token:     cfg.Bootstrap.Token,
+			CertFile:  cfg.Bootstrap.CertFile,
+			MaxNodes:  cfg.Bootstrap.MaxNodes,
+		}
+		if cfg.Bootstrap.CertExpiry != "" {
+			if d, err := parseDuration(cfg.Bootstrap.CertExpiry); err == nil {
+				bootstrap.CertExpiry = d
+			} else {
+				bootstrap.CertExpiry = 1 * time.Hour // Default
+			}
+		} else {
+			bootstrap.CertExpiry = 1 * time.Hour // Default
+		}
+		if cfg.Bootstrap.ExpiresAt != "" {
+			if t, err := time.Parse(time.RFC3339, cfg.Bootstrap.ExpiresAt); err == nil {
+				bootstrap.ExpiresAt = t
+			}
+		}
+		opts.Bootstrap = bootstrap
+	}
+
 	return opts, nil
 }
 
@@ -551,6 +610,23 @@ func SaveConfigToFile(opts *GridKVOptions, path string) error {
 	cfg.StartupGracePeriod = formatDuration(opts.StartupGracePeriod)
 	cfg.TTL = formatDuration(opts.TTL)
 	cfg.HotReadCacheTTL = formatDuration(opts.HotReadCacheTTL)
+
+	// Save bootstrap configuration
+	if opts.Bootstrap != nil {
+		bootstrapCfg := &bootstrapConfig{
+			Enabled:  opts.Bootstrap.Enabled,
+			Token:     opts.Bootstrap.Token,
+			CertFile:  opts.Bootstrap.CertFile,
+			MaxNodes:  opts.Bootstrap.MaxNodes,
+		}
+		if opts.Bootstrap.CertExpiry > 0 {
+			bootstrapCfg.CertExpiry = formatDuration(opts.Bootstrap.CertExpiry)
+		}
+		if !opts.Bootstrap.ExpiresAt.IsZero() {
+			bootstrapCfg.ExpiresAt = opts.Bootstrap.ExpiresAt.Format(time.RFC3339)
+		}
+		cfg.Bootstrap = bootstrapCfg
+	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

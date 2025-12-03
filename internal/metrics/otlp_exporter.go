@@ -266,7 +266,6 @@ func (e *MetricsExporter) Export(ctx context.Context) error {
 }
 
 // Histogram tracks value distribution.
-// NOTE: Currently unused but reserved for future latency percentile improvements.
 // See METRICS_EVALUATION.md for details.
 type Histogram struct {
 	mu     sync.RWMutex

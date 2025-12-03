@@ -333,7 +333,6 @@ func (p *TransportProtocol) Listen(handler func(message []byte) error) error {
 
 func (p *TransportProtocol) Stop() {
 	p.stopOnce.Do(func() {
-		// Stage 2 Sleep优化: Listener.Stop()和ConnPool.Close()已有内部等待机制
 		if p.listener != nil {
 			// Listener.Stop() internally waits with WaitGroup (tcp.go, quic.go, udp.go)
 			_ = p.listener.Stop()

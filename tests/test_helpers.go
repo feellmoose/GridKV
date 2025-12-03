@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -378,7 +379,7 @@ func (tes *TestEnvironmentSimulator) Cleanup() {
 
 func (tes *TestEnvironmentSimulator) cleanupNodes(limit int) {
 	var wg sync.WaitGroup
-	const closeTimeout = 10 * time.Second
+	const closeTimeout = 30 * time.Second // Increased timeout for proper cleanup
 	for idx := 0; idx < limit && idx < len(tes.nodes); idx++ {
 		if tes.nodes[idx] == nil {
 			continue
@@ -394,6 +395,11 @@ func (tes *TestEnvironmentSimulator) cleanupNodes(limit int) {
 		}(idx, tes.nodes[idx])
 	}
 	wg.Wait()
+	
+	// Additional wait and GC to allow goroutines to fully exit
+	time.Sleep(2 * time.Second)
+	runtime.GC()
+	time.Sleep(1 * time.Second)
 }
 
 // WaitForHealthyNodes waits for cluster to reach expected healthy node count

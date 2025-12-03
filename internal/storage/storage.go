@@ -315,6 +315,17 @@ type StorageOptions struct {
 	// Recommended: 2-4x number of CPU cores
 	// Range: 1-1024
 	ShardCount int
+
+	// EnableCompression enables value compression for memory efficiency.
+	// When enabled, values larger than CompressionThreshold are compressed.
+	// Default: false (disabled for maximum performance)
+	// Enable for memory-constrained environments to achieve 60-80% savings.
+	EnableCompression bool
+
+	// CompressionThreshold is the minimum value size (bytes) to compress.
+	// Only values larger than this threshold will be compressed.
+	// Default: 256 bytes
+	CompressionThreshold int
 }
 
 // StorageStats provides runtime statistics for monitoring and diagnostics.

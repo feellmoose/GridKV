@@ -149,7 +149,7 @@ func (p *ClusterProfile) applyDefaults() {
 		p.MaxReplicators = clampInt(p.ReplicaCount*2, 4, 16)
 	}
 
-	// Stage 2.1: Scale gossip/SWIM parameters by cluster size
+	// Scale gossip/SWIM parameters by cluster size
 	// Base values are set by profile preset above, then adjusted by cluster size
 	// This replaces the old hardcoded defaults and prevents linear scaling
 	p.adjustGossipParamsByClusterSize()
@@ -293,7 +293,7 @@ func maxDuration(a, b time.Duration) time.Duration {
 	return b
 }
 
-// adjustGossipParamsByClusterSize adjusts gossip/SWIM parameters based on cluster size (Stage 2.1).
+// adjustGossipParamsByClusterSize adjusts gossip/SWIM parameters based on cluster size.
 // This prevents parameters from scaling linearly with cluster size.
 // Profile preset already sets base values, this function adjusts them by cluster size tier.
 func (p *ClusterProfile) adjustGossipParamsByClusterSize() {
@@ -307,7 +307,7 @@ func (p *ClusterProfile) adjustGossipParamsByClusterSize() {
 	baseFailureTimeout := p.FailureTimeout
 	baseSuspectTimeout := p.SuspectTimeout
 
-	// Stage 2.1: Adjust by cluster size tier while respecting profile base values
+	// Adjust by cluster size tier while respecting profile base values
 	// Small (≤10): tight intervals for fast convergence
 	// Medium (10-50): moderate intervals
 	// Large (>50): relaxed intervals to reduce overhead

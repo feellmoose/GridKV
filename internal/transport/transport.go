@@ -171,27 +171,35 @@ func (p *ConnPool) Prewarm(count int) int {
 			defer func() { <-sem }() // Release semaphore
 
 			conn, err := p.transport.Dial(p.address)
-			results <- result{conn: conn, err: err}
+			select {
+			case results <- result{conn: conn, err: err}:
+				// Sent result
+			case <-time.After(1 * time.Second):
+				// results channel might be closed, don't block
+				if conn != nil {
+					conn.Close()
+				}
+			}
 		}()
 	}
 
 	// Wait for all dials to complete with timeout
-	done := make(chan struct{})
+	waitDone := make(chan struct{})
 	go func() {
 		wg.Wait()
-		close(done)
+		close(waitDone)
 	}()
 	
-	// Close results channel after all dials complete or timeout
-	go func() {
-		select {
-		case <-done:
-			close(results)
-		case <-time.After(5 * time.Second):
-			// Timeout - close results to prevent goroutine leak
-			close(results)
-		}
-	}()
+	// Wait for completion or timeout, then close results
+	select {
+	case <-waitDone:
+		close(results)
+	case <-time.After(5 * time.Second):
+		// Timeout - close results and continue
+		close(results)
+		// Wait a bit more for goroutines to finish
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	// Collect successful connections
 	created := 0
@@ -417,35 +425,39 @@ func (p *ConnPool) Get(ctx context.Context) (TransportConn, error) {
 
 		now := time.Now()
 		// 2. Try to get a connection from the idle list
-		for len(p.idleConns) > 0 {
-			// Pop connection from the end
-			pc := p.idleConns[len(p.idleConns)-1]
-			p.idleConns = p.idleConns[:len(p.idleConns)-1]
+		idleCount := len(p.idleConns)
+		if idleCount > 0 {
+			// Pop connection from the end (most recently used)
+			pc := p.idleConns[idleCount-1]
+			p.idleConns = p.idleConns[:idleCount-1]
 
-			// Check for expiration
-			if now.Sub(pc.lastUsed) > p.idleTimeout {
-				_ = pc.conn.Close()
-				p.total--
-				continue // Try the next one
-			}
-
-			if healthChecker, ok := pc.conn.(HealthCheckable); ok {
-				if err := healthChecker.HealthCheck(); err != nil {
-					_ = pc.conn.Close()
-					p.total--
-					if p.metrics != nil {
-						p.metrics.healthCheckFail.Add(1)
+			// Fast path: check expiration first (cheapest check)
+			if now.Sub(pc.lastUsed) <= p.idleTimeout {
+				// Connection is fresh, check health if needed
+				if healthChecker, ok := pc.conn.(HealthCheckable); ok {
+					if err := healthChecker.HealthCheck(); err != nil {
+						_ = pc.conn.Close()
+						p.total--
+						if p.metrics != nil {
+							p.metrics.healthCheckFail.Add(1)
+						}
+						// Continue to try next connection
+						continue
 					}
-					continue
 				}
-			}
 
-			if p.metrics != nil {
-				p.metrics.totalReused.Add(1)
-			}
+				if p.metrics != nil {
+					p.metrics.totalReused.Add(1)
+				}
 
-			p.inUse++           // Track connection in use
-			return pc.conn, nil // Found a healthy connection
+				p.inUse++
+				return pc.conn, nil
+			}
+			
+			// Expired connection
+			_ = pc.conn.Close()
+			p.total--
+			// Continue loop to try next connection
 		}
 
 		// 3. Try to create a new connection (if max connections not reached)

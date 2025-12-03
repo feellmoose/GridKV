@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/utils/logging"
+	"github.com/feellmoose/gridkv/internal/utils/workerpool"
 )
 
 var (
@@ -392,12 +393,11 @@ func (t *TCPTransport) Listen(address string) (TransportListener, error) {
 type TCPTransportListener struct {
 	listener   *net.TCPListener
 	handler    func(message []byte) error
-	connPool   chan struct{}  // Worker pool to limit concurrent connections
-	maxWorkers int            // Maximum concurrent connection handlers
-	stopCh     chan struct{}  // Signal channel to stop acceptConnections
-	stopOnce   sync.Once      // Ensure stopCh is only closed once
-	doneCh     chan struct{}  // Signal channel to indicate acceptConnections has exited
-	wg         sync.WaitGroup // WaitGroup to track connection handler goroutines
+	workerPool *workerpool.Pool // Worker pool for connection handling tasks
+	maxWorkers int              // Maximum concurrent connection handlers
+	stopCh     chan struct{}    // Signal channel to stop acceptConnections
+	stopOnce   sync.Once        // Ensure stopCh is only closed once
+	doneCh     chan struct{}    // Signal channel to indicate acceptConnections has exited
 }
 
 // NewTCPTransportListener creates a new listener bound to the specified address.
@@ -412,14 +412,19 @@ func NewTCPTransportListener(addr string) (*TCPTransportListener, error) {
 		return nil, err
 	}
 
-	// Optimize maxWorkers: start smaller, connections are handled per-connection
-	// Reduced to prevent excessive goroutine creation - connections are short-lived
-	maxWorkers := 256 // Reduced from 500 - connections are handled quickly
-	connPool := make(chan struct{}, maxWorkers)
+	// Use worker pool instead of per-connection goroutines
+	// This provides better resource control and prevents goroutine leaks
+	maxWorkers := 256           // Fixed worker count, not per-connection
+	queueSize := maxWorkers * 2 // Queue size for buffering connection tasks
+
+	pool, err := createListenerWorkerPool("tcp-listener", maxWorkers, queueSize)
+	if err != nil {
+		return nil, err
+	}
 
 	return &TCPTransportListener{
 		listener:   listener,
-		connPool:   connPool,
+		workerPool: pool,
 		maxWorkers: maxWorkers,
 		stopCh:     make(chan struct{}),
 		doneCh:     make(chan struct{}),
@@ -441,6 +446,8 @@ func (l *TCPTransportListener) Start() error {
 func (l *TCPTransportListener) Stop() error {
 	l.stopOnce.Do(func() {
 		close(l.stopCh)
+		// Close listener immediately to stop accepting new connections
+		// This will cause all pending Accept() calls to fail
 		if l.listener != nil {
 			addr := l.listener.Addr()
 			l.listener.Close()
@@ -451,27 +458,16 @@ func (l *TCPTransportListener) Stop() error {
 	// Wait for acceptConnections to exit with timeout
 	select {
 	case <-l.doneCh:
-	case <-time.After(2 * time.Second):
+	case <-time.After(1 * time.Second):
 		logging.Warn("acceptConnections did not exit in time")
 	}
 
-	// Wait for all connection handlers to complete with timeout
-	// Increase timeout for high-load scenarios
-	done := make(chan struct{})
-	go func() {
-		l.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		logging.Warn("connection handlers did not complete in time")
-		// Force close remaining connections by closing the listener
-		// This will cause all pending reads to fail
-		if l.listener != nil {
-			l.listener.Close()
-		}
+	// Release worker pool - this will gracefully shutdown all workers
+	// The pool will wait for running tasks to complete
+	if l.workerPool != nil {
+		l.workerPool.Release()
 	}
+
 	return nil
 }
 
@@ -527,49 +523,28 @@ func (l *TCPTransportListener) acceptConnections() {
 			return
 		}
 
+		// Check if stopping before submitting to pool
 		select {
 		case <-l.stopCh:
 			conn.Close()
 			return
-		case l.connPool <- struct{}{}:
-			l.wg.Add(1)
-			go func(c *net.TCPConn) {
-				defer func() {
-					<-l.connPool
-					l.wg.Done()
-				}()
-				l.handleConnection(c)
-			}(conn)
 		default:
-			// Connection pool exhausted - reject with backpressure
-			// Log at debug level to avoid spam, but track for metrics
+		}
+
+		// Submit connection handling task to worker pool
+		// This reuses worker goroutines instead of creating one per connection
+		connCopy := conn
+		if err := l.workerPool.Submit(func() {
+			l.handleConnection(connCopy)
+		}); err != nil {
+			// Pool is closed or full - reject connection
 			if logging.Log.IsDebugEnabled() {
-				logging.Debug("Connection rejected: worker pool full", "remote", conn.RemoteAddr(), "max_workers", l.maxWorkers)
+				logging.Debug("Connection rejected: worker pool full or closed",
+					"remote", conn.RemoteAddr(),
+					"max_workers", l.maxWorkers,
+					"error", err)
 			}
-			// Give a brief moment for the pool to drain before rejecting
-			// This helps during transient spikes
-			select {
-			case <-l.stopCh:
-				conn.Close()
-				return
-			case <-time.After(10 * time.Millisecond):
-				// Check again if a slot opened up
-				select {
-				case l.connPool <- struct{}{}:
-					l.wg.Add(1)
-					go func(c *net.TCPConn) {
-						defer func() {
-							<-l.connPool
-							l.wg.Done()
-						}()
-						l.handleConnection(c)
-					}(conn)
-					continue // Successfully queued, continue accepting
-				default:
-					// Still full, reject
-					conn.Close()
-				}
-			}
+			conn.Close()
 		}
 	}
 }
@@ -600,7 +575,9 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 	handler := l.handler
 
 	lengthPrefix := make([]byte, 4)
-	readTimeout := 30 * time.Second // Connection read timeout
+	readTimeout := 5 * time.Second // Reduced timeout to detect dead connections faster
+	consecutiveTimeouts := 0
+	maxConsecutiveTimeouts := 2 // Limit consecutive timeouts to prevent goroutine leaks
 
 	for {
 		// Check if listener is stopping
@@ -611,6 +588,7 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 		}
 
 		// Set read deadline to prevent blocking forever
+		// Use shorter timeout to detect dead connections faster
 		conn.SetReadDeadline(time.Now().Add(readTimeout))
 
 		// Read the length prefix (4 bytes) - MUST use io.ReadFull to guarantee full read
@@ -618,13 +596,23 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				return
 			}
-			// Check for timeout - if listener is stopping, exit immediately
+			// Check for timeout - limit consecutive timeouts to prevent goroutine leaks
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				select {
 				case <-l.stopCh:
 					return
 				default:
-					// Timeout but not stopping, continue
+					consecutiveTimeouts++
+					// If too many consecutive timeouts, connection is likely dead - close it
+					if consecutiveTimeouts >= maxConsecutiveTimeouts {
+						if logging.Log.IsDebugEnabled() {
+							logging.Debug("connect[net], too many consecutive timeouts, closing connection",
+								"remote_addr", conn.RemoteAddr().String(),
+								"timeouts", consecutiveTimeouts)
+						}
+						return
+					}
+					// Reset timeout counter on successful read
 					continue
 				}
 			}
@@ -632,6 +620,9 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 			logging.Debug("connect[net], error reading length prefix", "err", err, "remote_addr", conn.RemoteAddr().String())
 			return
 		}
+
+		// Reset timeout counter on successful read
+		consecutiveTimeouts = 0
 
 		// Read the actual message based on the length
 		dataLength := binary.BigEndian.Uint32(lengthPrefix)
@@ -675,19 +666,32 @@ func (l *TCPTransportListener) handleConnection(conn *net.TCPConn) {
 
 		// MUST use io.ReadFull to guarantee reading exactly dataLength bytes
 		if _, err := io.ReadFull(reader, data); err != nil {
-			// Check for timeout - if listener is stopping, exit immediately
+			// Check for timeout - limit consecutive timeouts to prevent goroutine leaks
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				select {
 				case <-l.stopCh:
 					return
 				default:
-					// Timeout but not stopping, continue
+					consecutiveTimeouts++
+					// If too many consecutive timeouts, connection is likely dead - close it
+					if consecutiveTimeouts >= maxConsecutiveTimeouts {
+						if logging.Log.IsDebugEnabled() {
+							logging.Debug("connect[net], too many consecutive timeouts, closing connection",
+								"remote_addr", conn.RemoteAddr().String(),
+								"timeouts", consecutiveTimeouts)
+						}
+						return
+					}
+					// Reset timeout counter on successful read
 					continue
 				}
 			}
 			logging.Debug("connect[net], error reading message", "err", err, "remote_addr", conn.RemoteAddr().String())
 			return
 		}
+
+		// Reset timeout counter on successful read
+		consecutiveTimeouts = 0
 
 		// Check if listener is stopping before handling message
 		select {

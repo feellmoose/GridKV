@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/utils/logging"
+	"github.com/feellmoose/gridkv/internal/utils/workerpool"
 )
 
 type UDPTransport struct {
@@ -367,16 +368,15 @@ func (u *UDPConn) RemoteAddr() net.Addr {
 }
 
 type UDPListener struct {
-	conn        *net.UDPConn
-	handler     func(message []byte) error
-	address     string
-	config      *UDPConfig
-	metrics     *UDPMetrics
-	stopCh      chan struct{}
-	stopOnce    sync.Once
-	wg          sync.WaitGroup
-	readWorkers int
-	bufferPool  sync.Pool
+	conn       *net.UDPConn
+	handler    func(message []byte) error
+	address    string
+	config     *UDPConfig
+	metrics    *UDPMetrics
+	stopCh     chan struct{}
+	stopOnce   sync.Once
+	workerPool *workerpool.Pool // Worker pool for message handling
+	bufferPool sync.Pool
 }
 
 func NewUDPListener(address string, config *UDPConfig, metrics *UDPMetrics) (*UDPListener, error) {
@@ -384,12 +384,22 @@ func NewUDPListener(address string, config *UDPConfig, metrics *UDPMetrics) (*UD
 		config = DefaultUDPConfig()
 	}
 
+	// Create worker pool for UDP message handling
+	// UDP uses multiple read workers, but message processing goes through pool
+	maxWorkers := 32 // Fixed worker count for message processing
+	queueSize := maxWorkers * 2
+
+	pool, err := createListenerWorkerPool("udp-listener", maxWorkers, queueSize)
+	if err != nil {
+		return nil, err
+	}
+
 	return &UDPListener{
-		address:     address,
-		config:      config,
-		metrics:     metrics,
-		stopCh:      make(chan struct{}),
-		readWorkers: 32, // Multiple workers for high throughput
+		address:    address,
+		config:     config,
+		metrics:    metrics,
+		stopCh:     make(chan struct{}),
+		workerPool: pool,
 		bufferPool: sync.Pool{
 			New: func() interface{} {
 				return make([]byte, config.ReadBufferSize)
@@ -418,8 +428,9 @@ func (l *UDPListener) Start() error {
 	l.conn = conn
 
 	// Start multiple read workers for high throughput
-	for i := 0; i < l.readWorkers; i++ {
-		l.wg.Add(1)
+	// UDP needs multiple readers due to connectionless nature
+	readWorkers := 32
+	for i := 0; i < readWorkers; i++ {
 		go l.readWorker(i)
 	}
 
@@ -427,8 +438,6 @@ func (l *UDPListener) Start() error {
 }
 
 func (l *UDPListener) readWorker(workerID int) {
-	defer l.wg.Done()
-
 	buffer := l.bufferPool.Get().([]byte)
 	defer l.bufferPool.Put(buffer)
 
@@ -488,10 +497,22 @@ func (l *UDPListener) readWorker(workerID int) {
 		l.metrics.messagesReceived.Add(1)
 		l.metrics.bytesReceived.Add(int64(n))
 
-		// Handle message inline to avoid goroutine storms under extreme load
-		if l.handler != nil {
-			if err := l.handler(message); err != nil && logging.Log.IsDebugEnabled() {
-				logging.Debug("UDP handler error", "addr", addr, "err", err)
+		// Submit message handling to worker pool
+		// This provides better resource control and prevents goroutine storms
+		messageCopy := message
+		if l.handler != nil && l.workerPool != nil {
+			if err := l.workerPool.Submit(func() {
+				if err := l.handler(messageCopy); err != nil && logging.Log.IsDebugEnabled() {
+					logging.Debug("UDP handler error", "addr", addr, "err", err)
+				}
+			}); err != nil {
+				// Pool is closed or full - log but continue reading
+				if logging.Log.IsDebugEnabled() {
+					logging.Debug("UDP message rejected: worker pool full or closed",
+						"addr", addr,
+						"error", err)
+				}
+				l.metrics.messagesDropped.Add(1)
 			}
 		}
 	}
@@ -511,7 +532,11 @@ func (l *UDPListener) Stop() error {
 		}
 	})
 
-	l.wg.Wait()
+	// Release worker pool - this will gracefully shutdown all workers
+	if l.workerPool != nil {
+		l.workerPool.Release()
+	}
+
 	return err
 }
 

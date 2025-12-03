@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/utils/logging"
+	"github.com/feellmoose/gridkv/internal/utils/workerpool"
 	"github.com/quic-go/quic-go"
 )
 
@@ -525,21 +526,17 @@ type QUICTransportListener struct {
 	config              *QUICConfig
 	stopCh              chan struct{}
 	stopOnce            sync.Once
-	wg                  sync.WaitGroup
-	streamLimiter       chan struct{}
+	connectionPool      *workerpool.Pool // Worker pool for connection handling
+	streamPool          *workerpool.Pool // Worker pool for stream handling
 	streamReadTimeout   time.Duration
 	streamAcceptTimeout time.Duration
+	doneCh              chan struct{} // Signal channel to indicate acceptConnections has exited
 }
 
 // NewQUICTransportListener creates a new QUIC listener
 func NewQUICTransportListener(address string, config *QUICConfig) (*QUICTransportListener, error) {
 	if config == nil {
 		config = DefaultQUICConfig()
-	}
-
-	streamLimit := config.MaxListenerStreams
-	if streamLimit <= 0 {
-		streamLimit = 1024
 	}
 
 	streamReadTimeout := config.StreamReadTimeout
@@ -552,13 +549,33 @@ func NewQUICTransportListener(address string, config *QUICConfig) (*QUICTranspor
 		streamAcceptTimeout = 500 * time.Millisecond
 	}
 
+	// Create worker pools for connection and stream handling
+	// Connection pool: handles QUIC connections (fewer, longer-lived)
+	connectionPool, err := createListenerWorkerPool("quic-connection", 128, 256)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connection pool: %w", err)
+	}
+
+	// Stream pool: handles QUIC streams (more, shorter-lived)
+	streamLimit := config.MaxListenerStreams
+	if streamLimit <= 0 {
+		streamLimit = 2048
+	}
+	streamPool, err := createListenerWorkerPool("quic-stream", streamLimit, streamLimit*2)
+	if err != nil {
+		connectionPool.Release()
+		return nil, fmt.Errorf("failed to create stream pool: %w", err)
+	}
+
 	return &QUICTransportListener{
 		address:             address,
 		config:              config,
 		stopCh:              make(chan struct{}),
-		streamLimiter:       make(chan struct{}, streamLimit),
+		connectionPool:      connectionPool,
+		streamPool:          streamPool,
 		streamReadTimeout:   streamReadTimeout,
 		streamAcceptTimeout: streamAcceptTimeout,
+		doneCh:              make(chan struct{}),
 	}, nil
 }
 
@@ -616,7 +633,6 @@ func (qtl *QUICTransportListener) Start() error {
 	qtl.listener = listener
 
 	// Start accepting connections
-	qtl.wg.Add(1)
 	go qtl.acceptConnections()
 
 	return nil
@@ -626,28 +642,6 @@ func (qtl *QUICTransportListener) Start() error {
 func (qtl *QUICTransportListener) HandleMessage(handler func(message []byte) error) TransportListener {
 	qtl.handler = handler
 	return qtl
-}
-
-func (qtl *QUICTransportListener) acquireStreamSlot() bool {
-	if qtl.streamLimiter == nil {
-		return true
-	}
-	select {
-	case qtl.streamLimiter <- struct{}{}:
-		return true
-	default:
-		return false
-	}
-}
-
-func (qtl *QUICTransportListener) releaseStreamSlot() {
-	if qtl.streamLimiter == nil {
-		return
-	}
-	select {
-	case <-qtl.streamLimiter:
-	default:
-	}
 }
 
 // Stop stops the QUIC listener
@@ -660,17 +654,21 @@ func (qtl *QUICTransportListener) Stop() error {
 		}
 	})
 
-	// Wait for all handlers with timeout
-	done := make(chan struct{})
-	go func() {
-		qtl.wg.Wait()
-		close(done)
-	}()
+	// Wait for acceptConnections to exit
 	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		logging.Warn("QUIC connection handlers did not complete in time")
+	case <-qtl.doneCh:
+	case <-time.After(1 * time.Second):
+		logging.Warn("QUIC acceptConnections did not exit in time")
 	}
+
+	// Release worker pools - this will gracefully shutdown all workers
+	if qtl.connectionPool != nil {
+		qtl.connectionPool.Release()
+	}
+	if qtl.streamPool != nil {
+		qtl.streamPool.Release()
+	}
+
 	return err
 }
 
@@ -711,7 +709,12 @@ func setQUICUDPBuffer(conn *net.UDPConn, size int) error {
 	return setErr
 }
 func (qtl *QUICTransportListener) acceptConnections() {
-	defer qtl.wg.Done()
+	defer close(qtl.doneCh)
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Error(fmt.Errorf("recovered from panic: %v", r), "quic-listener, accepting connections")
+		}
+	}()
 
 	for {
 		select {
@@ -734,12 +737,27 @@ func (qtl *QUICTransportListener) acceptConnections() {
 			continue
 		}
 
-		// Handle connection in goroutine
-		qtl.wg.Add(1)
-		go func(c *quic.Conn) {
-			defer qtl.wg.Done()
-			qtl.handleConnection(c)
-		}(conn)
+		// Check if stopping before submitting to pool
+		select {
+		case <-qtl.stopCh:
+			conn.CloseWithError(0, "listener stopping")
+			return
+		default:
+		}
+
+		// Submit connection handling task to worker pool
+		connCopy := conn
+		if err := qtl.connectionPool.Submit(func() {
+			qtl.handleConnection(connCopy)
+		}); err != nil {
+			// Pool is closed or full - close connection
+			if logging.Log.IsDebugEnabled() {
+				logging.Debug("QUIC connection rejected: worker pool full or closed",
+					"remote", conn.RemoteAddr(),
+					"error", err)
+			}
+			conn.CloseWithError(0, "connection pool exhausted")
+		}
 	}
 }
 
@@ -777,22 +795,29 @@ func (qtl *QUICTransportListener) handleConnection(conn *quic.Conn) {
 			return
 		}
 
-		if !qtl.acquireStreamSlot() {
+		// Check if stopping before submitting to pool
+		select {
+		case <-qtl.stopCh:
+			stream.CancelRead(0)
+			stream.Close()
+			return
+		default:
+		}
+
+		// Submit stream handling task to worker pool
+		streamCopy := stream
+		if err := qtl.streamPool.Submit(func() {
+			qtl.handleStream(streamCopy)
+		}); err != nil {
+			// Pool is closed or full - drop stream
 			if logging.Log.IsDebugEnabled() {
-				logging.Debug("Dropping QUIC stream: listener saturated", "remote", conn.RemoteAddr())
+				logging.Debug("QUIC stream rejected: worker pool full or closed",
+					"remote", conn.RemoteAddr(),
+					"error", err)
 			}
 			stream.CancelRead(0)
 			stream.Close()
-			continue
 		}
-
-		// Handle stream in goroutine (stream is already *quic.Stream)
-		qtl.wg.Add(1)
-		go func(s *quic.Stream) {
-			defer qtl.wg.Done()
-			defer qtl.releaseStreamSlot()
-			qtl.handleStream(s)
-		}(stream)
 	}
 }
 

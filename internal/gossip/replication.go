@@ -41,15 +41,15 @@ type targetPipeline struct {
 	flushCh    chan struct{} // Channel to trigger immediate flush
 	once       sync.Once
 	lastActive atomic.Int64   // UnixNano timestamp (Stage 2.3: for idle target recycling)
-	wg         sync.WaitGroup // Stage 2 Sleep优化: 跟踪goroutine退出
+	wg         sync.WaitGroup
 }
 
 func (tp *targetPipeline) start() {
 	tp.once.Do(func() {
 		tp.flushCh = make(chan struct{}, 1) // Buffered to allow non-blocking flush requests
-		tp.wg.Add(1)                        // Stage 2 Sleep优化: 标记goroutine开始
+		tp.wg.Add(1)
 		go func() {
-			defer tp.wg.Done() // Stage 2 Sleep优化: 标记goroutine结束
+			defer tp.wg.Done()
 			buf := pipelineBufferPool.Get().(*pipelineBuffer)
 			buf.ops = buf.ops[:0]
 			for k := range buf.index {
@@ -334,8 +334,6 @@ func (gm *GossipManager) FlushAllPipelines() {
 			}
 			return true
 		})
-		// Stage 2 Sleep优化: UnifiedPipeline.flush()是异步的，但无需等待
-		// flush操作会立即发送，不需要sleep等待
 		return
 	}
 
@@ -350,12 +348,9 @@ func (gm *GossipManager) FlushAllPipelines() {
 	for _, p := range pipelines {
 		p.requestFlush()
 	}
-	// Stage 2 Sleep优化: requestFlush是非阻塞的，flush会在goroutine中执行
-	// 不需要sleep等待，StopAllPipelines会等待所有goroutine退出
 }
 
 // StopAllPipelines stops all pipelines and closes their channels to prevent goroutine leaks
-// Stage 2 Sleep优化: 使用WaitGroup等待goroutine真正退出
 func (gm *GossipManager) StopAllPipelines() {
 	if gm.useBinaryProtocol {
 		var pipelines []*UnifiedPipeline
@@ -414,7 +409,6 @@ func (gm *GossipManager) StopAllPipelines() {
 		}
 	}
 
-	// Stage 2 Sleep优化: 使用WaitGroup等待所有goroutine真正退出
 	done := make(chan struct{})
 	go func() {
 		for _, p := range pipelines {
@@ -741,7 +735,6 @@ func (gm *GossipManager) Set(ctx context.Context, key string, item *storage.Stor
 		if gm.replicationPoolResizer != nil {
 			for retry := 0; retry < 3; retry++ {
 				gm.replicationPoolResizer.emergencyResize()
-				// Stage 2 Sleep优化: emergencyResize是同步的，无需等待
 				if err := gm.replicationPool.Submit(func() {
 					_ = gm.replicateToNodes(context.Background(), keyCopy, itemCopy, replicaIDs)
 				}); err == nil {
@@ -832,7 +825,6 @@ func (gm *GossipManager) Delete(ctx context.Context, key string, version int64) 
 		if gm.replicationPoolResizer != nil {
 			for retry := 0; retry < 3; retry++ {
 				gm.replicationPoolResizer.emergencyResize()
-				// Stage 2 Sleep优化: emergencyResize是同步的，无需等待
 				if err := gm.replicationPool.Submit(func() {
 					_ = gm.replicateDeleteToNodes(context.Background(), key, version, replicaIDs)
 				}); err == nil {
@@ -981,9 +973,9 @@ func (gm *GossipManager) Get(ctx context.Context, key string) (*storage.StoredIt
 	}
 	gm.mu.RUnlock()
 
-	// If found healthy replica, use a single remote read with非常紧的超时。
+	// If found healthy replica, use a single remote read with very tight timeout.
 	if targetReplica != "" {
-		// 读路径优先追求低延迟：默认 50ms 上限，再与外层 ctx/ReadTimeout 取最小值。
+		// Read path prioritizes low latency: default 50ms limit, taking minimum with outer ctx/ReadTimeout.
 		remoteReadTimeout := 50 * time.Millisecond
 		if gm.readTimeout > 0 && gm.readTimeout < remoteReadTimeout {
 			remoteReadTimeout = gm.readTimeout
@@ -1513,8 +1505,8 @@ func (gm *GossipManager) forwardReadToCoordinator(ctx context.Context, key strin
 	}
 	gm.signMessageCanonical(msg)
 
-	// 读协调者同样使用偏小的超时时间，默认 50ms，上限由外层 ctx/ReadTimeout 控制，
-	// 减少单次远程读阻塞时间，提升整体 QPS。
+	// Read coordinator also uses smaller timeout, default 50ms, limited by outer ctx/ReadTimeout,
+	// reducing single remote read blocking time to improve overall QPS.
 	timeout := 50 * time.Millisecond
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)

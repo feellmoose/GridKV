@@ -271,13 +271,17 @@ func (s *ShardedMemoryStorage) GetNoCopy(key string) (*StoredItem, error) {
 		return nil, ErrItemNotFound
 	}
 
-	// Check expiration (fast path)
-	if !item.ExpireAt.IsZero() && time.Now().After(item.ExpireAt) {
-		s.missCount.Add(1)
-		shard.data.Delete(key)
-		shard.keyCount.Add(-1)
-		s.totalKeys.Add(-1)
-		return nil, ErrItemExpired
+	// Check expiration (optimized: use UnixNano for faster comparison)
+	if !item.ExpireAt.IsZero() {
+		nowNano := time.Now().UnixNano()
+		expireNano := item.ExpireAt.UnixNano()
+		if nowNano > expireNano {
+			s.missCount.Add(1)
+			shard.data.Delete(key)
+			shard.keyCount.Add(-1)
+			s.totalKeys.Add(-1)
+			return nil, ErrItemExpired
+		}
 	}
 
 	s.hitCount.Add(1)

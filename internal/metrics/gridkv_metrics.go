@@ -156,6 +156,7 @@ func registerGridKVMetrics(e *MetricsExporter) {
 	e.RegisterCounter("security_signature_failures_total", "Total number of failed message signature verifications", "events", nil)
 	e.RegisterCounter("security_unauthenticated_messages_total", "Messages rejected due to missing or invalid authentication", "events", nil)
 	e.RegisterGauge("security_unauthenticated_message_ratio", "Ratio of unauthenticated messages over total gossip messages", "ratio", nil)
+	e.RegisterGauge("security_suspicious_nodes", "Number of nodes with suspicious security behavior", "nodes", nil)
 
 	// Read path metrics (Stage 0.3)
 	e.RegisterCounter("read_success", "Successful read operations", "reads", nil)
@@ -484,6 +485,13 @@ func (m *GridKVMetrics) IncrementSecurityUnauthenticatedMessages() {
 func (m *GridKVMetrics) SetSecurityUnauthenticatedMessageRatio(ratio float64) {
 	// Store ratio as integer scaled by 1e6 to avoid float handling in exporter
 	m.exporter.SetGauge("security_unauthenticated_message_ratio", int64(ratio*1_000_000))
+}
+
+// SetSecuritySuspiciousNodes sets the number of suspicious nodes.
+//
+//go:inline
+func (m *GridKVMetrics) SetSecuritySuspiciousNodes(count int64) {
+	m.exporter.SetGauge("security_suspicious_nodes", count)
 }
 
 // Export collects all metrics and sends them to the configured export function.

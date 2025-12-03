@@ -590,10 +590,10 @@ func NewGossipManager(opts *GossipOptions, hashRing *ConsistentHash, network Net
 		gm.hotCacheTTL = 1 * time.Second
 	}
 
-	// Initialize read batch manager with fixed、简单的参数。
-	// LAN 场景下偏向更短的 window 以降低读延迟：2ms。
+	// Initialize read batch manager with fixed, simple parameters.
+	// For LAN scenarios, prefer shorter window to reduce read latency: 2ms.
 	readBatchSize := 120                     // Target 100–150 keys per batch
-	readBatchWindow := 2 * time.Millisecond  // 1–3ms window per OPTZ 方案
+	readBatchWindow := 2 * time.Millisecond  // 1-3ms window per OPTZ plan
 	gm.readBatchManager = NewReadBatchManager(
 		gm.sendBatchReadRequest,
 		gm.generateOpID,
@@ -683,8 +683,6 @@ func (gm *GossipManager) Stop() {
 		gm.readBatchManager.Stop()
 	}
 
-	// Stage 2 Sleep优化: 使用WaitGroup和Context替代固定sleep
-	// EventLoop和Pool的Stop/Release已经包含内部WaitGroup等待
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer shutdownCancel()
 
@@ -2006,7 +2004,6 @@ func (gm *GossipManager) submitInboundTaskWithPriority(task func(), ctx context.
 		if gm.inboundPoolResizer != nil {
 			for retry := 0; retry < 3; retry++ {
 				gm.inboundPoolResizer.emergencyResize()
-				// Stage 2 Sleep优化: emergencyResize是同步的，无需等待
 				_, err = gm.inboundPriorityPool.SubmitTask(func(runCtx context.Context) {
 					select {
 					case <-runCtx.Done():
@@ -2032,7 +2029,6 @@ func (gm *GossipManager) submitInboundTaskWithPriority(task func(), ctx context.
 		if gm.inboundPoolResizer != nil {
 			for retry := 0; retry < 3; retry++ {
 				gm.inboundPoolResizer.emergencyResize()
-				// Stage 2 Sleep优化: emergencyResize是同步的，无需等待
 				if err := gm.inboundPool.Submit(task); err == nil {
 					return nil
 				}
@@ -2284,8 +2280,6 @@ func (gm *GossipManager) connectToSingleSeed(seedAddr string) {
 		})
 
 		if err == nil {
-			// Stage 2 Sleep优化: 使用短轮询替代固定sleep
-			// Check for connection with short intervals instead of fixed sleep
 			checkCtx, checkCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer checkCancel()
 
@@ -2405,7 +2399,6 @@ func (gm *GossipManager) connectToSeeds() {
 			wg.Done()
 			if gm.replicationPoolResizer != nil {
 				gm.replicationPoolResizer.emergencyResize()
-				// Stage 2 Sleep优化: emergencyResize是同步的，无需等待
 				if err := gm.replicationPool.Submit(func() {
 					gm.network.SendWithTimeout(addrCopy, connectMsg, 1*time.Second)
 				}); err != nil {

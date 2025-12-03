@@ -164,8 +164,6 @@ func (gm *GossipManager) handleConnect(msg *GossipMessage) {
 				// Both pools full - retry with resize or skip
 				if gm.replicationPoolResizer != nil {
 					gm.replicationPoolResizer.emergencyResize()
-					// Stage 2 Sleep优化: pool resize是同步的，无需等待
-					// emergencyResize会立即调整pool大小，可以直接重试
 					if err := gm.replicationPool.Submit(sendConnectResponse); err != nil {
 						<-gm.connectRateLimiter
 						gm.connectingNodes.Delete(nodeId)

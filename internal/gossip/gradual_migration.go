@@ -304,7 +304,6 @@ func (gmm *gradualMigrationManager) getMigrationStatus(nodeID string) (progress 
 }
 
 // stop stops all active migrations and waits for them to complete
-// Stage 2 Sleep优化: 使用context超时替代固定sleep轮询
 func (gmm *gradualMigrationManager) stop() {
 	gmm.stopOnce.Do(func() {
 		close(gmm.stopCh)

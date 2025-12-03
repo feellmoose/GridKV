@@ -50,32 +50,8 @@ func BytesToString(b []byte) string {
 	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
-// CopyBytes performs a fast byte copy using unsafe pointers.
-// This is equivalent to copy() but may be faster for small sizes.
-//
-//go:inline
-func CopyBytes(dst, src []byte) int {
-	n := len(src)
-	if len(dst) < n {
-		n = len(dst)
-	}
-	if n == 0 {
-		return 0
-	}
-
-	// For small copies, this can be faster than copy()
-	if n <= 32 {
-		for i := 0; i < n; i++ {
-			dst[i] = src[i]
-		}
-		return n
-	}
-
-	// For larger copies, use built-in copy
-	return copy(dst, src)
-}
-
 // FastCloneBytes creates a new byte slice with the same content.
+// Optimized to minimize allocations and improve copy performance.
 //
 //go:inline
 func FastCloneBytes(src []byte) []byte {
@@ -85,22 +61,9 @@ func FastCloneBytes(src []byte) []byte {
 	if len(src) == 0 {
 		return []byte{}
 	}
-
+	// Pre-allocate with exact capacity to avoid reallocation
 	dst := make([]byte, len(src))
 	copy(dst, src)
 	return dst
 }
 
-// GetStringHeader returns the underlying string data pointer for advanced operations.
-// This should only be used by experts who understand the implications.
-// Deprecated: Use unsafe.StringData() directly instead.
-func GetStringHeader(s string) unsafe.Pointer {
-	return unsafe.Pointer(unsafe.StringData(s))
-}
-
-// GetSliceHeader returns the underlying slice data pointer for advanced operations.
-// This should only be used by experts who understand the implications.
-// Deprecated: Use unsafe.SliceData() directly instead.
-func GetSliceHeader(s []byte) unsafe.Pointer {
-	return unsafe.Pointer(unsafe.SliceData(s))
-}
