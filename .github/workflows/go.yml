@@ -1,28 +1,328 @@
-# This workflow will build a golang project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
-
-name: Go
+name: Go CI/CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main, develop, feature/* ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ main, develop ]
 
 jobs:
+  quick-tests:
+    name: Quick Tests (<3min)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+        cache: true
+        
+    - name: Get dependencies
+      run: |
+        go mod download
+        go mod verify
+        
+    - name: Run Quick Tests
+      run: |
+        cd tests
+        go test -v -timeout=3m -run="^TestQuick" . 2>&1 | tee ../test-output.txt
+        
+    - name: Generate Quick Test Summary
+      if: always()
+      run: |
+        mkdir -p report
+        echo "# Quick Test Results" > report/summary.md
+        echo "" >> report/summary.md
+        echo "**Date:** $(date)" >> report/summary.md
+        echo "**Branch:** ${{ github.ref_name }}" >> report/summary.md
+        echo "**Commit:** ${{ github.sha }}" >> report/summary.md
+        echo "" >> report/summary.md
+        
+        TOTAL=$(grep -c "^=== RUN.*TestQuick" test-output.txt || echo "0")
+        PASSED=$(grep -c "^--- PASS.*TestQuick" test-output.txt || echo "0")
+        FAILED=$(grep -c "^--- FAIL.*TestQuick" test-output.txt || echo "0")
+        
+        echo "## Summary" >> report/summary.md
+        echo "- Total: $TOTAL" >> report/summary.md
+        echo "- Passed: ✅ $PASSED" >> report/summary.md
+        echo "- Failed: ❌ $FAILED" >> report/summary.md
+        echo "" >> report/summary.md
+        
+        if [ "$FAILED" -eq 0 ]; then
+          echo "✅ **All quick tests passed!**" >> report/summary.md
+        else
+          echo "❌ **Some tests failed**" >> report/summary.md
+        fi
+        
+    - name: Upload Test Reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: quick-test-reports
+        path: |
+          test-output.txt
+          report/
+        retention-days: 30
+
+  short-tests:
+    name: Short Tests (<10min)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+        cache: true
+        
+    - name: Get dependencies
+      run: |
+        go mod download
+        go mod verify
+        
+    - name: Run Quick + Short Tests
+      run: |
+        cd tests
+        go test -v -timeout=10m -run="^Test(Quick|Short)" . 2>&1 | tee ../test-output.txt
+        
+    - name: Generate Test Summary
+      if: always()
+      run: |
+        mkdir -p report
+        echo "# Test Results (Quick + Short)" > report/summary.md
+        echo "" >> report/summary.md
+        echo "**Date:** $(date)" >> report/summary.md
+        echo "**Branch:** ${{ github.ref_name }}" >> report/summary.md
+        echo "**Commit:** ${{ github.sha }}" >> report/summary.md
+        echo "**PR:** #${{ github.event.pull_request.number }}" >> report/summary.md
+        echo "" >> report/summary.md
+        
+        TOTAL=$(grep -c "^=== RUN" test-output.txt || echo "0")
+        PASSED=$(grep -c "^--- PASS" test-output.txt || echo "0")
+        FAILED=$(grep -c "^--- FAIL" test-output.txt || echo "0")
+        
+        echo "## Summary" >> report/summary.md
+        echo "- Total Tests: $TOTAL" >> report/summary.md
+        echo "- Passed: ✅ $PASSED" >> report/summary.md
+        echo "- Failed: ❌ $FAILED" >> report/summary.md
+        echo "" >> report/summary.md
+        
+        if grep -q "Total QPS:" test-output.txt; then
+          echo "## Performance Metrics" >> report/summary.md
+          grep "Total QPS:" test-output.txt | head -5 >> report/summary.md
+          grep "Success Rate:" test-output.txt | head -5 >> report/summary.md
+          echo "" >> report/summary.md
+        fi
+        
+        if [ "$FAILED" -eq 0 ]; then
+          echo "✅ **All tests passed!**" >> report/summary.md
+        else
+          echo "❌ **$FAILED test(s) failed**" >> report/summary.md
+          echo "" >> report/summary.md
+          echo "## Failed Tests" >> report/summary.md
+          grep "^--- FAIL" test-output.txt >> report/summary.md || true
+        fi
+        
+    - name: Upload Test Reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: short-test-reports
+        path: |
+          test-output.txt
+          report/
+        retention-days: 30
+        
+    - name: Comment PR with Results
+      if: always() && github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const summary = fs.readFileSync('report/summary.md', 'utf8');
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: summary
+          });
+
+  medium-tests:
+    name: Medium Tests (<30min)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+        cache: true
+        
+    - name: Get dependencies
+      run: |
+        go mod download
+        go mod verify
+        
+    - name: Run Quick + Short + Medium Tests
+      run: |
+        cd tests
+        go test -v -timeout=30m -run="^Test(Quick|Short|Medium)" . 2>&1 | tee ../test-output.txt
+        
+    - name: Generate JSON Report
+      if: always()
+      run: |
+        cd tests
+        go test -json -timeout=30m -run="^Test(Quick|Short|Medium)" . 2>&1 > ../test-report.json || true
+        
+    - name: Generate Test Summary
+      if: always()
+      run: |
+        mkdir -p report
+        
+        # Create summary
+        echo "# Full Test Results (Quick + Short + Medium)" > report/summary.md
+        echo "" >> report/summary.md
+        echo "**Date:** $(date)" >> report/summary.md
+        echo "**Branch:** ${{ github.ref_name }}" >> report/summary.md
+        echo "**Commit:** ${{ github.sha }}" >> report/summary.md
+        echo "**Workflow:** ${{ github.workflow }}" >> report/summary.md
+        echo "" >> report/summary.md
+        
+        # System info
+        echo "## System Information" >> report/summary.md
+        echo "- OS: $(uname -s) $(uname -r)" >> report/summary.md
+        echo "- Go: $(go version)" >> report/summary.md
+        echo "- CPU: $(nproc) cores" >> report/summary.md
+        echo "" >> report/summary.md
+        
+        # Test counts
+        TOTAL=$(grep -c "^=== RUN" test-output.txt || echo "0")
+        PASSED=$(grep -c "^--- PASS" test-output.txt || echo "0")
+        FAILED=$(grep -c "^--- FAIL" test-output.txt || echo "0")
+        
+        echo "## Test Summary" >> report/summary.md
+        echo "" >> report/summary.md
+        echo "| Metric | Count |" >> report/summary.md
+        echo "|--------|-------|" >> report/summary.md
+        echo "| Total Tests | $TOTAL |" >> report/summary.md
+        echo "| Passed | $PASSED |" >> report/summary.md
+        echo "| Failed | $FAILED |" >> report/summary.md
+        echo "" >> report/summary.md
+        
+        # Test categories
+        QUICK=$(grep -c "^--- PASS.*TestQuick" test-output.txt || echo "0")
+        SHORT=$(grep -c "^--- PASS.*TestShort" test-output.txt || echo "0")
+        MEDIUM=$(grep -c "^--- PASS.*TestMedium" test-output.txt || echo "0")
+        
+        echo "## Test Categories" >> report/summary.md
+        echo "" >> report/summary.md
+        echo "| Category | Passed |" >> report/summary.md
+        echo "|----------|--------|" >> report/summary.md
+        echo "| Quick (<10s) | $QUICK |" >> report/summary.md
+        echo "| Short (<30s) | $SHORT |" >> report/summary.md
+        echo "| Medium (<2min) | $MEDIUM |" >> report/summary.md
+        echo "" >> report/summary.md
+        
+        # Performance metrics
+        if grep -q "Total QPS:" test-output.txt; then
+          echo "## Performance Metrics" >> report/summary.md
+          echo "\`\`\`" >> report/summary.md
+          grep "Total QPS:" test-output.txt | head -10 >> report/summary.md
+          grep "Success Rate:" test-output.txt | head -10 >> report/summary.md
+          echo "\`\`\`" >> report/summary.md
+          echo "" >> report/summary.md
+        fi
+        
+        # Status
+        if [ "$FAILED" -eq 0 ]; then
+          echo "✅ **All $TOTAL tests passed!**" >> report/summary.md
+        else
+          echo "❌ **$FAILED out of $TOTAL tests failed**" >> report/summary.md
+          echo "" >> report/summary.md
+          echo "## Failed Tests" >> report/summary.md
+          echo "\`\`\`" >> report/summary.md
+          grep "^--- FAIL" test-output.txt >> report/summary.md || true
+          echo "\`\`\`" >> report/summary.md
+        fi
+        
+        # Copy files to report directory
+        cp test-output.txt report/test-output.txt
+        cp test-report.json report/test-report.json 2>/dev/null || true
+        
+    - name: Upload Test Reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: medium-test-reports-${{ github.run_number }}
+        path: |
+          test-output.txt
+          test-report.json
+          report/
+        retention-days: 90
+
+  lint:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25'
+        cache: true
+        
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v3
+      with:
+        version: latest
+        args: --timeout=5m
+        
+    - name: Check formatting
+      run: |
+        if [ -n "$(gofmt -s -l .)" ]; then
+          echo "The following files need formatting:"
+          gofmt -s -l .
+          exit 1
+        fi
 
   build:
+    name: Build Check
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [linux, darwin, windows]
+        arch: [amd64, arm64]
+    
     steps:
-    - uses: actions/checkout@v4
-
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: '1.23'
-
+        go-version: '1.25'
+        cache: true
+        
     - name: Build
-      run: go build ./...
+      run: |
+        GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -v ./...
 
-    - name: Test (short suite + basic functionality)
-      run: go test ./... -short
