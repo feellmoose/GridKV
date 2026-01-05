@@ -1192,7 +1192,7 @@ func TestIntegrated_StressTest(t *testing.T) {
 
 	// Stress test parameters - higher concurrency for stress testing
 	duration := 8 * time.Second
-	concurrency := GetEnvInt("INTEGRATION_CONCURRENCY", 5)0
+	concurrency := GetEnvInt("INTEGRATION_CONCURRENCY", 5)
 
 	t.Logf("Starting high-concurrency stress test: %d nodes, %d workers, %v duration",
 		nodeCount, concurrency, duration)
