@@ -1514,7 +1514,7 @@ func testLargeClusterPerformanceScaling(t *testing.T, ctx context.Context, sim *
 
 	// Performance test parameters scaled for large cluster
 	duration := 10 * time.Second
-	concurrency := GetEnvInt("INTEGRATION_CONCURRENCY", 5)0 // Moderate concurrency for large cluster
+	concurrency := GetEnvInt("INTEGRATION_CONCURRENCY", 5)
 
 	t.Logf("Starting performance scaling test: %d nodes, %d workers, %v duration",
 		nodeCount, concurrency, duration)
