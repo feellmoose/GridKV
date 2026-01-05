@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -234,17 +235,47 @@ type TestEnvironmentConfig struct {
 	ShardCount     int
 }
 
-// DefaultTestEnvironment returns default test environment config
+// GetEnvInt parses environment variable as int with default fallback
+func GetEnvInt(key string, defaultValue int) int {
+	if val := os.Getenv(key); val != "" {
+		if parsed, err := strconv.Atoi(val); err == nil {
+			return parsed
+		}
+	}
+	return defaultValue
+}
+
+// GetEnvInt64 parses environment variable as int64 with default fallback
+func GetEnvInt64(key string, defaultValue int64) int64 {
+	if val := os.Getenv(key); val != "" {
+		if parsed, err := strconv.ParseInt(val, 10, 64); err == nil {
+			return parsed
+		}
+	}
+	return defaultValue
+}
+
+// GetEnvDuration parses environment variable as time.Duration with default fallback
+func GetEnvDuration(key string, defaultValue time.Duration) time.Duration {
+	if val := os.Getenv(key); val != "" {
+		if parsed, err := time.ParseDuration(val); err == nil {
+			return parsed
+		}
+	}
+	return defaultValue
+}
+
+// DefaultTestEnvironment returns default test environment config with environment variable overrides
 func DefaultTestEnvironment() *TestEnvironmentConfig {
 	return &TestEnvironmentConfig{
 		NetworkProfile: ProfileLAN,
 		NetworkType:    networkTypeFromEnv(gridkv.TCP),
-		NodeCount:      100,
-		ReplicaCount:   3,
-		BasePort:       20000,
+		NodeCount:      GetEnvInt("TEST_NODE_COUNT", 100),
+		ReplicaCount:   GetEnvInt("TEST_REPLICA_COUNT", 3),
+		BasePort:       GetEnvInt("TEST_BASE_PORT", 20000),
 
-		MaxMemoryMB: 1024,
-		ShardCount:  64,
+		MaxMemoryMB: GetEnvInt64("TEST_MAX_MEMORY_MB", 1024),
+		ShardCount:  GetEnvInt("TEST_SHARD_COUNT", 64),
 	}
 }
 

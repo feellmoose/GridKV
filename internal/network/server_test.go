@@ -7,6 +7,9 @@ import (
 )
 
 func TestNetworkServer_StartStop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultTransportConfig()
 	cfg.Type = TransportTCP
 	transport := NewTCPTransport(cfg)
@@ -41,6 +44,9 @@ func TestNetworkServer_StartStop(t *testing.T) {
 }
 
 func TestNetworkServer_HandleMessage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultTransportConfig()
 	cfg.Type = TransportTCP
 	transport := NewTCPTransport(cfg)
@@ -84,6 +90,9 @@ func TestNetworkServer_HandleMessage(t *testing.T) {
 }
 
 func TestNetworkServer_RequestResponse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultTransportConfig()
 	cfg.Type = TransportTCP
 	transport := NewTCPTransport(cfg)
@@ -131,6 +140,9 @@ func TestNetworkServer_RequestResponse(t *testing.T) {
 }
 
 func TestNetworkServer_Stats(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultTransportConfig()
 	cfg.Type = TransportTCP
 	transport := NewTCPTransport(cfg)

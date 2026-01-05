@@ -75,6 +75,9 @@ func TestCluster_BasicOperations(t *testing.T) {
 }
 
 func TestCluster_MemberManagement(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	ctx := context.Background()
 
 	store, _ := mem_storage.New(mem_storage.DefaultConfig())
@@ -132,6 +135,9 @@ func TestCluster_MemberManagement(t *testing.T) {
 }
 
 func TestCluster_HashRing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	ctx := context.Background()
 
 	store, _ := mem_storage.New(mem_storage.DefaultConfig())
@@ -180,6 +186,9 @@ func TestCluster_HashRing(t *testing.T) {
 }
 
 func TestCluster_BatchOperations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	ctx := context.Background()
 
 	store, _ := mem_storage.New(mem_storage.DefaultConfig())
@@ -246,6 +255,9 @@ func TestCluster_BatchOperations(t *testing.T) {
 }
 
 func TestCluster_ReadRepair(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	ctx := context.Background()
 
 	store, _ := mem_storage.New(mem_storage.DefaultConfig())
@@ -285,6 +297,9 @@ func TestCluster_ReadRepair(t *testing.T) {
 }
 
 func TestCluster_ConcurrentWrites(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	ctx := context.Background()
 
 	store, _ := mem_storage.New(mem_storage.DefaultConfig())
@@ -344,6 +359,9 @@ func TestCluster_ConcurrentWrites(t *testing.T) {
 }
 
 func TestCluster_JoinLeave(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	ctx := context.Background()
 
 	store, _ := mem_storage.New(mem_storage.DefaultConfig())
@@ -377,6 +395,9 @@ func TestCluster_JoinLeave(t *testing.T) {
 }
 
 func TestCluster_WriteReadFlow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	ctx := context.Background()
 
 	store, _ := mem_storage.New(mem_storage.DefaultConfig())
@@ -427,6 +448,9 @@ func TestCluster_WriteReadFlow(t *testing.T) {
 }
 
 func TestCluster_UpdateValue(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	ctx := context.Background()
 
 	store, _ := mem_storage.New(mem_storage.DefaultConfig())
@@ -471,6 +495,9 @@ func TestCluster_UpdateValue(t *testing.T) {
 }
 
 func TestCluster_EmptyOperations(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	ctx := context.Background()
 
 	store, _ := mem_storage.New(mem_storage.DefaultConfig())
@@ -508,6 +535,9 @@ func TestCluster_EmptyOperations(t *testing.T) {
 }
 
 func TestCluster_ComponentAccess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	ctx := context.Background()
 
 	store, _ := mem_storage.New(mem_storage.DefaultConfig())
@@ -548,6 +578,9 @@ func TestCluster_ComponentAccess(t *testing.T) {
 }
 
 func TestCluster_Lifecycle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	ctx := context.Background()
 
 	store, _ := mem_storage.New(mem_storage.DefaultConfig())

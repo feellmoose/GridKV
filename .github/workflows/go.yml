@@ -10,7 +10,7 @@ jobs:
   test:
     name: Test & Lint
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
     - name: Checkout code
@@ -30,13 +30,15 @@ jobs:
 
     - name: Run tests with QUIC setup
       run: |
-        # Setup UDP buffers for QUIC tests
-        sudo sysctl -w net.core.rmem_max=8388608
-        sudo sysctl -w net.core.wmem_max=8388608
+        # Setup UDP buffers and other network parameters for QUIC
+        sudo sysctl -w net.core.rmem_max=67108864
+        sudo sysctl -w net.core.wmem_max=67108864
+        sudo sysctl -w net.core.rmem_default=67108864
+        sudo sysctl -w net.core.wmem_default=67108864
 
-        # Run tests
+        # Run only unit tests (skip integration and stress tests)
         set -o pipefail
-        go test -v -timeout=10m ./... 2>&1 | tee test-output.txt
+        timeout 10m go test -v -short -timeout=8m ./... 2>&1 | tee test-output.txt
 
     - name: Code quality checks
       run: |

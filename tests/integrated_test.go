@@ -196,7 +196,7 @@ func testConsistencyValidation(t *testing.T, ctx context.Context, nodeCount int)
 
 	// Test eventual consistency with concurrent writes
 	var wg sync.WaitGroup
-	concurrency := 10
+	concurrency := GetEnvInt("INTEGRATION_CONCURRENCY", 10)
 	operationsPerWorker := 50
 
 	// Store written keys and values for later verification
@@ -276,7 +276,7 @@ func testPerformanceValidation(t *testing.T, ctx context.Context, nodeCount int)
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 
 	// Performance test parameters (focus on write operations due to API limitations)
-	concurrency := 5
+	concurrency := GetEnvInt("INTEGRATION_CONCURRENCY", 5)
 	operationsPerWorker := 25
 
 	var totalOperations int64
@@ -331,8 +331,8 @@ func TestIntegrated_WriteThroughput(t *testing.T) {
 	nodes := sim.GetNodes()
 
 	// Pure write performance parameters
-	duration := 5 * time.Second
-	concurrency := 20
+	duration := GetEnvDuration("INTEGRATION_TEST_DURATION", 5*time.Second)
+	concurrency := GetEnvInt("INTEGRATION_CONCURRENCY", 20)
 
 	t.Logf("Starting pure write performance test: %d nodes, %d workers, %v duration",
 		nodeCount, concurrency, duration)
@@ -863,7 +863,7 @@ func TestIntegrated_ReadPerformanceWithLongCache(t *testing.T) {
 
 	// Read performance parameters - longer duration to allow cache warmup
 	duration := 10 * time.Second
-	concurrency := 10
+	concurrency := GetEnvInt("INTEGRATION_CONCURRENCY", 10)
 
 	t.Logf("Starting extended cache read performance test: %d nodes, %d workers, %v duration",
 		nodeCount, concurrency, duration)
@@ -949,7 +949,7 @@ func TestIntegrated_ReadPerformance(t *testing.T) {
 
 	// Read performance parameters
 	duration := 3 * time.Second
-	concurrency := 3
+	concurrency := GetEnvInt("INTEGRATION_CONCURRENCY", 3)
 
 	t.Logf("Starting improved read performance test: %d nodes, %d workers, %v duration",
 		nodeCount, concurrency, duration)
@@ -1057,8 +1057,8 @@ func TestIntegrated_LocalReadPerformance(t *testing.T) {
 	t.Logf("Pre-populated %d keys locally", prePopulateKeys)
 
 	// Local read performance parameters
-	duration := 5 * time.Second
-	concurrency := 20
+	duration := GetEnvDuration("INTEGRATION_TEST_DURATION", 5*time.Second)
+	concurrency := GetEnvInt("INTEGRATION_CONCURRENCY", 20)
 
 	t.Logf("Starting local read performance test: %d node, %d workers, %v duration",
 		nodeCount, concurrency, duration)
@@ -1115,7 +1115,7 @@ func TestIntegrated_MixedWorkload(t *testing.T) {
 
 	// Stress test parameters - focus on realistic performance assessment
 	duration := 10 * time.Second
-	concurrency := 20
+	concurrency := GetEnvInt("INTEGRATION_CONCURRENCY", 20)
 
 	t.Logf("Running stress test: %d nodes, %d workers, %v duration", nodeCount, concurrency, duration)
 
@@ -1192,7 +1192,7 @@ func TestIntegrated_StressTest(t *testing.T) {
 
 	// Stress test parameters - higher concurrency for stress testing
 	duration := 8 * time.Second
-	concurrency := 50
+	concurrency := GetEnvInt("INTEGRATION_CONCURRENCY", 5)0
 
 	t.Logf("Starting high-concurrency stress test: %d nodes, %d workers, %v duration",
 		nodeCount, concurrency, duration)
@@ -1514,7 +1514,7 @@ func testLargeClusterPerformanceScaling(t *testing.T, ctx context.Context, sim *
 
 	// Performance test parameters scaled for large cluster
 	duration := 10 * time.Second
-	concurrency := 50 // Moderate concurrency for large cluster
+	concurrency := GetEnvInt("INTEGRATION_CONCURRENCY", 5)0 // Moderate concurrency for large cluster
 
 	t.Logf("Starting performance scaling test: %d nodes, %d workers, %v duration",
 		nodeCount, concurrency, duration)
@@ -1582,22 +1582,22 @@ func testLargeClusterPerformanceScaling(t *testing.T, ctx context.Context, sim *
 	t.Logf("Large cluster performance scaling validated: %.0f ops/sec across %d nodes", opsPerSecond, nodeCount)
 }
 
-// createTestCluster creates a test cluster with specified parameters
+// createTestCluster creates a test cluster with specified parameters and environment variable overrides
 func createTestCluster(t *testing.T, nodeCount int, replicationFactor int) *TestEnvironmentSimulator {
-	// Adaptive configuration based on cluster size
-	maxMemoryMB := int64(512)
-	shardCount := 32
-	basePort := 25000
+	// Adaptive configuration based on cluster size with environment variable overrides
+	maxMemoryMB := GetEnvInt64("INTEGRATION_MAX_MEMORY_MB", 512)
+	shardCount := GetEnvInt("INTEGRATION_SHARD_COUNT", 32)
+	basePort := GetEnvInt("INTEGRATION_BASE_PORT", 25000)
 
-	if nodeCount >= 100 {
-		maxMemoryMB = 256 // Reduce memory per node for large clusters
-		shardCount = 16   // Fewer shards to reduce overhead
-		basePort = 30000  // Use higher port range for large clusters
-	} else if nodeCount >= 50 {
+	if nodeCount >= GetEnvInt("INTEGRATION_LARGE_CLUSTER_THRESHOLD", 100) {
+		maxMemoryMB = GetEnvInt64("INTEGRATION_LARGE_MEMORY_MB", 256) // Reduce memory per node for large clusters
+		shardCount = GetEnvInt("INTEGRATION_LARGE_SHARD_COUNT", 16)   // Fewer shards to reduce overhead
+		basePort = GetEnvInt("INTEGRATION_LARGE_BASE_PORT", 30000)    // Use higher port range for large clusters
+	} else if nodeCount >= GetEnvInt("INTEGRATION_MEDIUM_CLUSTER_THRESHOLD", 50) {
 		// Medium-large cluster settings
-		maxMemoryMB = 384
-		shardCount = 24
-		basePort = 28000
+		maxMemoryMB = GetEnvInt64("INTEGRATION_MEDIUM_MEMORY_MB", 384)
+		shardCount = GetEnvInt("INTEGRATION_MEDIUM_SHARD_COUNT", 24)
+		basePort = GetEnvInt("INTEGRATION_MEDIUM_BASE_PORT", 28000)
 	}
 
 	config := &TestEnvironmentConfig{

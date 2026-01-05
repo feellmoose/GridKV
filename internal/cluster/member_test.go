@@ -6,6 +6,9 @@ import (
 )
 
 func TestMemberMgr_Basic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	mgr, err := newMemberMgr(memberConfig{
 		NodeID:         "node1",
 		Address:        "localhost:8080",
@@ -41,6 +44,9 @@ func TestMemberMgr_Basic(t *testing.T) {
 }
 
 func TestMemberMgr_State(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	mgr, err := newMemberMgr(memberConfig{
 		NodeID:         "node1",
 		Address:        "localhost:8080",
@@ -67,6 +73,9 @@ func TestMemberMgr_State(t *testing.T) {
 }
 
 func TestMemberMgr_Join(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	mgr, err := newMemberMgr(memberConfig{
 		NodeID:         "node1",
 		Address:        "localhost:8080",
@@ -110,6 +119,9 @@ func TestMemberMgr_Join(t *testing.T) {
 }
 
 func TestMemberMgr_Leave(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	sent := false
 	mgr, err := newMemberMgr(memberConfig{
 		NodeID:  "node1",
@@ -144,6 +156,9 @@ func TestMemberMgr_Leave(t *testing.T) {
 }
 
 func TestMemberMgr_UpdateNode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	mgr, err := newMemberMgr(memberConfig{
 		NodeID:   "node1",
 		Address:  "localhost:8080",
@@ -182,6 +197,9 @@ func TestMemberMgr_UpdateNode(t *testing.T) {
 }
 
 func TestMemberMgr_ClusterSync(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	called := false
 	mgr, err := newMemberMgr(memberConfig{
 		NodeID:   "node1",
@@ -220,6 +238,9 @@ func TestMemberMgr_ClusterSync(t *testing.T) {
 }
 
 func TestMemberMgr_MarkSuspect(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	mgr, err := newMemberMgr(memberConfig{
 		NodeID:         "node1",
 		Address:        "localhost:8080",
@@ -254,6 +275,9 @@ func TestMemberMgr_MarkSuspect(t *testing.T) {
 }
 
 func TestMemberMgr_MarkDead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	mgr, err := newMemberMgr(memberConfig{
 		NodeID:   "node1",
 		Address:  "localhost:8080",

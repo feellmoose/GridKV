@@ -145,23 +145,23 @@ var (
 )
 
 // getSharedBenchCluster returns a shared cluster for benchmarks
-// Uses smaller cluster (10 nodes) when -short flag is set
+// Uses smaller cluster when -short flag is set, with environment variable overrides
 func getSharedBenchCluster(b *testing.B) *TestEnvironmentSimulator {
 	sharedBenchClusterOnce.Do(func() {
-		nodeCount := 50
-		maxMemoryMB := int64(256)
+		nodeCount := GetEnvInt("BENCH_NODE_COUNT", 50)
+		maxMemoryMB := GetEnvInt64("BENCH_MAX_MEMORY_MB", 256)
 		if testing.Short() {
-			nodeCount = 5
-			maxMemoryMB = 128
+			nodeCount = GetEnvInt("BENCH_SHORT_NODE_COUNT", 5)
+			maxMemoryMB = GetEnvInt64("BENCH_SHORT_MEMORY_MB", 128)
 		}
 		config := &TestEnvironmentConfig{
 			NetworkProfile: ProfileLAN,
 			NetworkType:    networkTypeFromEnv(gridkv.TCP),
 			NodeCount:      nodeCount,
-			ReplicaCount:   3,
-			BasePort:       26000,
+			ReplicaCount:   GetEnvInt("BENCH_REPLICA_COUNT", 3),
+			BasePort:       GetEnvInt("BENCH_BASE_PORT", 26000),
 			MaxMemoryMB:    maxMemoryMB,
-			ShardCount:     64,
+			ShardCount:     GetEnvInt("BENCH_SHARD_COUNT", 64),
 		}
 		sim := NewTestEnvironmentSimulator(config)
 		// Use SetupClusterOptimized which includes optimizations

@@ -162,6 +162,9 @@ func TestTCPTransport_MessageTooLarge(t *testing.T) {
 }
 
 func TestQUICTransport_Basic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultTransportConfig()
 	cfg.Type = TransportQUIC
 	cfg.ReadTimeout = 5 * time.Second

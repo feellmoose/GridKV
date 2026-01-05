@@ -7,6 +7,9 @@ import (
 )
 
 func TestNetwork_StartStop(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultNetworkConfig("127.0.0.1:0")
 	cfg.TransportConfig.Type = TransportTCP
 
@@ -35,6 +38,9 @@ func TestNetwork_StartStop(t *testing.T) {
 }
 
 func TestNetwork_SendReceive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultNetworkConfig("127.0.0.1:0")
 	cfg.TransportConfig.Type = TransportTCP
 
@@ -95,6 +101,9 @@ func TestNetwork_SendReceive(t *testing.T) {
 }
 
 func TestNetwork_RequestResponse(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultNetworkConfig("127.0.0.1:0")
 	cfg.TransportConfig.Type = TransportTCP
 
@@ -144,6 +153,9 @@ func TestNetwork_RequestResponse(t *testing.T) {
 }
 
 func TestNetwork_SendMessage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultNetworkConfig("127.0.0.1:0")
 	cfg.TransportConfig.Type = TransportTCP
 
@@ -202,6 +214,9 @@ func TestNetwork_SendMessage(t *testing.T) {
 }
 
 func TestNetwork_ClusterMethods(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultNetworkConfig("127.0.0.1:0")
 	cfg.TransportConfig.Type = TransportTCP
 

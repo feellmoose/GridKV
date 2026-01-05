@@ -62,6 +62,41 @@ func main() {
 go test -bench=. ./tests/
 ```
 
+### 集成测试配置
+
+集成测试和基准测试可以通过环境变量配置，以适应不同机器规格：
+
+#### 内存配置
+- `TEST_MAX_MEMORY_MB`: 默认每个节点的内存 (默认: 1024MB)
+- `BENCH_MAX_MEMORY_MB`: 基准测试每个节点的内存 (默认: 256MB)
+- `INTEGRATION_MAX_MEMORY_MB`: 集成测试每个节点的内存 (默认: 512MB)
+
+#### 集群配置
+- `TEST_NODE_COUNT`: 测试节点数量 (默认: 100)
+- `BENCH_NODE_COUNT`: 基准测试节点数量 (默认: 50)
+- `INTEGRATION_LARGE_CLUSTER_THRESHOLD`: 大集群阈值 (默认: 100)
+
+#### 性能调优
+- `INTEGRATION_CONCURRENCY`: 测试并发级别 (默认: 根据测试而异)
+- `INTEGRATION_TEST_DURATION`: 测试持续时间 (默认: 5s)
+- `BENCH_REPLICA_COUNT`: 基准测试复制因子 (默认: 3)
+
+使用示例：
+```bash
+# 低内存机器 (8GB RAM)
+export TEST_MAX_MEMORY_MB=256
+export BENCH_MAX_MEMORY_MB=128
+export TEST_NODE_COUNT=20
+
+# 高性能机器 (64GB RAM)
+export TEST_MAX_MEMORY_MB=4096
+export BENCH_MAX_MEMORY_MB=2048
+export TEST_NODE_COUNT=200
+export INTEGRATION_CONCURRENCY=100
+
+go test -v -short ./...
+```
+
 ## 许可证
 
 MIT License - 查看 [LICENSE](LICENSE) 获取详情

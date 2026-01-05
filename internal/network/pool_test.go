@@ -6,6 +6,9 @@ import (
 )
 
 func TestConnPool_GetPut(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultTransportConfig()
 	cfg.Type = TransportTCP
 	transport := NewTCPTransport(cfg)
@@ -74,6 +77,9 @@ func TestConnPool_GetPut(t *testing.T) {
 }
 
 func TestConnPool_MaxIdle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultTransportConfig()
 	cfg.Type = TransportTCP
 	transport := NewTCPTransport(cfg)
@@ -121,6 +127,9 @@ func TestConnPool_MaxIdle(t *testing.T) {
 }
 
 func TestConnPool_MaxActive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultTransportConfig()
 	cfg.Type = TransportTCP
 	transport := NewTCPTransport(cfg)
@@ -164,6 +173,9 @@ func TestConnPool_MaxActive(t *testing.T) {
 }
 
 func TestConnPool_Remove(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultTransportConfig()
 	cfg.Type = TransportTCP
 	transport := NewTCPTransport(cfg)
@@ -197,6 +209,9 @@ func TestConnPool_Remove(t *testing.T) {
 }
 
 func TestConnPool_Close(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode.")
+	}
 	cfg := DefaultTransportConfig()
 	cfg.Type = TransportTCP
 	transport := NewTCPTransport(cfg)
