@@ -19,23 +19,34 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.25'
+        go-version: '1.21'
         cache: true
 
-    - name: Get dependencies
-      run: go mod download
-
-    - name: Run tests
-      run: go test -v -timeout=10m ./... 2>&1 | tee test-output.txt
-
-    - name: Run linter
-      uses: golangci/golangci-lint-action@v3
-      with:
-        version: latest
-        args: --timeout=5m
-
-    - name: Check formatting
+    - name: Verify Go setup and download dependencies
       run: |
+        go version
+        go env
+        go mod download
+
+    - name: Run tests with QUIC setup
+      run: |
+        # Setup UDP buffers for QUIC tests
+        sudo sysctl -w net.core.rmem_max=8388608
+        sudo sysctl -w net.core.wmem_max=8388608
+
+        # Run tests
+        set -o pipefail
+        go test -v -timeout=10m ./... 2>&1 | tee test-output.txt
+
+    - name: Code quality checks
+      run: |
+        # Install golangci-lint
+        go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+        # Run linter
+        golangci-lint run --timeout=5m
+
+        # Check formatting
         if [ -n "$(gofmt -s -l .)" ]; then
           echo "Code needs formatting:"
           gofmt -s -l .
@@ -45,28 +56,36 @@ jobs:
     - name: Test summary
       if: always()
       run: |
+        echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        TOTAL=$(grep -c "^=== RUN" test-output.txt || echo "0")
         PASSED=$(grep -c "^--- PASS" test-output.txt || echo "0")
         FAILED=$(grep -c "^--- FAIL" test-output.txt || echo "0")
-        TOTAL=$((PASSED + FAILED))
 
-        echo "## Test Results" >> $GITHUB_STEP_SUMMARY
-        echo "- **Total:** $TOTAL tests" >> $GITHUB_STEP_SUMMARY
-        echo "- **Passed:** $PASSED" >> $GITHUB_STEP_SUMMARY
-        echo "- **Failed:** $FAILED" >> $GITHUB_STEP_SUMMARY
+        echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Total Tests | $TOTAL |" >> $GITHUB_STEP_SUMMARY
+        echo "| Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
+        echo "| Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
 
         if [ "$FAILED" -eq 0 ]; then
-          echo "**All tests passed!**" >> $GITHUB_STEP_SUMMARY
+          echo "All tests passed!" >> $GITHUB_STEP_SUMMARY
         else
-          echo "**$FAILED test(s) failed**" >> $GITHUB_STEP_SUMMARY
+          echo "$FAILED test(s) failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Failed Tests" >> $GITHUB_STEP_SUMMARY
+          grep "^--- FAIL" test-output.txt >> $GITHUB_STEP_SUMMARY || true
         fi
 
     - name: Upload test output
-      if: always()
+      if: failure()
       uses: actions/upload-artifact@v4
       with:
-        name: test-results
+        name: test-results-${{ github.run_number }}
         path: test-output.txt
-        retention-days: 30
+        retention-days: 7
 
   build:
     name: Build
@@ -83,7 +102,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.25'
+        go-version: '1.21'
         cache: true
 
     - name: Build
