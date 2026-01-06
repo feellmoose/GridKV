@@ -265,8 +265,8 @@ func (e *Exec) Stop(timeout time.Duration) error {
 		return nil
 	}
 
-	close(e.stop)
 	close(e.tasks)
+	close(e.stop)
 
 	done := make(chan struct{})
 	go func() {
@@ -338,16 +338,12 @@ func (e *Exec) startWorker() {
 				return
 			}
 
-			select {
-			case task, ok := <-e.tasks:
-				if !ok {
-					return
-				}
-				if task != nil {
-					e.run(task)
-				}
-			case <-e.stop:
+			task, ok := <-e.tasks
+			if !ok {
 				return
+			}
+			if task != nil {
+				e.run(task)
 			}
 		}
 	}()
