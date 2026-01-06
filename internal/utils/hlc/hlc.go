@@ -16,7 +16,6 @@ package hlc
 
 import (
 	"fmt"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -25,11 +24,6 @@ import (
 // physical time with a logical counter to ensure causally ordered timestamps across nodes.
 //
 // Format: <nodeID>:<unixnano>:<counter>
-//
-// This implementation is optimized for performance:
-//   - Pre-allocated buffers for string formatting
-//   - Cached timestamp to reduce allocations by 70-90%
-//   - Fast integer-to-string conversion without allocations
 type HLC struct {
 	mu      sync.Mutex
 	lastTs  int64
@@ -64,7 +58,7 @@ func NewHLC(nodeID string) *HLC {
 // If physical time has advanced, the counter resets to 0.
 // If physical time is the same, the counter increments.
 //
-// This method is thread-safe and optimized to reduce allocations.
+// This method is thread-safe.
 //
 // Returns:
 //   - string: HLC timestamp in format "nodeID:timestamp:counter"
@@ -76,18 +70,16 @@ func (h *HLC) Now() string {
 	if now > h.lastTs {
 		h.lastTs = now
 		h.counter = 0
-		h.cacheValid = false // Invalidate cache on timestamp change
+		h.cacheValid = false
 	} else {
 		h.counter++
-		h.cacheValid = false // Invalidate cache on counter increment
+		h.cacheValid = false
 	}
 
-	// Return cached string if still valid (reduces allocations by 70-90%)
 	if h.cacheValid && h.lastTs == h.lastCacheTS && h.counter == h.lastCacheCtr {
 		return h.cachedTS
 	}
 
-	// Reuse buffer to reduce allocations
 	h.buf = h.buf[:0]
 	h.buf = append(h.buf, h.nodeID...)
 	h.buf = append(h.buf, ':')
@@ -95,7 +87,6 @@ func (h *HLC) Now() string {
 	h.buf = append(h.buf, ':')
 	h.buf = AppendInt(h.buf, int64(h.counter))
 
-	// Update cache
 	h.cachedTS = string(h.buf)
 	h.cacheValid = true
 	h.lastCacheTS = h.lastTs
@@ -151,15 +142,16 @@ func AppendInt(buf []byte, i int64) []byte {
 		return append(buf, '0')
 	}
 
-	// Handle negative
 	negative := i < 0
 	if negative {
+		if i == -9223372036854775808 {
+			return append(buf, "-9223372036854775808"...)
+		}
 		i = -i
 		buf = append(buf, '-')
 	}
 
-	// Convert digits
-	var tmp [20]byte // Max int64 is 19 digits
+	var tmp [20]byte
 	idx := 20
 	for i > 0 {
 		idx--
@@ -172,5 +164,17 @@ func AppendInt(buf []byte, i int64) []byte {
 
 // AppendUint is similar to AppendInt but for unsigned integers.
 func AppendUint(buf []byte, u uint64) []byte {
-	return buf[:len(strconv.AppendUint(buf[:cap(buf)], u, 10))]
+	if u == 0 {
+		return append(buf, '0')
+	}
+
+	var tmp [20]byte
+	idx := 20
+	for u > 0 {
+		idx--
+		tmp[idx] = byte('0' + u%10)
+		u /= 10
+	}
+
+	return append(buf, tmp[idx:]...)
 }
