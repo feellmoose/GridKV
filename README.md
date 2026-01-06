@@ -1,9 +1,9 @@
 # GridKV
 
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.24-blue.svg)](https://golang.org/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![GitHub License](https://img.shields.io/github/license/feellmoose/GridKV)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/feellmoose/gridkv)](https://goreportcard.com/report/github.com/feellmoose/gridkv)
-[![Code Quality](https://img.shields.io/badge/code%20quality-production--ready-brightgreen.svg)]()
+[![GitHub Tag](https://img.shields.io/github/v/tag/feellmoose/GridKV)]()
 
 A high-performance distributed key-value cache SDK using memory with eventual consistency guarantees.
 
