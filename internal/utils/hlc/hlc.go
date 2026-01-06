@@ -178,4 +178,3 @@ func AppendUint(buf []byte, u uint64) []byte {
 
 	return append(buf, tmp[idx:]...)
 }
-

@@ -44,7 +44,7 @@ func TestCluster_BasicOperations(t *testing.T) {
 	if err := cluster.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer cluster.Stop(ctx)
+	defer func() { _ = cluster.Stop(ctx) }()
 
 	// Test Set
 	key := "test-key"
@@ -99,7 +99,7 @@ func TestCluster_MemberManagement(t *testing.T) {
 	if err := cluster.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer cluster.Stop(ctx)
+	defer func() { _ = cluster.Stop(ctx) }()
 
 	// Test Members
 	members := cluster.Members()
@@ -159,7 +159,7 @@ func TestCluster_HashRing(t *testing.T) {
 	if err := cluster.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer cluster.Stop(ctx)
+	defer func() { _ = cluster.Stop(ctx) }()
 
 	ring := cluster.HashRing()
 	if ring == nil {
@@ -210,7 +210,7 @@ func TestCluster_BatchOperations(t *testing.T) {
 	if err := cluster.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer cluster.Stop(ctx)
+	defer func() { _ = cluster.Stop(ctx) }()
 
 	// Test batch Set
 	writer := cluster.Writer()
@@ -278,7 +278,7 @@ func TestCluster_ReadRepair(t *testing.T) {
 	if err := cluster.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer cluster.Stop(ctx)
+	defer func() { _ = cluster.Stop(ctx) }()
 
 	reader := cluster.Reader()
 	if reader == nil {
@@ -321,7 +321,7 @@ func TestCluster_ConcurrentWrites(t *testing.T) {
 	if err := cluster.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer cluster.Stop(ctx)
+	defer func() { _ = cluster.Stop(ctx) }()
 
 	// Concurrent writes
 	done := make(chan error, 10)
@@ -381,7 +381,7 @@ func TestCluster_JoinLeave(t *testing.T) {
 	if err := cluster.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer cluster.Stop(ctx)
+	defer func() { _ = cluster.Stop(ctx) }()
 
 	// Test Join (with empty seed, should not error)
 	if err := cluster.Join([]string{}); err != nil {
@@ -420,7 +420,7 @@ func TestCluster_WriteReadFlow(t *testing.T) {
 	if err := cluster.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer cluster.Stop(ctx)
+	defer func() { _ = cluster.Stop(ctx) }()
 
 	// Write sequence
 	keys := []string{"key1", "key2", "key3", "key4", "key5"}
@@ -470,7 +470,7 @@ func TestCluster_UpdateValue(t *testing.T) {
 	if err := cluster.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer cluster.Stop(ctx)
+	defer func() { _ = cluster.Stop(ctx) }()
 
 	key := "update-key"
 
@@ -517,7 +517,7 @@ func TestCluster_EmptyOperations(t *testing.T) {
 	if err := cluster.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer cluster.Stop(ctx)
+	defer func() { _ = cluster.Stop(ctx) }()
 
 	// Get non-existent key
 	got, err := cluster.Get(ctx, "non-existent")
@@ -557,7 +557,7 @@ func TestCluster_ComponentAccess(t *testing.T) {
 	if err := cluster.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer cluster.Stop(ctx)
+	defer func() { _ = cluster.Stop(ctx) }()
 
 	// Test component accessors
 	if cluster.MemberMgr() == nil {

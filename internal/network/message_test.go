@@ -147,7 +147,7 @@ func TestSimpleRouter_Unregister(t *testing.T) {
 	}
 
 	msgType := MessageTypeRequest
-	router.Register(msgType, handler)
+	_ = router.Register(msgType, handler)
 
 	if err := router.Unregister(msgType); err != nil {
 		t.Fatalf("Unregister() error = %v", err)
@@ -176,7 +176,7 @@ func TestSimpleRouter_OneWay(t *testing.T) {
 	}
 
 	msgType := MessageTypeOneWay
-	router.Register(msgType, handler)
+	_ = router.Register(msgType, handler)
 
 	msg := &Message{
 		Type:      msgType,
@@ -197,4 +197,3 @@ func TestSimpleRouter_OneWay(t *testing.T) {
 		t.Error("Handler was not called")
 	}
 }
-

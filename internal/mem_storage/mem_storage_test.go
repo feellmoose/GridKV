@@ -104,7 +104,7 @@ func TestMemStorage_Delete(t *testing.T) {
 	}
 
 	// Set and delete
-	s.Set("key1", item)
+	_ = s.Set("key1", item)
 	err := s.Delete("key1", 100)
 	if err != nil {
 		t.Fatalf("Delete() error = %v", err)
@@ -126,7 +126,7 @@ func TestMemStorage_DeleteVersionMismatch(t *testing.T) {
 		Value:   []byte("test"),
 	}
 
-	s.Set("key1", item)
+	_ = s.Set("key1", item)
 
 	// Try delete with older version
 	err := s.Delete("key1", 100)
@@ -150,14 +150,14 @@ func TestMemStorage_ConflictResolution(t *testing.T) {
 		Version: 100,
 		Value:   []byte("old value"),
 	}
-	s.Set("key1", item1)
+	_ = s.Set("key1", item1)
 
 	// Set newer version (should win)
 	item2 := &StoredItem{
 		Version: 200,
 		Value:   []byte("new value"),
 	}
-	s.Set("key1", item2)
+	_ = s.Set("key1", item2)
 
 	retrieved, _ := s.Get("key1")
 	if retrieved.Version != 200 {
@@ -172,7 +172,7 @@ func TestMemStorage_ConflictResolution(t *testing.T) {
 		Version: 150,
 		Value:   []byte("older value"),
 	}
-	s.Set("key1", item3)
+	_ = s.Set("key1", item3)
 
 	retrieved, _ = s.Get("key1")
 	if retrieved.Version != 200 {
@@ -190,7 +190,7 @@ func TestMemStorage_ConflictResolutionSameVersion(t *testing.T) {
 		Value:    []byte("value1"),
 		ExpireAt: now.Add(time.Hour),
 	}
-	s.Set("key1", item1)
+	_ = s.Set("key1", item1)
 
 	// Same version, but expired (should prefer non-expired)
 	item2 := &StoredItem{
@@ -198,7 +198,7 @@ func TestMemStorage_ConflictResolutionSameVersion(t *testing.T) {
 		Value:    []byte("value2"),
 		ExpireAt: now.Add(-time.Hour), // Expired
 	}
-	s.Set("key1", item2)
+	_ = s.Set("key1", item2)
 
 	retrieved, err := s.Get("key1")
 	if err != nil {
@@ -220,7 +220,7 @@ func TestMemStorage_Expiration(t *testing.T) {
 		ExpireAt: time.Now().Add(-time.Second), // Already expired
 	}
 
-	s.Set("key1", item)
+	_ = s.Set("key1", item)
 
 	// Should be expired
 	_, err := s.Get("key1")
@@ -239,7 +239,7 @@ func TestMemStorage_NoExpiration(t *testing.T) {
 		// No ExpireAt (zero value)
 	}
 
-	s.Set("key1", item)
+	_ = s.Set("key1", item)
 
 	// Should not be expired
 	retrieved, err := s.Get("key1")
@@ -307,7 +307,7 @@ func TestMemStorage_CompressionDisabled(t *testing.T) {
 		Value:   largeValue,
 	}
 
-	s.Set("key1", item)
+	_ = s.Set("key1", item)
 	retrieved, _ := s.Get("key1")
 
 	if len(retrieved.Value) != len(largeValue) {
@@ -329,7 +329,7 @@ func TestMemStorage_CompressionThreshold(t *testing.T) {
 		Version: time.Now().UnixNano(),
 		Value:   smallValue,
 	}
-	s.Set("key1", item1)
+	_ = s.Set("key1", item1)
 
 	// Large value (above threshold)
 	largeValue := make([]byte, 500)
@@ -337,7 +337,7 @@ func TestMemStorage_CompressionThreshold(t *testing.T) {
 		Version: time.Now().UnixNano(),
 		Value:   largeValue,
 	}
-	s.Set("key2", item2)
+	_ = s.Set("key2", item2)
 
 	// Both should work
 	_, err1 := s.Get("key1")
@@ -357,7 +357,7 @@ func TestMemStorage_BatchGet(t *testing.T) {
 			Version: int64(i),
 			Value:   []byte("value"),
 		}
-		s.Set("key"+string(rune('0'+i)), item)
+		_ = s.Set("key"+string(rune('0'+i)), item)
 	}
 
 	// Batch get
@@ -390,7 +390,7 @@ func TestMemStorage_BatchGetNoCopy(t *testing.T) {
 		Version: 100,
 		Value:   []byte("test"),
 	}
-	s.Set("key1", item)
+	_ = s.Set("key1", item)
 
 	results, err := s.BatchGetNoCopy([]string{"key1"})
 	if err != nil {
@@ -441,7 +441,7 @@ func TestMemStorage_GetNoCopy(t *testing.T) {
 		Version: 100,
 		Value:   []byte("test"),
 	}
-	s.Set("key1", item)
+	_ = s.Set("key1", item)
 
 	retrieved, err := s.GetNoCopy("key1")
 	if err != nil {
@@ -455,9 +455,9 @@ func TestMemStorage_GetNoCopy(t *testing.T) {
 
 func TestMemStorage_MemoryLimit(t *testing.T) {
 	config := DefaultConfig()
-	config.MaxMemoryMB = 1 // 1MB limit
+	config.MaxMemoryMB = 1            // 1MB limit
 	config.CompressionEnabled = false // Disable compression for predictable size
-	config.EvictThreshold = 100 // Disable eviction for this test
+	config.EvictThreshold = 100       // Disable eviction for this test
 
 	s, _ := New(config)
 	defer s.Close()
@@ -622,7 +622,7 @@ func TestMemStorage_Keys(t *testing.T) {
 			Version: time.Now().UnixNano(),
 			Value:   []byte("value"),
 		}
-		s.Set(key, item)
+		_ = s.Set(key, item)
 	}
 
 	retrievedKeys := s.Keys()
@@ -653,7 +653,7 @@ func TestMemStorage_Clear(t *testing.T) {
 			Version: int64(i),
 			Value:   []byte("value"),
 		}
-		s.Set("key"+string(rune(i)), item)
+		_ = s.Set("key"+string(rune(i)), item)
 	}
 
 	// Clear
@@ -684,7 +684,7 @@ func TestMemStorage_GetSyncBuffer(t *testing.T) {
 			Version: int64(i),
 			Value:   []byte("value"),
 		}
-		s.Set("key"+string(rune(i)), item)
+		_ = s.Set("key"+string(rune(i)), item)
 	}
 
 	ops, err := s.GetSyncBuffer()
@@ -725,7 +725,7 @@ func TestMemStorage_Stats(t *testing.T) {
 			Version: int64(i),
 			Value:   make([]byte, 100),
 		}
-		s.Set("key"+string(rune(i)), item)
+		_ = s.Set("key"+string(rune(i)), item)
 	}
 
 	stats = s.Stats()
@@ -762,7 +762,7 @@ func TestMemStorage_CompressionStats(t *testing.T) {
 		Version: time.Now().UnixNano(),
 		Value:   largeValue,
 	}
-	s.Set("key1", item)
+	_ = s.Set("key1", item)
 
 	stats := s.Stats()
 	if stats.OriginalBytes == 0 {
@@ -790,14 +790,14 @@ func TestMemStorage_HitRate(t *testing.T) {
 		Version: 100,
 		Value:   []byte("test"),
 	}
-	s.Set("key1", item)
+	_ = s.Set("key1", item)
 
 	// Read existing key
-	s.Get("key1")
-	s.Get("key1")
+	_, _ = s.Get("key1")
+	_, _ = s.Get("key1")
 
 	// Read non-existent key
-	s.Get("key2")
+	_, _ = s.Get("key2")
 
 	stats := s.Stats()
 	if stats.HitRate <= 0 || stats.HitRate > 1 {
@@ -822,7 +822,7 @@ func TestMemStorage_Close(t *testing.T) {
 			Version: int64(i),
 			Value:   []byte("value"),
 		}
-		s.Set("key"+string(rune(i)), item)
+		_ = s.Set("key"+string(rune(i)), item)
 	}
 
 	// Close
@@ -899,7 +899,7 @@ func BenchmarkMemStorage_Get(b *testing.B) {
 
 	// Pre-populate
 	for i := 0; i < 1000; i++ {
-		s.Set("key"+string(rune(i)), item)
+		_ = s.Set("key"+string(rune(i)), item)
 	}
 
 	b.ResetTimer()
@@ -940,7 +940,7 @@ func BenchmarkMemStorage_BatchGet(b *testing.B) {
 			Version: int64(i),
 			Value:   []byte("value"),
 		}
-		s.Set("key"+string(rune(i)), item)
+		_ = s.Set("key"+string(rune(i)), item)
 	}
 
 	keys := make([]string, 100)
@@ -974,4 +974,3 @@ func BenchmarkMemStorage_Compression(b *testing.B) {
 		_ = s.Set("key"+string(rune(i%1000)), item)
 	}
 }
-

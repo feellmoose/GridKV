@@ -245,4 +245,3 @@ func TestConnPool_Close(t *testing.T) {
 		t.Errorf("Stats() after Close() = %+v, want all zeros", stats)
 	}
 }
-

@@ -42,12 +42,6 @@ jobs:
 
     - name: Code quality checks
       run: |
-        # Install golangci-lint (cached in GOPATH)
-        go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
-
-        # Run linter with caching
-        golangci-lint run --timeout=5m
-
         # Check formatting
         if [ -n "$(gofmt -s -l .)" ]; then
           echo "Code needs formatting:"

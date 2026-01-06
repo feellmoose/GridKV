@@ -163,8 +163,8 @@ func (t *tcpTransport) Dial(ctx context.Context, address string) (Conn, error) {
 		return nil, fmt.Errorf("dial %s failed (timeout=%v): %w", address, timeout, err)
 	}
 	if tc, ok := raw.(*net.TCPConn); ok && t.cfg.KeepAlive {
-		tc.SetKeepAlive(true)
-		tc.SetKeepAlivePeriod(t.cfg.KeepAliveInterval)
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(t.cfg.KeepAliveInterval)
 	}
 	return &tcpConn{conn: raw, cfg: t.cfg}, nil
 }
@@ -392,7 +392,7 @@ func (t *quicTransport) Dial(ctx context.Context, address string) (Conn, error) 
 	}
 	stream, err := session.OpenStreamSync(ctx)
 	if err != nil {
-		session.CloseWithError(0, "stream open failed")
+		_ = session.CloseWithError(0, "stream open failed")
 		return nil, fmt.Errorf("quic stream open failed: %w", err)
 	}
 	return &quicConn{session: session, stream: stream, cfg: t.cfg}, nil
@@ -499,7 +499,7 @@ func (l *quicListener) Accept(ctx context.Context) (Conn, error) {
 	}
 	stream, err := sess.AcceptStream(ctx)
 	if err != nil {
-		sess.CloseWithError(0, "stream accept failed")
+		_ = sess.CloseWithError(0, "stream accept failed")
 		return nil, fmt.Errorf("accept stream: %w", err)
 	}
 	return &quicConn{session: sess, stream: stream, cfg: l.cfg}, nil

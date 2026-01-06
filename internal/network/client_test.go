@@ -88,7 +88,7 @@ func TestNetworkClient_SendWithTimeout(t *testing.T) {
 	go func() {
 		conn, _ := ln.Accept(ctx)
 		if conn != nil {
-			conn.Receive(ctx)
+			_, _ = conn.Receive(ctx)
 			conn.Close()
 		}
 	}()
@@ -131,7 +131,7 @@ func TestNetworkClient_Request(t *testing.T) {
 		conn, _ := ln.Accept(ctx)
 		if conn != nil {
 			req, _ := conn.Receive(ctx)
-			conn.Send(ctx, append([]byte("echo: "), req...))
+			_ = conn.Send(ctx, append([]byte("echo: "), req...))
 			conn.Close()
 		}
 	}()
@@ -244,7 +244,7 @@ func TestNetworkClient_RequestTimeout(t *testing.T) {
 	go func() {
 		conn, _ := ln.Accept(ctx)
 		if conn != nil {
-			conn.Receive(ctx)
+			_, _ = conn.Receive(ctx)
 			// don't send response
 			time.Sleep(2 * time.Second)
 			conn.Close()
@@ -258,4 +258,3 @@ func TestNetworkClient_RequestTimeout(t *testing.T) {
 		t.Error("Request() expected timeout error")
 	}
 }
-

@@ -260,7 +260,7 @@ func (w *writer) triggerBatch() {
 	if int(count) >= w.batchThreshold {
 		// Use CAS to avoid duplicate flush calls
 		if w.flushPending.CompareAndSwap(false, true) {
-			w.executor.Do(func() {
+			_ = w.executor.Do(func() {
 				w.flush()
 				w.flushPending.Store(false)
 			})
@@ -297,7 +297,7 @@ func (w *writer) flushLoop() {
 		case <-w.flushTimer.C:
 			// Use CAS to avoid duplicate flush calls
 			if w.flushPending.CompareAndSwap(false, true) {
-				w.executor.Do(func() {
+				_ = w.executor.Do(func() {
 					w.flush()
 					w.flushPending.Store(false)
 				})
@@ -432,7 +432,7 @@ func (w *writer) flushInternal() {
 			// Capture variables for goroutine
 			ops := targetOps
 			addr := targetAddr
-			w.executor.Do(func() {
+			_ = w.executor.Do(func() {
 				data, err := SerializeSyncOps(ops)
 				if err != nil {
 					return
@@ -449,7 +449,7 @@ func (w *writer) flushInternal() {
 				}
 				ops := targetOps
 				addr := targetAddr
-				w.executor.Do(func() {
+				_ = w.executor.Do(func() {
 					_ = w.gossip.Push(ops, []string{addr})
 				})
 			}

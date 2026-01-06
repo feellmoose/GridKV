@@ -15,33 +15,33 @@ func TestStoredItem_ResolveConflict(t *testing.T) {
 		expected bool
 	}{
 		{
-			name: "higher version wins",
-			item: &StoredItem{Version: 100},
-			other: &StoredItem{Version: 200},
+			name:     "higher version wins",
+			item:     &StoredItem{Version: 100},
+			other:    &StoredItem{Version: 200},
 			expected: true,
 		},
 		{
-			name: "lower version loses",
-			item: &StoredItem{Version: 200},
-			other: &StoredItem{Version: 100},
+			name:     "lower version loses",
+			item:     &StoredItem{Version: 200},
+			other:    &StoredItem{Version: 100},
 			expected: false,
 		},
 		{
-			name: "same version, prefer non-expired",
-			item: &StoredItem{Version: 100, ExpireAt: now.Add(time.Hour)},
-			other: &StoredItem{Version: 100, ExpireAt: now.Add(-time.Hour)},
+			name:     "same version, prefer non-expired",
+			item:     &StoredItem{Version: 100, ExpireAt: now.Add(time.Hour)},
+			other:    &StoredItem{Version: 100, ExpireAt: now.Add(-time.Hour)},
 			expected: false,
 		},
 		{
-			name: "same version, prefer non-expired (reversed)",
-			item: &StoredItem{Version: 100, ExpireAt: now.Add(-time.Hour)},
-			other: &StoredItem{Version: 100, ExpireAt: now.Add(time.Hour)},
+			name:     "same version, prefer non-expired (reversed)",
+			item:     &StoredItem{Version: 100, ExpireAt: now.Add(-time.Hour)},
+			other:    &StoredItem{Version: 100, ExpireAt: now.Add(time.Hour)},
 			expected: true,
 		},
 		{
-			name: "nil other returns false",
-			item: &StoredItem{Version: 100},
-			other: nil,
+			name:     "nil other returns false",
+			item:     &StoredItem{Version: 100},
+			other:    nil,
 			expected: false,
 		},
 	}
@@ -292,4 +292,3 @@ func TestStoredItem_Clone(t *testing.T) {
 		t.Error("Clone() should create independent copy")
 	}
 }
-

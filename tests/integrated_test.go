@@ -36,28 +36,6 @@ func generateTestKeys(prefix string, count int, rng *rand.Rand) []string {
 
 // generateTestKeysSimple generates keys with controlled distribution for testing
 // distributionFactor: 0.0 = all local, 1.0 = fully distributed, 0.5 = balanced
-func generateTestKeysSimple(prefix string, count int, distributionFactor float64, rng *rand.Rand) []string {
-	keys := make([]string, count)
-
-	// For controlled distribution, use a fixed timestamp to make keys more predictable
-	baseTimestamp := int64(1000000000) // Fixed base to ensure consistent distribution
-
-	for i := 0; i < count; i++ {
-		// Control distribution by adjusting the key pattern
-		if distributionFactor < 0.5 {
-			// Favor local distribution - use smaller variation
-			keyNum := int64(i % 10) // Limit variation
-			randomStr := "local"
-			keys[i] = fmt.Sprintf("%s-%d-%s", prefix, baseTimestamp+keyNum, randomStr)
-		} else {
-			// Favor distributed - use timestamp + random for better hash spread
-			randomStr := fmt.Sprintf("%x", rng.Uint64())[:8]
-			keys[i] = fmt.Sprintf("%s-%d-%s", prefix, baseTimestamp+int64(i), randomStr)
-		}
-	}
-
-	return keys
-}
 
 /*
 Integration Test Categories:
@@ -807,10 +785,7 @@ func TestIntegrated_HashRingDistribution(t *testing.T) {
 	for i := 0; i < sampleSize; i++ {
 		key := keys[i]
 		_, err := clientNode.Get(ctx, key)
-		if err == nil {
-			// We can't easily distinguish local vs remote without instrumentation
-			// But we can check if all operations succeed
-		}
+		_ = err // We can't easily distinguish local vs remote without instrumentation
 	}
 
 	elapsed := time.Since(startTime)

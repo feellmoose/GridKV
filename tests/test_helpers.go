@@ -34,100 +34,15 @@ func TestMain(m *testing.M) {
 
 func randomValue(n int) []byte {
 	b := make([]byte, n)
-	cryptorand.Read(b)
+	_, _ = cryptorand.Read(b)
 	return b
 }
 
 var _ = randomValue
 
-func calculatePercentiles(latencies []time.Duration) (p50, p95, p99 time.Duration) {
-	n := len(latencies)
-	if n == 0 {
-		return 0, 0, 0
-	}
-
-	sort.Slice(latencies, func(i, j int) bool {
-		return latencies[i] < latencies[j]
-	})
-
-	p50 = latencies[n*50/100]
-	p95 = latencies[n*95/100]
-	p99 = latencies[n*99/100]
-	return
-}
-
 // countLiveNodes counts the number of live/healthy nodes in the cluster
-func countLiveNodes(nodes []*gridkv.GridKV) int {
-	if len(nodes) == 0 {
-		return 0
-	}
-
-	// Sample a few nodes to estimate cluster health
-	sampleCount := 5
-	if sampleCount > len(nodes) {
-		sampleCount = len(nodes)
-	}
-	sampleIndices := make([]int, 0, sampleCount)
-	for i := 0; i < len(nodes) && len(sampleIndices) < sampleCount; i++ {
-		if nodes[i] != nil {
-			sampleIndices = append(sampleIndices, i)
-		}
-	}
-
-	if len(sampleIndices) == 0 {
-		return 0
-	}
-
-	totalHealthy := 0
-	for _, idx := range sampleIndices {
-		status := nodes[idx].GetReplicaStatus()
-		if status.Ready && status.HealthyNodes > 0 {
-			totalHealthy += status.HealthyNodes
-		}
-	}
-
-	if totalHealthy == 0 {
-		return 0
-	}
-
-	// Return average healthy nodes across samples
-	return totalHealthy / len(sampleIndices)
-}
 
 // networkTypeString converts network type to string for logging
-func networkTypeString(nt gridkv.NetworkType) string {
-	switch nt {
-	case gridkv.TCP:
-		return "TCP"
-	case gridkv.QUIC:
-		return "QUIC"
-	default:
-		return fmt.Sprintf("unknown(%d)", nt)
-	}
-}
-
-// checkNodeNetworkHealth performs basic network connectivity check for a node
-func checkNodeNetworkHealth(address string) error {
-	// Try to establish a brief TCP connection to verify node is listening
-	conn, err := net.DialTimeout("tcp", address, 1*time.Second)
-	if err != nil {
-		return fmt.Errorf("network health check failed for %s: %w", address, err)
-	}
-	conn.Close()
-	return nil
-}
-
-// waitForNodeNetworkReady waits for a node's network endpoint to be ready
-func waitForNodeNetworkReady(address string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if err := checkNodeNetworkHealth(address); err == nil {
-			return nil // Node is network ready
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return fmt.Errorf("node %s network not ready within %v", address, timeout)
-}
 
 // networkTypeFromEnv allows overriding the default network type via GRIDKV_NETWORK env
 func networkTypeFromEnv(defaultType gridkv.NetworkType) gridkv.NetworkType {
@@ -146,11 +61,6 @@ func networkTypeFromEnv(defaultType gridkv.NetworkType) gridkv.NetworkType {
 
 // skipHeavyTests skips long-running suites when -short flag is set.
 // Run tests without -short flag to execute heavy tests.
-func skipHeavyTests(t *testing.T, reason string) {
-	if testing.Short() {
-		t.Skip(reason)
-	}
-}
 
 // NetworkProfile defines network latency and reliability characteristics for testing
 type NetworkProfile int
@@ -497,8 +407,8 @@ func (tes *TestEnvironmentSimulator) SetupCluster(tb testing.TB) error {
 
 	// Wait for seed node to be fully ready before creating other nodes
 	tb.Logf("Waiting for seed node to be ready...")
-	if err := tes.nodes[0].WaitReady(10 * time.Second); err != nil {
-		return fmt.Errorf("seed node not ready: %w", err)
+	if readyErr := tes.nodes[0].WaitReady(10 * time.Second); readyErr != nil {
+		return fmt.Errorf("seed node not ready: %w", readyErr)
 	}
 	tb.Logf("Seed node ready, creating other nodes...")
 
@@ -524,7 +434,7 @@ func (tes *TestEnvironmentSimulator) SetupCluster(tb testing.TB) error {
 	used.Store(seedPort, true)
 
 	// Determine concurrency limit based on cluster size
-	maxConcurrency := runtime.NumCPU() * 2
+	var maxConcurrency int
 	if tes.config.NodeCount < 20 {
 		maxConcurrency = tes.config.NodeCount - 1 // For small clusters, create all concurrently
 	} else if tes.config.NodeCount < 100 {
@@ -1600,7 +1510,7 @@ func generateRandomValue(rng *rand.Rand, targetAvgSize int, sizeRange float64) [
 	}
 	size := minSize + rng.Intn(maxSize-minSize+1)
 	value := make([]byte, size)
-	cryptorand.Read(value)
+	_, _ = cryptorand.Read(value)
 	return value
 }
 
@@ -1631,7 +1541,7 @@ func SeedData(tb testing.TB, nodes []*gridkv.GridKV, keyCount int, valueSize int
 				defer wg.Done()
 				key := fmt.Sprintf("seed-key-%d", idx)
 				value := make([]byte, valueSize)
-				cryptorand.Read(value)
+				_, _ = cryptorand.Read(value)
 
 				nodeIdx := idx % len(nodes)
 				if err := nodes[nodeIdx].Set(ctx, key, value); err == nil {
@@ -1810,14 +1720,6 @@ func PrintStats(tb testing.TB, stats *WorkloadStats, testName string) {
 }
 
 // workloadDelays returns delays for writers, readers, and deleters
-func workloadDelays() (time.Duration, time.Duration, time.Duration) {
-	// Check if throttling is disabled for performance tests
-	if os.Getenv("GRIDKV_NO_THROTTLE") == "1" {
-		return 0, 0, 0
-	}
-	// Production-grade throttling: prevent overload while allowing high throughput
-	return 100 * time.Microsecond, 50 * time.Microsecond, 200 * time.Microsecond
-}
 
 // ThroughputSnapshot captures throughput at a point in time
 type ThroughputSnapshot struct {

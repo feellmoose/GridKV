@@ -198,7 +198,9 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 
 	c, err := cluster.New(clusterConfig)
 	if err != nil {
-		net.Stop(context.Background())
+		if stopErr := net.Stop(context.Background()); stopErr != nil {
+			logging.Warn("failed to stop network during cleanup", "error", stopErr)
+		}
 		store.Close()
 		return nil, fmt.Errorf("failed to create cluster: %w", err)
 	}
@@ -206,16 +208,24 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 	// Start cluster
 	ctx := context.Background()
 	if err := c.Start(ctx); err != nil {
-		c.Stop(ctx)
-		net.Stop(ctx)
+		if stopErr := c.Stop(ctx); stopErr != nil {
+			logging.Warn("failed to stop cluster during cleanup", "error", stopErr)
+		}
+		if stopErr := net.Stop(ctx); stopErr != nil {
+			logging.Warn("failed to stop network during cleanup", "error", stopErr)
+		}
 		store.Close()
 		return nil, fmt.Errorf("failed to start cluster: %w", err)
 	}
 
 	// Start network
 	if err := net.Start(ctx); err != nil {
-		c.Stop(ctx)
-		net.Stop(ctx)
+		if stopErr := c.Stop(ctx); stopErr != nil {
+			logging.Warn("failed to stop cluster during cleanup", "error", stopErr)
+		}
+		if stopErr := net.Stop(ctx); stopErr != nil {
+			logging.Warn("failed to stop network during cleanup", "error", stopErr)
+		}
 		store.Close()
 		return nil, fmt.Errorf("failed to start network on %s: %w", bindAddr, err)
 	}

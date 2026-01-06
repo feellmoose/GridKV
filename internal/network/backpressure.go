@@ -6,13 +6,13 @@ import "sync/atomic"
 type BackpressureStatus struct {
 	// Queued is number of queued operations
 	Queued int
-	
+
 	// Capacity is maximum capacity
 	Capacity int
-	
+
 	// Blocked indicates if operations are blocked
 	Blocked bool
-	
+
 	// Rejected is number of rejected operations
 	Rejected uint64
 }
@@ -21,10 +21,10 @@ type BackpressureStatus struct {
 type BackpressureConfig struct {
 	// Threshold is backpressure threshold
 	Threshold int
-	
+
 	// MaxCapacity is maximum capacity
 	MaxCapacity int
-	
+
 	// Strategy is backpressure strategy
 	Strategy BackpressureStrategy
 }
@@ -35,10 +35,10 @@ type BackpressureStrategy string
 const (
 	// StrategyReject rejects new operations when threshold exceeded
 	StrategyReject BackpressureStrategy = "reject"
-	
+
 	// StrategyBlock blocks new operations when threshold exceeded
 	StrategyBlock BackpressureStrategy = "block"
-	
+
 	// StrategyDrop drops oldest operations when threshold exceeded
 	StrategyDrop BackpressureStrategy = "drop"
 )
@@ -46,9 +46,9 @@ const (
 // DefaultBackpressureConfig returns default backpressure config
 func DefaultBackpressureConfig() BackpressureConfig {
 	return BackpressureConfig{
-		Threshold:  1000,
+		Threshold:   1000,
 		MaxCapacity: 10000,
-		Strategy:   StrategyBlock,
+		Strategy:    StrategyBlock,
 	}
 }
 
@@ -115,4 +115,3 @@ func (b *simpleBackpressure) Status() BackpressureStatus {
 		Rejected: atomic.LoadUint64(&b.rejected),
 	}
 }
-

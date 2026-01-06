@@ -98,10 +98,6 @@ func New(opts Opts) *Logger {
 		// For compact, we'll use JSON but could be customized
 		handler = slog.NewJSONHandler(opts.Output, optsHandler)
 	default: // FormatText
-		timeFormat := opts.TimeFormat
-		if timeFormat == "" {
-			timeFormat = "2006-01-02 15:04:05"
-		}
 		optsHandler.ReplaceAttr = func(groups []string, a slog.Attr) slog.Attr {
 			// Custom time format for text output
 			if a.Key == slog.TimeKey {

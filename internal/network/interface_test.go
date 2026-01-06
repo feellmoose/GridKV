@@ -62,7 +62,7 @@ func TestNetwork_SendReceive(t *testing.T) {
 	if err := net.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer net.Stop(ctx)
+	defer func() { _ = net.Stop(ctx) }()
 
 	// register handler
 	received := make(chan []byte, 1)
@@ -125,7 +125,7 @@ func TestNetwork_RequestResponse(t *testing.T) {
 	if err := net.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer net.Stop(ctx)
+	defer func() { _ = net.Stop(ctx) }()
 
 	// register handler
 	handler := func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
@@ -177,7 +177,7 @@ func TestNetwork_SendMessage(t *testing.T) {
 	if err := net.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer net.Stop(ctx)
+	defer func() { _ = net.Stop(ctx) }()
 
 	received := make(chan []byte, 1)
 	handler := func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
@@ -238,7 +238,7 @@ func TestNetwork_ClusterMethods(t *testing.T) {
 	if err := net.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer net.Stop(ctx)
+	defer func() { _ = net.Stop(ctx) }()
 
 	// test SendFunc
 	sendFunc := net.SendFunc()

@@ -141,7 +141,6 @@ func reportMetrics(b *testing.B, metrics *PerformanceMetrics, profile OperationP
 var (
 	sharedBenchCluster     *TestEnvironmentSimulator
 	sharedBenchClusterOnce sync.Once
-	sharedBenchClusterMu   sync.RWMutex
 )
 
 // getSharedBenchCluster returns a shared cluster for benchmarks
@@ -174,25 +173,6 @@ func getSharedBenchCluster(b *testing.B) *TestEnvironmentSimulator {
 }
 
 // getLargeBenchCluster returns a large cluster for benchmarks
-func getLargeBenchCluster(b *testing.B) *TestEnvironmentSimulator {
-	if testing.Short() {
-		b.Skip("Skipping large cluster benchmark in short mode")
-	}
-	config := &TestEnvironmentConfig{
-		NetworkProfile: ProfileLAN,
-		NetworkType:    networkTypeFromEnv(gridkv.TCP),
-		NodeCount:      1000,
-		ReplicaCount:   5,
-		BasePort:       27000,
-		MaxMemoryMB:    2048,
-		ShardCount:     256,
-	}
-	sim := NewTestEnvironmentSimulator(config)
-	if err := sim.SetupClusterOptimized(b); err != nil {
-		b.Fatalf("Failed to setup large cluster: %v", err)
-	}
-	return sim
-}
 
 // BenchmarkMixedOpsQPS benchmarks mixed operations with configurable ratios
 func BenchmarkMixedOpsQPS(b *testing.B) {
@@ -231,7 +211,7 @@ func benchmarkMixedOpsWithProfile(b *testing.B, profile OperationProfile, profil
 	for i := 0; i < readKeysCount; i++ {
 		key := fmt.Sprintf("read-key-%d", i)
 		value := make([]byte, 256)
-		cryptorand.Read(value)
+		_, _ = cryptorand.Read(value)
 		if err := testNode.Set(ctx, key, value); err == nil {
 			readKeys = append(readKeys, key)
 		}
@@ -271,7 +251,7 @@ func benchmarkMixedOpsWithProfile(b *testing.B, profile OperationProfile, profil
 					keyIdx := keyGen.Add(1)
 					key := fmt.Sprintf("mixed-write-%d", keyIdx)
 					value := make([]byte, 256)
-					cryptorand.Read(value)
+					_, _ = cryptorand.Read(value)
 					if err := testNode.Set(ctx, key, value); err == nil {
 						writtenKeysMu.Lock()
 						writtenKeys[key] = true
@@ -373,7 +353,7 @@ func benchmarkClusterMixedOps(b *testing.B, profile OperationProfile, profileNam
 	for i := 0; i < readKeysCount; i++ {
 		key := fmt.Sprintf("read-key-%d", i)
 		value := make([]byte, 1024)
-		cryptorand.Read(value)
+		_, _ = cryptorand.Read(value)
 		if err := testNode.Set(ctx, key, value); err == nil {
 			readKeys = append(readKeys, key)
 		}
@@ -414,7 +394,7 @@ func benchmarkClusterMixedOps(b *testing.B, profile OperationProfile, profileNam
 					keyIdx := keyGen.Add(1)
 					key := fmt.Sprintf("cluster-mixed-write-%d-%d", clientID, keyIdx)
 					value := make([]byte, 1024)
-					cryptorand.Read(value)
+					_, _ = cryptorand.Read(value)
 					if err := node.Set(ctx, key, value); err == nil {
 						writtenKeysMu.Lock()
 						writtenKeys[clientID][key] = true
@@ -524,7 +504,7 @@ func benchmarkConcurrentStressWithProfile(b *testing.B, profile OperationProfile
 	for i := 0; i < prePopulateKeys; i++ {
 		key := fmt.Sprintf("stress-read-%d", i)
 		value := make([]byte, 1024)
-		cryptorand.Read(value)
+		_, _ = cryptorand.Read(value)
 		if err := testNode.Set(ctx, key, value); err == nil {
 			readKeys = append(readKeys, key)
 		}
@@ -562,7 +542,7 @@ func benchmarkConcurrentStressWithProfile(b *testing.B, profile OperationProfile
 					keyIdx := keyGen.Add(1)
 					key := fmt.Sprintf("stress-write-%d-%d", workerID, keyIdx)
 					value := make([]byte, 1024)
-					cryptorand.Read(value)
+					_, _ = cryptorand.Read(value)
 					if err := node.Set(ctx, key, value); err == nil {
 						writtenKeysMu.Lock()
 						writtenKeys[key] = true

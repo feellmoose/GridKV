@@ -192,7 +192,7 @@ func (ae *antiEntropy) entropyLoop() {
 		case <-ae.stopCh:
 			return
 		case <-ticker.C:
-			ae.executor.Do(func() {
+			_ = ae.executor.Do(func() {
 				ae.doAntiEntropy()
 			})
 		}
@@ -248,18 +248,6 @@ func (ae *antiEntropy) doAntiEntropy() {
 	_, _ = ae.gossip.Pull(target)
 
 	// The gossip pull will handle syncing operations automatically
-}
-
-func extractNodeID(version int64) string {
-	// Extract nodeID from HLC-encoded version
-	// Version format: (timestamp << 16) | counter
-	// We need to decode back to HLC string to get nodeID
-	// For now, we use a simplified approach: extract from high bits
-	// Since version is encoded as (ts << 16) | counter, we can't directly extract nodeID
-	// We need to maintain a separate mapping or store nodeID in StoredItem
-	// For now, return empty string (version vector will use version as key)
-	// This is acceptable for version vector comparison (we compare versions, not nodeIDs)
-	return ""
 }
 
 // Replay handles checkpoint and hinted-handoff for recovery
@@ -403,7 +391,7 @@ func (r *replay) HintedHandoff(nodeID string, ops []*mem_storage.SyncOperation) 
 	r.hhMu.Unlock()
 
 	// Async retry
-	r.executor.Do(func() {
+	_ = r.executor.Do(func() {
 		r.retryHintedHandoff(nodeID)
 	})
 
@@ -532,7 +520,7 @@ func (r *replay) Start(ctx context.Context) error {
 		r.hhMu.Lock()
 		for nodeID := range r.hintedHandoff {
 			nodeID := nodeID
-			r.executor.Do(func() {
+			_ = r.executor.Do(func() {
 				r.retryHintedHandoff(nodeID)
 			})
 		}

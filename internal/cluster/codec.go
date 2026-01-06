@@ -33,13 +33,6 @@ var (
 			return make([]byte, 8)
 		},
 	}
-
-	// Serialization buffer pool for SyncOps (4KB initial capacity)
-	serializeBufPool = sync.Pool{
-		New: func() interface{} {
-			return make([]byte, 0, 4096)
-		},
-	}
 )
 
 // Note: We don't use buffer pools here because we return the buffer to the caller
@@ -477,10 +470,6 @@ func (c *MemberMsgCodec) decodeConnectMsg(data []byte) *connectMsg {
 	}
 	msg := &connectMsg{}
 	offset := 0
-	end := 30
-	if end > len(data) {
-		end = len(data)
-	}
 	msg.NodeID, offset = c.decodeString(data, offset)
 	if offset == 0 {
 		logging.Warn("Failed to decode NodeID from connect message", "dataLen", len(data))
@@ -492,32 +481,16 @@ func (c *MemberMsgCodec) decodeConnectMsg(data []byte) *connectMsg {
 	}
 	expectedOffset := 2 + len(msg.NodeID)
 	if offset != expectedOffset {
-		end2 := offset + 10
-		if end2 > len(data) {
-			end2 = len(data)
-		}
 		logging.Warn("NodeID offset mismatch in connect message", "nodeID", msg.NodeID, "expectedOffset", expectedOffset, "actualOffset", offset)
 		return nil
 	}
 	addressOffset := offset
 	msg.Address, offset = c.decodeString(data, offset)
 	if offset == 0 {
-		end := addressOffset + 20
-		if end > len(data) {
-			end = len(data)
-		}
 		logging.Warn("Failed to decode address from connect message", "nodeID", msg.NodeID, "addressOffset", addressOffset)
 		return nil
 	}
 	if len(msg.Address) < 3 || msg.Address[0] == 0 {
-		end := addressOffset + 20
-		if end > len(data) {
-			end = len(data)
-		}
-		endBefore := addressOffset
-		if endBefore > len(data) {
-			endBefore = len(data)
-		}
 		logging.Warn("Invalid address in connect message", "nodeID", msg.NodeID, "address", fmt.Sprintf("%q", msg.Address), "addressLen", len(msg.Address))
 		return nil
 	}

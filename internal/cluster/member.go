@@ -123,36 +123,6 @@ func newMemberMgr(cfg memberConfig) (*memberMgr, error) {
 	return mgr, nil
 }
 
-type memberComponent struct {
-	mgr *memberMgr
-}
-
-func (c *memberComponent) Name() string {
-	return "member-mgr"
-}
-
-func (c *memberComponent) Start(ctx context.Context) error {
-	c.mgr.incarnation.Store(time.Now().UnixNano())
-
-	c.mgr.wg.Add(1)
-	go c.mgr.pingLoop()
-
-	return nil
-}
-
-func (c *memberComponent) Close(ctx context.Context) error {
-	select {
-	case <-c.mgr.stopCh:
-	default:
-		close(c.mgr.stopCh)
-	}
-	if err := c.mgr.executor.Stop(10 * time.Second); err != nil {
-		return err
-	}
-	c.mgr.wg.Wait()
-	return nil
-}
-
 // lifecycle.Component implementation
 func (m *memberMgr) Name() string { return "member-mgr" }
 
@@ -187,7 +157,7 @@ func (m *memberMgr) pingLoop() {
 		case <-m.stopCh:
 			return
 		case <-ticker.C:
-			m.executor.Do(func() {
+			_ = m.executor.Do(func() {
 				m.doPing()
 			})
 		}

@@ -64,7 +64,7 @@ func TestNetworkServer_HandleMessage(t *testing.T) {
 	if err := server.Start(ctx, addr, handler); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer server.Stop(ctx)
+	defer func() { _ = server.Stop(ctx) }()
 
 	serverAddr := server.Address()
 
@@ -111,7 +111,7 @@ func TestNetworkServer_RequestResponse(t *testing.T) {
 	if err := server.StartRequestResponse(ctx, addr, reqHandler); err != nil {
 		t.Fatalf("StartRequestResponse() error = %v", err)
 	}
-	defer server.Stop(ctx)
+	defer func() { _ = server.Stop(ctx) }()
 
 	serverAddr := server.Address()
 
@@ -160,7 +160,7 @@ func TestNetworkServer_Stats(t *testing.T) {
 	if err := server.Start(ctx, addr, handler); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	defer server.Stop(ctx)
+	defer func() { _ = server.Stop(ctx) }()
 
 	serverAddr := server.Address()
 
@@ -171,7 +171,7 @@ func TestNetworkServer_Stats(t *testing.T) {
 	defer clientConn.Close()
 
 	data := []byte("test")
-	clientConn.Send(ctx, data)
+	_ = clientConn.Send(ctx, data)
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -186,4 +186,3 @@ func TestNetworkServer_Stats(t *testing.T) {
 		t.Error("Stats().Bytes = 0, want > 0")
 	}
 }
-

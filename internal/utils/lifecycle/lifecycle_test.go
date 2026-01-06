@@ -11,7 +11,6 @@ import (
 
 type mockComponent struct {
 	name      string
-	deps      []string
 	started   atomic.Bool
 	closed    atomic.Bool
 	startErr  error
@@ -168,11 +167,11 @@ func TestLifecycleManager_StartTimeout(t *testing.T) {
 }
 
 type orderComponent struct {
-	name      string
-	order     *[]string
-	mu        *sync.Mutex
-	started   atomic.Bool
-	closed    atomic.Bool
+	name    string
+	order   *[]string
+	mu      *sync.Mutex
+	started atomic.Bool
+	closed  atomic.Bool
 }
 
 func (o *orderComponent) Name() string {
@@ -241,4 +240,3 @@ func TestLifecycleManager_DoubleStart(t *testing.T) {
 		t.Fatal("Expected error for double start")
 	}
 }
-

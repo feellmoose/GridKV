@@ -7,7 +7,6 @@ import (
 
 	"github.com/feellmoose/gridkv/internal/mem_storage"
 	"github.com/feellmoose/gridkv/internal/utils/executor"
-	"github.com/feellmoose/gridkv/internal/utils/lifecycle"
 )
 
 // Object pools for gossip operations
@@ -49,8 +48,6 @@ type gossip struct {
 	recvFunc func() ([]byte, error)
 
 	member MemberMgr // For selecting random targets
-
-	component lifecycle.Component
 }
 
 type gossipConfig struct {
@@ -117,7 +114,7 @@ func (g *gossip) gossipLoop() {
 		case <-g.stopCh:
 			return
 		case <-ticker.C:
-			g.executor.Do(func() {
+			_ = g.executor.Do(func() {
 				g.doGossip()
 			})
 		}
@@ -195,7 +192,7 @@ func (g *gossip) doGossip() {
 		}
 		// Capture for goroutine
 		addr := targetAddr
-		g.executor.Do(func() {
+		_ = g.executor.Do(func() {
 			_, _ = g.Pull(addr)
 		})
 	}
@@ -228,7 +225,7 @@ func (g *gossip) Push(ops []*mem_storage.SyncOperation, targets []string) error 
 	// Push to first fanOut targets
 	for i := 0; i < fanOut; i++ {
 		target := targets[i]
-		g.executor.Do(func() {
+		_ = g.executor.Do(func() {
 			g.pushToTarget(target, data, 3) // Max 3 retries
 		})
 	}

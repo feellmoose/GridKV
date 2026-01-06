@@ -18,7 +18,7 @@ func TestExec_Basic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	var wg sync.WaitGroup
 	wg.Add(10)
@@ -43,7 +43,7 @@ func TestExec_NilTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	err = exec.Do(nil)
 	if err == nil {
@@ -60,7 +60,7 @@ func TestExec_Closed(t *testing.T) {
 		t.Fatalf("Failed to create: %v", err)
 	}
 
-	exec.Stop(5 * time.Second)
+	_ = exec.Stop(5 * time.Second)
 
 	err = exec.Do(func() {})
 	if err != ErrClosed {
@@ -78,11 +78,11 @@ func TestExec_NonBlocking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	// Fill queue
 	for i := 0; i < 4; i++ {
-		exec.Do(func() {
+		_ = exec.Do(func() {
 			time.Sleep(100 * time.Millisecond)
 		})
 	}
@@ -102,7 +102,7 @@ func TestExec_Resize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	stats := exec.Stats()
 	if stats.Cap != 4 {
@@ -140,7 +140,7 @@ func TestExec_ResizeInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	err = exec.Resize(0)
 	if err == nil {
@@ -162,7 +162,7 @@ func TestExec_ResizeClosed(t *testing.T) {
 		t.Fatalf("Failed to create: %v", err)
 	}
 
-	exec.Stop(5 * time.Second)
+	_ = exec.Stop(5 * time.Second)
 
 	err = exec.Resize(8)
 	if err != ErrClosed {
@@ -179,7 +179,7 @@ func TestExec_Stats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	stats := exec.Stats()
 	if stats.Cap != 4 {
@@ -188,7 +188,7 @@ func TestExec_Stats(t *testing.T) {
 
 	// Submit tasks
 	for i := 0; i < 5; i++ {
-		exec.Do(func() {
+		_ = exec.Do(func() {
 			time.Sleep(10 * time.Millisecond)
 		})
 	}
@@ -209,11 +209,11 @@ func TestExec_StatsDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	// Submit tasks
 	for i := 0; i < 10; i++ {
-		exec.Do(func() {})
+		_ = exec.Do(func() {})
 	}
 
 	time.Sleep(50 * time.Millisecond)
@@ -233,7 +233,7 @@ func TestExec_Concurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	const numGoroutines = 50
 	const tasksPerGoroutine = 100
@@ -244,7 +244,7 @@ func TestExec_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < tasksPerGoroutine; j++ {
-				exec.Do(func() {
+				_ = exec.Do(func() {
 					time.Sleep(1 * time.Millisecond)
 				})
 			}
@@ -252,7 +252,7 @@ func TestExec_Concurrent(t *testing.T) {
 	}
 
 	wg.Wait()
-	exec.Wait()
+	_ = exec.Wait()
 }
 
 func TestExec_OnPanic(t *testing.T) {
@@ -267,9 +267,9 @@ func TestExec_OnPanic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
-	exec.Do(func() {
+	_ = exec.Do(func() {
 		panic("test panic")
 	})
 
@@ -288,10 +288,10 @@ func TestExec_DefaultOnPanic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	// Should not crash
-	exec.Do(func() {
+	_ = exec.Do(func() {
 		panic("test panic")
 	})
 
@@ -305,7 +305,7 @@ func TestExec_DefaultWorkers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	stats := exec.Stats()
 	if stats.Cap <= 0 {
@@ -321,10 +321,10 @@ func TestExec_DefaultQueueSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	for i := 0; i < 10; i++ {
-		exec.Do(func() {})
+		_ = exec.Do(func() {})
 	}
 }
 
@@ -337,9 +337,9 @@ func TestExec_StopMultipleTimes(t *testing.T) {
 		t.Fatalf("Failed to create: %v", err)
 	}
 
-	exec.Stop(5 * time.Second)
-	exec.Stop(5 * time.Second)
-	exec.Stop(5 * time.Second)
+	_ = exec.Stop(5 * time.Second)
+	_ = exec.Stop(5 * time.Second)
+	_ = exec.Stop(5 * time.Second)
 }
 
 func TestExec_StopTimeout(t *testing.T) {
@@ -352,7 +352,7 @@ func TestExec_StopTimeout(t *testing.T) {
 	}
 
 	// Submit long-running task
-	exec.Do(func() {
+	_ = exec.Do(func() {
 		time.Sleep(200 * time.Millisecond)
 	})
 
@@ -373,7 +373,7 @@ func TestExec_StopWaitsForCompletion(t *testing.T) {
 	}
 
 	var completed atomic.Int64
-	exec.Do(func() {
+	_ = exec.Do(func() {
 		time.Sleep(50 * time.Millisecond)
 		completed.Add(1)
 	})
@@ -396,7 +396,7 @@ func TestExec_DoCtx(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -415,12 +415,12 @@ func TestExec_DoCtxCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var executed atomic.Bool
 
-	exec.DoCtx(ctx, func() {
+	_ = exec.DoCtx(ctx, func() {
 		executed.Store(true)
 	})
 
@@ -440,7 +440,7 @@ func TestExec_Stress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(10 * time.Second)
+	defer func() { _ = exec.Stop(10 * time.Second) }()
 
 	const numTasks = 10000
 	var completed atomic.Int64
@@ -448,7 +448,7 @@ func TestExec_Stress(t *testing.T) {
 	wg.Add(numTasks)
 
 	for i := 0; i < numTasks; i++ {
-		exec.Do(func() {
+		_ = exec.Do(func() {
 			completed.Add(1)
 			wg.Done()
 		})
@@ -470,22 +470,22 @@ func TestExec_ResizeDuringWork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	// Start long-running tasks
 	for i := 0; i < 20; i++ {
-		exec.Do(func() {
+		_ = exec.Do(func() {
 			time.Sleep(100 * time.Millisecond)
 		})
 	}
 
 	// Resize during work
-	exec.Resize(8)
+	_ = exec.Resize(8)
 	time.Sleep(50 * time.Millisecond)
-	exec.Resize(2)
+	_ = exec.Resize(2)
 	time.Sleep(50 * time.Millisecond)
 
-	exec.Wait()
+	_ = exec.Wait()
 }
 
 func TestExec_StatsAccuracy(t *testing.T) {
@@ -497,14 +497,14 @@ func TestExec_StatsAccuracy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	const numTasks = 100
 	for i := 0; i < numTasks; i++ {
-		exec.Do(func() {})
+		_ = exec.Do(func() {})
 	}
 
-	exec.Wait()
+	_ = exec.Wait()
 	time.Sleep(50 * time.Millisecond)
 
 	stats := exec.Stats()
@@ -528,7 +528,7 @@ func TestExec_LeakPrevention(t *testing.T) {
 
 	// Submit some tasks
 	for i := 0; i < 100; i++ {
-		exec.Do(func() {
+		_ = exec.Do(func() {
 			time.Sleep(1 * time.Millisecond)
 		})
 	}
@@ -557,10 +557,10 @@ func TestExec_ErrorHandling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	var taskErr error
-	exec.Do(func() {
+	_ = exec.Do(func() {
 		taskErr = errors.New("task error")
 	})
 

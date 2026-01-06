@@ -52,4 +52,3 @@ type clusterSyncMsg struct {
 	From    string
 	Members []NodeInfo
 }
-

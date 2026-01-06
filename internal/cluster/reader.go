@@ -201,7 +201,7 @@ func (r *reader) BatchGet(ctx context.Context, keys []string) (map[string]*mem_s
 	for _, key := range keys {
 		key := key
 		wg.Add(1)
-		r.executor.Do(func() {
+		_ = r.executor.Do(func() {
 			defer wg.Done()
 			if item, err := r.Get(ctx, key); err == nil && item != nil {
 				resultCh <- struct {
@@ -265,7 +265,7 @@ func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_st
 	// Query all targets in parallel
 	for _, target := range aliveTargets {
 		target := target
-		r.executor.Do(func() {
+		_ = r.executor.Do(func() {
 			var item *mem_storage.StoredItem
 			var err error
 
@@ -410,7 +410,7 @@ func (r *reader) GetWithConsistency(ctx context.Context, key string, level Consi
 	// Query all replicas
 	for _, target := range aliveTargets {
 		target := target
-		r.executor.Do(func() {
+		_ = r.executor.Do(func() {
 			var item *mem_storage.StoredItem
 			var err error
 
@@ -546,7 +546,7 @@ func (rr *readRepair) Repair(key string, versions []*mem_storage.StoredItem) err
 	}
 
 	// Async repair
-	rr.executor.Do(func() {
+	_ = rr.executor.Do(func() {
 		ctx := context.Background()
 		_ = rr.writer.Set(ctx, key, maxVersion)
 	})

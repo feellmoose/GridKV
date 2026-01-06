@@ -316,7 +316,9 @@ func New(cfg Config) (*Cluster, error) {
 
 	// Register network message handlers if network is provided
 	if net != nil {
-		setupNetworkHandlers(net, member, gossip, cfg.Store)
+		if err := setupNetworkHandlers(net, member, gossip, cfg.Store); err != nil {
+			return nil, fmt.Errorf("failed to setup network handlers: %w", err)
+		}
 	}
 
 	return cluster, nil
@@ -361,17 +363,19 @@ func createGetFunc(net network.Network, member *memberMgr, store *mem_storage.Me
 }
 
 // setupNetworkHandlers registers message handlers for member and gossip
-func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip, store *mem_storage.MemStorage) {
+func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip, store *mem_storage.MemStorage) error {
 	// Member message handlers
-	net.RegisterMessageHandler(network.MessageTypePing, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
+	if err := net.RegisterMessageHandler(network.MessageTypePing, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		decoded := decodeMemberMsg(data, network.MessageTypePing)
 		if decoded != nil {
 			_ = member.HandleMessage(decoded)
 		}
 		return nil, nil
-	})
+	}); err != nil {
+		return err
+	}
 
-	net.RegisterMessageHandler(network.MessageTypeConnect, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
+	if err := net.RegisterMessageHandler(network.MessageTypeConnect, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		if len(data) < 2 {
 			return nil, nil
 		}
@@ -383,29 +387,37 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 			logging.Debug("failed to handle CONNECT message", "remote", remoteAddr, "error", err)
 		}
 		return nil, nil
-	})
+	}); err != nil {
+		return err
+	}
 
-	net.RegisterMessageHandler(network.MessageTypeLeave, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
+	if err := net.RegisterMessageHandler(network.MessageTypeLeave, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		decoded := decodeMemberMsg(data, network.MessageTypeLeave)
 		if decoded != nil {
 			_ = member.HandleMessage(decoded)
 		}
 		return nil, nil
-	})
+	}); err != nil {
+		return err
+	}
 
 	// Gossip message handlers
-	net.RegisterMessageHandler(network.MessageTypeGossipPush, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
+	if err := net.RegisterMessageHandler(network.MessageTypeGossipPush, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		_ = gossip.HandleMessage(data)
 		return nil, nil
-	})
+	}); err != nil {
+		return err
+	}
 
-	net.RegisterMessageHandler(network.MessageTypeGossipPull, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
+	if err := net.RegisterMessageHandler(network.MessageTypeGossipPull, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		_ = gossip.HandleMessage(data)
 		return nil, nil
-	})
+	}); err != nil {
+		return err
+	}
 
 	// Unified read request handler - handles network.MessageTypeRequest used by clients
-	net.RegisterMessageHandler(network.MessageTypeRequest, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
+	if err := net.RegisterMessageHandler(network.MessageTypeRequest, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		if len(data) == 0 {
 			return nil, nil
 		}
@@ -415,10 +427,12 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 			return nil, nil
 		}
 		return item.Value, nil
-	})
+	}); err != nil {
+		return err
+	}
 
 	// Also register MessageTypeReadRequest for cluster-internal communication
-	net.RegisterMessageHandler(network.MessageTypeReadRequest, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
+	if err := net.RegisterMessageHandler(network.MessageTypeReadRequest, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		if len(data) == 0 {
 			return nil, nil
 		}
@@ -428,7 +442,11 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 			return nil, nil
 		}
 		return item.Value, nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // encodeMemberMsg encodes member message to bytes (delegates to codec)

@@ -54,7 +54,7 @@ func TestAntiEntropy_Digest(t *testing.T) {
 			Version: int64(i),
 			Value:   []byte("value"),
 		}
-		store.Set(key, item)
+		_ = store.Set(key, item)
 	}
 
 	bloom, vv := entropy.Digest("")

@@ -7,9 +7,9 @@ import (
 
 func TestSimpleBackpressure_Allow(t *testing.T) {
 	cfg := BackpressureConfig{
-		Threshold:  5,
+		Threshold:   5,
 		MaxCapacity: 10,
-		Strategy:   StrategyReject,
+		Strategy:    StrategyReject,
 	}
 
 	bp := NewBackpressure(cfg)
@@ -34,9 +34,9 @@ func TestSimpleBackpressure_Allow(t *testing.T) {
 
 func TestSimpleBackpressure_StrategyReject(t *testing.T) {
 	cfg := BackpressureConfig{
-		Threshold:  3,
+		Threshold:   3,
 		MaxCapacity: 5,
-		Strategy:   StrategyReject,
+		Strategy:    StrategyReject,
 	}
 
 	bp := NewBackpressure(cfg)
@@ -62,9 +62,9 @@ func TestSimpleBackpressure_StrategyReject(t *testing.T) {
 
 func TestSimpleBackpressure_StrategyBlock(t *testing.T) {
 	cfg := BackpressureConfig{
-		Threshold:  3,
+		Threshold:   3,
 		MaxCapacity: 5,
-		Strategy:   StrategyBlock,
+		Strategy:    StrategyBlock,
 	}
 
 	bp := NewBackpressure(cfg)
@@ -96,9 +96,9 @@ func TestSimpleBackpressure_StrategyBlock(t *testing.T) {
 
 func TestSimpleBackpressure_StrategyDrop(t *testing.T) {
 	cfg := BackpressureConfig{
-		Threshold:  3,
+		Threshold:   3,
 		MaxCapacity: 5,
-		Strategy:   StrategyDrop,
+		Strategy:    StrategyDrop,
 	}
 
 	bp := NewBackpressure(cfg)
@@ -119,16 +119,16 @@ func TestSimpleBackpressure_StrategyDrop(t *testing.T) {
 
 func TestSimpleBackpressure_Release(t *testing.T) {
 	cfg := BackpressureConfig{
-		Threshold:  5,
+		Threshold:   5,
 		MaxCapacity: 10,
-		Strategy:   StrategyReject,
+		Strategy:    StrategyReject,
 	}
 
 	bp := NewBackpressure(cfg)
 
 	// fill to threshold
 	for i := 0; i < 5; i++ {
-		bp.Acquire()
+		_ = bp.Acquire()
 	}
 
 	if bp.Allow() {
@@ -150,9 +150,9 @@ func TestSimpleBackpressure_Release(t *testing.T) {
 
 func TestSimpleBackpressure_Status(t *testing.T) {
 	cfg := BackpressureConfig{
-		Threshold:  5,
+		Threshold:   5,
 		MaxCapacity: 10,
-		Strategy:   StrategyReject,
+		Strategy:    StrategyReject,
 	}
 
 	bp := NewBackpressure(cfg)
@@ -170,7 +170,7 @@ func TestSimpleBackpressure_Status(t *testing.T) {
 
 	// fill to threshold
 	for i := 0; i < 5; i++ {
-		bp.Acquire()
+		_ = bp.Acquire()
 	}
 
 	status = bp.Status()
@@ -181,4 +181,3 @@ func TestSimpleBackpressure_Status(t *testing.T) {
 		t.Error("Status().Blocked = false, want true")
 	}
 }
-

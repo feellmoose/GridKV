@@ -17,7 +17,7 @@ func TestQueuedExec_Basic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	var wg sync.WaitGroup
 	wg.Add(10)
@@ -43,7 +43,7 @@ func TestQueuedExec_Priority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	var completed atomic.Int64
 	var wg sync.WaitGroup
@@ -58,7 +58,7 @@ func TestQueuedExec_Priority(t *testing.T) {
 			priority = PriorityLow
 		}
 
-		exec.DoPriority(func() {
+		_ = exec.DoPriority(func() {
 			completed.Add(1)
 			wg.Done()
 		}, priority)
@@ -80,7 +80,7 @@ func TestQueuedExec_WorkStealing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	var completed atomic.Int64
 	const numTasks = 100
@@ -88,7 +88,7 @@ func TestQueuedExec_WorkStealing(t *testing.T) {
 	wg.Add(numTasks)
 
 	for i := 0; i < numTasks; i++ {
-		exec.Do(func() {
+		_ = exec.Do(func() {
 			completed.Add(1)
 			wg.Done()
 		})
@@ -111,10 +111,10 @@ func TestQueuedExec_NonBlocking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	for i := 0; i < 10; i++ {
-		exec.Do(func() {
+		_ = exec.Do(func() {
 			time.Sleep(100 * time.Millisecond)
 		})
 	}
@@ -133,7 +133,7 @@ func TestQueuedExec_DoCtx(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -152,7 +152,7 @@ func TestQueuedExec_Resize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	stats := exec.Stats()
 	if stats.Cap != 4 {
@@ -179,7 +179,7 @@ func TestQueuedExec_Concurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create: %v", err)
 	}
-	defer exec.Stop(5 * time.Second)
+	defer func() { _ = exec.Stop(5 * time.Second) }()
 
 	const numGoroutines = 50
 	const tasksPerGoroutine = 100
@@ -190,7 +190,7 @@ func TestQueuedExec_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < tasksPerGoroutine; j++ {
-				exec.Do(func() {
+				_ = exec.Do(func() {
 					time.Sleep(1 * time.Millisecond)
 				})
 			}
@@ -198,6 +198,5 @@ func TestQueuedExec_Concurrent(t *testing.T) {
 	}
 
 	wg.Wait()
-	exec.Wait()
+	_ = exec.Wait()
 }
-

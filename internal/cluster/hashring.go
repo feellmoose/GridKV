@@ -46,10 +46,10 @@ type ringData struct {
 }
 
 type hashRing struct {
-	version     atomic.Int64
+	version      atomic.Int64
 	virtualNodes int
-	data        unsafe.Pointer // *ringData (atomic pointer for lock-free reads)
-	mu          sync.Mutex     // Only for writes
+	data         unsafe.Pointer // *ringData (atomic pointer for lock-free reads)
+	mu           sync.Mutex     // Only for writes
 }
 
 func newHashRing(virtualNodes int) *hashRing {
@@ -199,5 +199,4 @@ func (r *hashRing) findNode(nodes []ringNode, hash uint64) int {
 // lifecycle.Component implementation
 func (r *hashRing) Name() string                    { return "hash-ring" }
 func (r *hashRing) Start(ctx context.Context) error { return nil }
-func (r *hashRing) Close(ctx context.Context) error  { return nil }
-
+func (r *hashRing) Close(ctx context.Context) error { return nil }

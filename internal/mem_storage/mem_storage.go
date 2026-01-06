@@ -3,6 +3,7 @@ package mem_storage
 import (
 	"container/list"
 	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -202,14 +203,20 @@ func New(config Config) (*MemStorage, error) {
 	// Initialize compression pools
 	if s.compressionEnabled {
 		s.encoderPool.New = func() interface{} {
-			encoder, _ := zstd.NewWriter(nil,
+			encoder, err := zstd.NewWriter(nil,
 				zstd.WithEncoderLevel(zstd.SpeedDefault),
 				zstd.WithEncoderConcurrency(1),
 			)
+			if err != nil {
+				panic(fmt.Sprintf("failed to create zstd encoder: %v", err))
+			}
 			return encoder
 		}
 		s.decoderPool.New = func() interface{} {
-			decoder, _ := zstd.NewReader(nil)
+			decoder, err := zstd.NewReader(nil)
+			if err != nil {
+				panic(fmt.Sprintf("failed to create zstd decoder: %v", err))
+			}
 			return decoder
 		}
 	}
@@ -457,7 +464,10 @@ func (s *MemStorage) Delete(key string, version int64) error {
 		return nil // Not found is not an error
 	}
 
-	compItem := value.(*compressedItem)
+	compItem, ok := value.(*compressedItem)
+	if !ok {
+		return fmt.Errorf("unexpected item type for key %s", key)
+	}
 	if version > 0 && compItem.Version > version {
 		// Version mismatch: existing is newer
 		return ErrVersionMismatch

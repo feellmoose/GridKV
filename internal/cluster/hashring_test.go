@@ -176,4 +176,3 @@ func TestHashRing_AddRemoveNodes(t *testing.T) {
 		}
 	}
 }
-

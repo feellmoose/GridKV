@@ -70,7 +70,7 @@ func TestReader_Basic(t *testing.T) {
 		Version: 1,
 		Value:   []byte("value1"),
 	}
-	store.Set("key1", item)
+	_ = store.Set("key1", item)
 
 	// Test Get
 	got, err := reader.Get(ctx, "key1")
@@ -128,7 +128,7 @@ func TestReader_BatchGet(t *testing.T) {
 			Version: int64(i),
 			Value:   []byte("value" + strconv.Itoa(i)),
 		}
-		store.Set(key, item)
+		_ = store.Set(key, item)
 	}
 
 	// Test BatchGet
@@ -172,7 +172,7 @@ func TestReader_GetSpeculative(t *testing.T) {
 		Version: 2,
 		Value:   []byte("remote-value"),
 	}
-	remoteStore.Set("key1", remoteItem)
+	_ = remoteStore.Set("key1", remoteItem)
 
 	getFunc := func(nodeID string, key string) (*mem_storage.StoredItem, error) {
 		if nodeID == "node1" {
@@ -204,7 +204,7 @@ func TestReader_GetSpeculative(t *testing.T) {
 		Version: 1,
 		Value:   []byte("local-value"),
 	}
-	store.Set("key1", localItem)
+	_ = store.Set("key1", localItem)
 
 	// Test GetSpeculative
 	got, err := reader.GetSpeculative(ctx, "key1", 3)

@@ -142,7 +142,7 @@ func TestWriter_Delete(t *testing.T) {
 		Ring:           ring,
 		Gossip:         gossip,
 		Executor:       exec,
-		BatchThreshold: 1, // Force immediate batching for test
+		BatchThreshold: 1,                    // Force immediate batching for test
 		BatchWindow:    1 * time.Millisecond, // Very short window
 		ReplicaCount:   3,
 	})
@@ -178,7 +178,16 @@ func TestWriter_Delete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() after delete error = %v", err)
 	}
-	t.Logf("After delete: got=%v, Value=%v, Version=%d, IsTombstone=%v", got != nil, got.Value, got.Version, got.IsTombstone())
+	gotExists := got != nil
+	var value []byte
+	var itemVersion int64
+	var isTombstone bool
+	if gotExists {
+		value = got.Value
+		itemVersion = got.Version
+		isTombstone = got.IsTombstone()
+	}
+	t.Logf("After delete: got=%v, Value=%v, Version=%d, IsTombstone=%v", gotExists, value, itemVersion, isTombstone)
 	if got != nil && !got.IsTombstone() {
 		t.Errorf("Item after Delete() is not a tombstone: Value=%v, Version=%d, len(Value)=%d", got.Value, got.Version, len(got.Value))
 	}
@@ -238,7 +247,7 @@ func TestWriter_BatchTrigger(t *testing.T) {
 		item := &mem_storage.StoredItem{
 			Value: []byte("value"),
 		}
-		writer.Set(ctx, "key"+string(rune(i)), item)
+		_ = writer.Set(ctx, "key"+string(rune(i)), item)
 	}
 
 	// Wait for batch processing
@@ -255,7 +264,7 @@ func TestWriter_BatchTrigger(t *testing.T) {
 	item := &mem_storage.StoredItem{
 		Value: []byte("value"),
 	}
-	writer.Set(ctx, "key-window", item)
+	_ = writer.Set(ctx, "key-window", item)
 
 	// Wait for window timeout
 	time.Sleep(100 * time.Millisecond)
