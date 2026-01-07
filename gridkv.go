@@ -22,7 +22,7 @@ import (
 )
 
 // Version represents the current version of GridKV
-const Version = "v0.3.0"
+const Version = "v0.3.2"
 
 // Error constants exported for application error handling
 var (
@@ -298,7 +298,7 @@ func (g *GridKV) Set(ctx context.Context, key string, value []byte, ttl ...time.
 	}
 
 	// Check cluster readiness for Set operations
-	status := g.GetReplicaStatus()
+	status := g.Status()
 	if !status.Ready && status.HealthyNodes == 0 {
 		return fmt.Errorf("cluster not ready: cannot Set key %s (nodes: %d, healthy: %d)",
 			key, status.ClusterSize, status.HealthyNodes)
@@ -414,8 +414,8 @@ func (g *GridKV) Delete(ctx context.Context, key string) (err error) {
 	return writer.Delete(ctx, key, version)
 }
 
-// GetReplicaStatus returns cluster health and readiness state. Thread-safe.
-func (g *GridKV) GetReplicaStatus() ReplicaStatus {
+// Status returns cluster health and readiness state. Thread-safe.
+func (g *GridKV) Status() ReplicaStatus {
 	if g.cluster == nil {
 		return ReplicaStatus{
 			Ready:         false,
@@ -470,7 +470,7 @@ func (g *GridKV) WaitReady(timeout time.Duration) error {
 	var lastClusterSize, lastHealthyNodes int
 
 	for time.Now().Before(deadline) {
-		status := g.GetReplicaStatus()
+		status := g.Status()
 		isReady := status.Ready && status.HealthyNodes > 0
 
 		if isReady {
@@ -503,7 +503,7 @@ func (g *GridKV) WaitReady(timeout time.Duration) error {
 		time.Sleep(checkInterval)
 	}
 
-	status := g.GetReplicaStatus()
+	status := g.Status()
 	if !status.Ready {
 		return fmt.Errorf("timeout waiting for cluster ready: nodes=%d, healthy=%d",
 			status.ClusterSize, status.HealthyNodes)
@@ -517,7 +517,7 @@ func (g *GridKV) HealthCheck() error {
 		return errors.New("GridKV not initialized")
 	}
 
-	status := g.GetReplicaStatus()
+	status := g.Status()
 	if !status.Ready {
 		return fmt.Errorf("cluster not ready: nodes=%d, healthy=%d",
 			status.ClusterSize, status.HealthyNodes)
@@ -531,15 +531,15 @@ func (g *GridKV) HealthCheck() error {
 }
 
 // Close shuts down GridKV: stops cluster, closes network, flushes storage.
-// Idempotent. Thread-safe.
-func (g *GridKV) Close() error {
-	return g.CloseWithTimeout(30 * time.Second)
-}
+// Uses 30s default timeout if none provided. Idempotent. Thread-safe.
+func (g *GridKV) Close(timeout ...time.Duration) error {
+	defaultTimeout := 30 * time.Second
+	if len(timeout) > 0 {
+		defaultTimeout = timeout[0]
+	}
 
-// CloseWithTimeout shuts down with explicit timeout. Thread-safe.
-func (g *GridKV) CloseWithTimeout(timeout time.Duration) error {
 	var errs []error
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancel()
 
 	g.shutdownOnce.Do(func() {
