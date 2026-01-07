@@ -1302,7 +1302,7 @@ func testLargeClusterFormation(t *testing.T, ctx context.Context, sim *TestEnvir
 	totalPeers := 0
 	for _, node := range nodes {
 		if node != nil {
-			status := node.GetReplicaStatus()
+			status := node.Status()
 			if status.Ready && status.HealthyNodes > 0 {
 				healthyCount++
 				totalPeers += status.PeerCount

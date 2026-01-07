@@ -130,7 +130,7 @@ func IsNodeHealthy(node *gridkv.GridKV) bool {
 	}
 
 	// Get replica status to check node health
-	status := node.GetReplicaStatus()
+	status := node.Status()
 	return status.Ready && status.HealthyNodes > 0
 }
 
@@ -267,7 +267,7 @@ func (tes *TestEnvironmentSimulator) LogNodeDiagnostics(tb testing.TB, label str
 			tb.Logf("node-%d: down/unavailable", idx)
 			continue
 		}
-		status := node.GetReplicaStatus()
+		status := node.Status()
 		// Transport stats removed - use metrics instead if needed
 		tb.Logf("node-%d id=%s ready=%v healthy=%d cluster=%d peers=%d replica=%d",
 			idx, status.LocalNodeID, status.Ready, status.HealthyNodes,
@@ -614,7 +614,7 @@ func (tes *TestEnvironmentSimulator) SetupCluster(tb testing.TB) error {
 		nodes := tes.snapshotNodes()
 		for _, node := range nodes {
 			if node != nil {
-				status := node.GetReplicaStatus()
+				status := node.Status()
 				if status.Ready && status.HealthyNodes > 0 {
 					basicReadyCount++
 				}
@@ -698,7 +698,7 @@ func (tes *TestEnvironmentSimulator) ShutdownNode(idx int, timeout time.Duration
 	}
 	node := tes.nodes[idx]
 	tes.nodes[idx] = nil
-	return node.CloseWithTimeout(timeout)
+	return node.Close(timeout)
 }
 
 // ShutdownNodes shuts down multiple nodes
@@ -763,7 +763,7 @@ func (tes *TestEnvironmentSimulator) cleanupNodes(limit int) {
 			wg.Add(1)
 			go func(i int, n *gridkv.GridKV) {
 				defer wg.Done()
-				if err := n.CloseWithTimeout(closeTimeout); err != nil {
+				if err := n.Close(closeTimeout); err != nil {
 					if strings.Contains(err.Error(), "timeout") {
 						fmt.Printf("WARN: node %d close timed out\n", i)
 					}
@@ -823,7 +823,7 @@ func (tes *TestEnvironmentSimulator) WaitForHealthyNodes(tb testing.TB, expected
 				if node == nil {
 					continue
 				}
-				status := node.GetReplicaStatus()
+				status := node.Status()
 				tb.Logf("  node-%d: ready=%v healthy=%d cluster=%d peers=%d",
 					i, status.Ready, status.HealthyNodes, status.ClusterSize, status.PeerCount)
 			}
@@ -835,7 +835,7 @@ func (tes *TestEnvironmentSimulator) WaitForHealthyNodes(tb testing.TB, expected
 			if node == nil {
 				continue
 			}
-			status := node.GetReplicaStatus()
+			status := node.Status()
 			if status.HealthyNodes >= expected {
 				tb.Logf("Cluster ready: %d healthy nodes detected", status.HealthyNodes)
 				return
@@ -851,7 +851,7 @@ func (tes *TestEnvironmentSimulator) WaitForHealthyNodes(tb testing.TB, expected
 			tb.Logf("node-%d: nil", i)
 			continue
 		}
-		status := node.GetReplicaStatus()
+		status := node.Status()
 		tb.Logf("node-%d: ready=%v healthy=%d cluster=%d peers=%d replica=%d",
 			i, status.Ready, status.HealthyNodes, status.ClusterSize, status.PeerCount, status.ReplicaFactor)
 	}
@@ -895,7 +895,7 @@ func (tes *TestEnvironmentSimulator) WaitForAllNodesReady(tb testing.TB, timeout
 				tb.Logf("   Node node-%d WaitReady failed: %v", idx, err)
 				return
 			}
-			status := n.GetReplicaStatus()
+			status := n.Status()
 			readyMu.Lock()
 			readyNodes[idx] = true
 			currentCount := len(readyNodes)
@@ -935,7 +935,7 @@ func (tes *TestEnvironmentSimulator) WaitForAllNodesReady(tb testing.TB, timeout
 		tb.Logf("Final node status:")
 		for i, node := range nonNilNodes {
 			if node != nil {
-				status := node.GetReplicaStatus()
+				status := node.Status()
 				readyMu.Lock()
 				isReady := readyNodes[i]
 				readyMu.Unlock()
@@ -1303,7 +1303,7 @@ func (tes *TestEnvironmentSimulator) WaitForClusterReady(tb testing.TB, timeout 
 
 			// Use WaitReady directly - it handles both basic readiness and stability
 			if err := n.WaitReady(perNodeTimeout); err != nil {
-				status := n.GetReplicaStatus()
+				status := n.Status()
 				tb.Logf("node-%d stability wait failed: %v (clusterSize=%d healthy=%d)",
 					idx, err, status.ClusterSize, status.HealthyNodes)
 				// Don't fail if basic ready succeeded - cluster may still be forming
@@ -1318,7 +1318,7 @@ func (tes *TestEnvironmentSimulator) WaitForClusterReady(tb testing.TB, timeout 
 				logInterval = 20
 			}
 			if count%logInterval == 0 || count == int64(len(nonNilNodes)) || count <= 5 {
-				status := n.GetReplicaStatus()
+				status := n.Status()
 				tb.Logf("node-%d ready (%d/%d, elapsed: %v, clusterSize=%d healthy=%d)",
 					idx, count, len(nonNilNodes), time.Since(startTime),
 					status.ClusterSize, status.HealthyNodes)
@@ -1377,7 +1377,7 @@ func (tes *TestEnvironmentSimulator) WaitForClusterReady(tb testing.TB, timeout 
 		basicReadyCount := 0
 		for _, node := range nonNilNodes {
 			if node != nil {
-				status := node.GetReplicaStatus()
+				status := node.Status()
 				if status.Ready && status.HealthyNodes > 0 {
 					basicReadyCount++
 				}
@@ -1456,7 +1456,7 @@ func (tes *TestEnvironmentSimulator) CleanupGracefully(tb testing.TB, timeout ti
 		wg.Add(1)
 		go func(idx int, n *gridkv.GridKV) {
 			defer wg.Done()
-			if err := n.CloseWithTimeout(timeout); err != nil {
+			if err := n.Close(timeout); err != nil {
 				closeErrors[idx] = err
 				tb.Logf("node-%d close warning: %v", idx, err)
 			} else {
