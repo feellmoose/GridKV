@@ -283,9 +283,12 @@ func (c *tcpConn) Receive(ctx context.Context) ([]byte, error) {
 	// Read length header using buffered reader
 	var length uint32
 	if err := binary.Read(c.reader, binary.BigEndian, &length); err != nil {
-		// Only log non-timeout errors to reduce noise
-		if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
-			logging.Debug("tcpConn.Receive: failed to read length header", "remote", c.conn.RemoteAddr(), "error", err)
+		// Only log non-timeout and non-EOF errors to reduce noise
+		// EOF is normal when connection is closed gracefully
+		if err != io.EOF {
+			if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+				logging.Debug("tcpConn.Receive: failed to read length header", "remote", c.conn.RemoteAddr(), "error", err)
+			}
 		}
 		return nil, err
 	}
@@ -298,9 +301,12 @@ func (c *tcpConn) Receive(ctx context.Context) ([]byte, error) {
 	// Read payload using buffered reader (reduces syscalls)
 	buf := make([]byte, size)
 	if _, err := io.ReadFull(c.reader, buf); err != nil {
-		// Only log non-timeout errors to reduce noise
-		if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
-			logging.Debug("tcpConn.Receive: failed to read payload", "remote", c.conn.RemoteAddr(), "error", err)
+		// Only log non-timeout and non-EOF errors to reduce noise
+		// EOF is normal when connection is closed gracefully
+		if err != io.EOF {
+			if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+				logging.Debug("tcpConn.Receive: failed to read payload", "remote", c.conn.RemoteAddr(), "error", err)
+			}
 		}
 		return nil, err
 	}
@@ -453,7 +459,10 @@ func (c *quicConn) Receive(ctx context.Context) ([]byte, error) {
 	defer lengthReadBufPool.Put(lenBuf)
 
 	if _, err := io.ReadFull(c.stream, lenBuf); err != nil {
-		logging.Debug("quicConn.Receive: failed to read length header", "remote", c.session.RemoteAddr(), "error", err)
+		// Don't log EOF as it's normal connection closure
+		if err != io.EOF {
+			logging.Debug("quicConn.Receive: failed to read length header", "remote", c.session.RemoteAddr(), "error", err)
+		}
 		return nil, fmt.Errorf("read length header: %w", err)
 	}
 	size := int(binary.BigEndian.Uint32(lenBuf))
@@ -465,7 +474,10 @@ func (c *quicConn) Receive(ctx context.Context) ([]byte, error) {
 	}
 	buf := make([]byte, size)
 	if _, err := io.ReadFull(c.stream, buf); err != nil {
-		logging.Debug("quicConn.Receive: failed to read payload", "remote", c.session.RemoteAddr(), "error", err, "size", size)
+		// Don't log EOF as it's normal connection closure
+		if err != io.EOF {
+			logging.Debug("quicConn.Receive: failed to read payload", "remote", c.session.RemoteAddr(), "error", err, "size", size)
+		}
 		return nil, fmt.Errorf("read payload: %w", err)
 	}
 	return buf, nil
