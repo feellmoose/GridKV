@@ -13,6 +13,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +21,22 @@ import (
 
 	"github.com/feellmoose/gridkv/internal/utils/logging"
 )
+
+// Error type constants for efficient error checking
+const (
+	errClosedConnection = "use of closed network connection"
+	errConnectionReset  = "connection reset by peer"
+)
+
+// isNetworkError checks if error is a common network error that shouldn't be logged
+func isNetworkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, errClosedConnection) ||
+		strings.Contains(errStr, errConnectionReset)
+}
 
 // TransportType specifies transport protocol
 type TransportType string
@@ -180,10 +197,12 @@ func (t *tcpTransport) Listen(ctx context.Context, address string) (Listener, er
 func (t *tcpTransport) Close() error { return nil }
 
 type tcpConn struct {
-	conn   net.Conn
-	cfg    TransportConfig
-	reader *bufio.Reader // Buffered reader for efficient reading
-	once   sync.Once     // Lazy initialization
+	conn              net.Conn
+	cfg               TransportConfig
+	reader            *bufio.Reader // Buffered reader for efficient reading
+	once              sync.Once     // Lazy initialization
+	lastHealthCheck   int64         // Unix timestamp of last health check
+	healthCheckCached int32         // Cached health check result
 }
 
 func deadlineFromContext(ctx context.Context, fallback time.Duration) time.Time {
@@ -283,10 +302,13 @@ func (c *tcpConn) Receive(ctx context.Context) ([]byte, error) {
 	// Read length header using buffered reader
 	var length uint32
 	if err := binary.Read(c.reader, binary.BigEndian, &length); err != nil {
-		// Only log non-timeout and non-EOF errors to reduce noise
-		// EOF is normal when connection is closed gracefully
+		// Filter out common non-actionable errors to reduce log noise
 		if err != io.EOF {
-			if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				// Timeout errors are normal and expected
+			} else if isNetworkError(err) {
+				// Connection issues during shutdown/normal network behavior - don't log
+			} else {
 				logging.Debug("tcpConn.Receive: failed to read length header", "remote", c.conn.RemoteAddr(), "error", err)
 			}
 		}
@@ -301,10 +323,13 @@ func (c *tcpConn) Receive(ctx context.Context) ([]byte, error) {
 	// Read payload using buffered reader (reduces syscalls)
 	buf := make([]byte, size)
 	if _, err := io.ReadFull(c.reader, buf); err != nil {
-		// Only log non-timeout and non-EOF errors to reduce noise
-		// EOF is normal when connection is closed gracefully
+		// Filter out common non-actionable errors to reduce log noise
 		if err != io.EOF {
-			if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				// Timeout errors are normal and expected
+			} else if isNetworkError(err) {
+				// Connection issues during shutdown/normal network behavior - don't log
+			} else {
 				logging.Debug("tcpConn.Receive: failed to read payload", "remote", c.conn.RemoteAddr(), "error", err)
 			}
 		}

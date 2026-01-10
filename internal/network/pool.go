@@ -62,10 +62,10 @@ type PoolConfig struct {
 	Transport Transport
 }
 
-// DefaultPoolConfig returns default pool config
+// DefaultPoolConfig returns default pool config optimized for distributed systems
 func DefaultPoolConfig(transport Transport) PoolConfig {
 	return PoolConfig{
-		MaxIdle:         50,
+		MaxIdle:         32,
 		MaxActive:       200,
 		IdleTimeout:     5 * time.Minute,
 		MaxLifetime:     30 * time.Minute,
@@ -182,6 +182,34 @@ func (p *connPool) cleanupIdleConns() {
 	}
 }
 
+// isConnectionHealthy performs a cached lightweight health check on the connection.
+func (p *connPool) isConnectionHealthy(conn Conn) bool {
+	if tcpConn, ok := conn.(*tcpConn); ok {
+		now := time.Now().Unix()
+		lastCheck := atomic.LoadInt64(&tcpConn.lastHealthCheck)
+
+		// Use cached result if checked within last 30 seconds
+		if now-lastCheck < 30 {
+			return atomic.LoadInt32(&tcpConn.healthCheckCached) == 1
+		}
+
+		// Perform actual health check
+		addr := tcpConn.conn.RemoteAddr()
+		isHealthy := addr != nil
+
+		// Cache the result atomically
+		atomic.StoreInt64(&tcpConn.lastHealthCheck, now)
+		if isHealthy {
+			atomic.StoreInt32(&tcpConn.healthCheckCached, 1)
+		} else {
+			atomic.StoreInt32(&tcpConn.healthCheckCached, 0)
+		}
+
+		return isHealthy
+	}
+	return true // For other connection types, assume healthy
+}
+
 func (p *connPool) Get(ctx context.Context, address string) (Conn, error) {
 	// Check if pool is closed first
 	if atomic.LoadInt32(&p.closed) != 0 {
@@ -198,16 +226,26 @@ func (p *connPool) Get(ctx context.Context, address string) (Conn, error) {
 		shard.pools[address] = ap
 	}
 
-	// Reuse idle connection
+	// Reuse idle connection with health check
 	if n := len(ap.idle); n > 0 {
 		ic := ap.idle[n-1]
 		ap.idle = ap.idle[:n-1]
-		ap.active++
-		atomic.AddInt64(&p.stats.Active, 1)
-		atomic.AddInt64(&p.stats.Idle, -1)
-		shard.active[ic.conn] = struct{}{}
-		shard.mu.Unlock()
-		return ic.conn, nil
+
+		// Perform health check on idle connection
+		if !p.isConnectionHealthy(ic.conn) {
+			// Connection unhealthy, close and continue to create new one
+			atomic.AddInt64(&p.stats.Total, -1)
+			atomic.AddUint64(&p.stats.Closed, 1)
+			_ = ic.conn.Close()
+		} else {
+			// Connection healthy, reuse it
+			ap.active++
+			atomic.AddInt64(&p.stats.Active, 1)
+			atomic.AddInt64(&p.stats.Idle, -1)
+			shard.active[ic.conn] = struct{}{}
+			shard.mu.Unlock()
+			return ic.conn, nil
+		}
 	}
 
 	if p.cfg.MaxActive > 0 && ap.active >= p.cfg.MaxActive {
