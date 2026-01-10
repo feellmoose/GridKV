@@ -48,15 +48,15 @@ type ClientConfig struct {
 	MaxRetries int
 }
 
-// DefaultClientConfig returns default client config
+// DefaultClientConfig returns default client config optimized for cluster communication
 func DefaultClientConfig(pool ConnPool) ClientConfig {
 	return ClientConfig{
 		Pool:              pool,
-		DefaultTimeout:    5 * time.Second,
-		RetryCount:        3,
-		RetryBackoff:      100 * time.Millisecond,
+		DefaultTimeout:    10 * time.Second,  // Longer timeout for better reliability
+		RetryCount:        5,                 // More retries for fault tolerance
+		RetryBackoff:      200 * time.Millisecond, // Slightly longer backoff
 		EnableCompression: false,
-		MaxRetries:        3,
+		MaxRetries:        5,                 // Match retry count
 	}
 }
 

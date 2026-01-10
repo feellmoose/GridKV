@@ -140,7 +140,7 @@ func applyDefaults(opts *GridKVOptions) {
 		opts.ReplicaCount = 3
 	}
 	if opts.FailureTimeout == 0 {
-		opts.FailureTimeout = 3 * time.Second
+		opts.FailureTimeout = 5 * time.Second
 	}
 	if opts.SuspectTimeout == 0 {
 		opts.SuspectTimeout = opts.FailureTimeout / 2
