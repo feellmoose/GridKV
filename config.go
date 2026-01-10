@@ -95,7 +95,7 @@ func applyDefaults(opts *GridKVOptions) {
 		opts.Network = &NetworkOptions{}
 	}
 	if opts.Network.Type == 0 {
-		opts.Network.Type = QUIC
+		opts.Network.Type = TCP
 	}
 	if opts.Network.BindAddr == "" {
 		opts.Network.BindAddr = opts.LocalAddress

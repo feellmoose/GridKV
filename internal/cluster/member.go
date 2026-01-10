@@ -262,17 +262,23 @@ func (m *memberMgr) handleAck(msg *ackMsg) error {
 	if msg == nil {
 		return nil
 	}
-	// Check if this is an ack from indirect probe target
+
+	// Get sender's info and update LastActive time - ACK confirms bidirectional communication
+	if existing, ok := m.members.Load(msg.From); ok {
+		if info, ok := existing.(*NodeInfo); ok && info.Address != "" {
+			m.updateNode(msg.From, info.Address, msg.Incarnation, NodeStateAlive)
+		}
+	}
+
+	// Check if this is an ack from indirect probe target and forward if needed
 	if originalSender, ok := m.indirectProbes.Load(msg.From); ok {
-		// This is an ack from a target we probed indirectly
-		// Forward ack to original sender
 		originalSenderID := originalSender.(string)
 		m.indirectProbes.Delete(msg.From) // Clean up mapping
 
+		// Forward ack to original sender
 		if m.sendFunc != nil {
 			if v, ok := m.members.Load(originalSenderID); ok {
 				if info, ok := v.(*NodeInfo); ok && info.Address != "" {
-					// Forward ack to original sender
 					_ = m.sendFunc(info.Address, &indirectAckMsg{
 						From:        m.nodeID,
 						To:          originalSenderID,
@@ -284,17 +290,6 @@ func (m *memberMgr) handleAck(msg *ackMsg) error {
 		}
 	}
 
-	// Try to get address from existing member info
-	address := ""
-	if existing, ok := m.members.Load(msg.From); ok {
-		if info, ok := existing.(*NodeInfo); ok {
-			address = info.Address
-		}
-	}
-	// Update sender's info (only if we have address or node already exists)
-	if address != "" {
-		m.updateNode(msg.From, address, msg.Incarnation, NodeStateAlive)
-	}
 	return nil
 }
 
