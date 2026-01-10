@@ -180,8 +180,8 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 		ReplicaCount: opts.ReplicaCount,
 
 		// Writer
-		BatchThreshold: 100,
-		BatchWindow:    100 * time.Millisecond,
+		BatchThreshold: 15,
+		BatchWindow:    50 * time.Millisecond,
 
 		// Gossip
 		GossipInterval: opts.GossipInterval,

@@ -89,10 +89,10 @@ var _ Writer = (*writer)(nil)
 
 func newWriter(cfg writerConfig) (*writer, error) {
 	if cfg.BatchThreshold <= 0 {
-		cfg.BatchThreshold = 100
+		cfg.BatchThreshold = 15
 	}
 	if cfg.BatchWindow <= 0 {
-		cfg.BatchWindow = 100 * time.Millisecond
+		cfg.BatchWindow = 50 * time.Millisecond
 	}
 	if cfg.ReplicaCount <= 0 {
 		cfg.ReplicaCount = 3

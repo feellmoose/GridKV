@@ -560,7 +560,6 @@ func (m *memberMgr) updateLastActive(nodeID string) {
 
 	now := time.Now()
 	// Use 1-second threshold to balance performance and reliability
-	// This reduces memory allocations by ~50% while maintaining cluster stability
 	if now.Sub(info.LastActive) < time.Second {
 		return
 	}
