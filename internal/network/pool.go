@@ -65,8 +65,8 @@ type PoolConfig struct {
 // DefaultPoolConfig returns default pool config
 func DefaultPoolConfig(transport Transport) PoolConfig {
 	return PoolConfig{
-		MaxIdle:         10,
-		MaxActive:       50,
+		MaxIdle:         50,
+		MaxActive:       200,
 		IdleTimeout:     5 * time.Minute,
 		MaxLifetime:     30 * time.Minute,
 		WaitTimeout:     5 * time.Second,
