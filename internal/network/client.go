@@ -52,11 +52,11 @@ type ClientConfig struct {
 func DefaultClientConfig(pool ConnPool) ClientConfig {
 	return ClientConfig{
 		Pool:              pool,
-		DefaultTimeout:    10 * time.Second,  // Longer timeout for better reliability
-		RetryCount:        5,                 // More retries for fault tolerance
-		RetryBackoff:      200 * time.Millisecond, // Slightly longer backoff
+		DefaultTimeout:    10 * time.Second,
+		RetryCount:        5,
+		RetryBackoff:      200 * time.Millisecond,
 		EnableCompression: false,
-		MaxRetries:        5,                 // Match retry count
+		MaxRetries:        5,
 	}
 }
 
