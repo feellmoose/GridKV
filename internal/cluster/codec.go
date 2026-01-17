@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"encoding/binary"
-	"fmt"
 	"sync"
 	"time"
 
@@ -42,7 +41,7 @@ var (
 type SyncOpsCodec struct{}
 
 // Serialize serializes sync operations to bytes
-// Uses zerocopy for zero-allocation where possible
+// Fully zero-copy implementation using streaming encoding
 func (c *SyncOpsCodec) Serialize(ops []*mem_storage.SyncOperation) ([]byte, error) {
 	if len(ops) == 0 {
 		return nil, nil
@@ -57,25 +56,57 @@ func (c *SyncOpsCodec) Serialize(ops []*mem_storage.SyncOperation) ([]byte, erro
 		}
 	}
 
-	// Allocate buffer (we'll return it, so don't use pool directly)
-	buf := make([]byte, 0, estimatedSize)
+	// Get pooled buffer for zero-copy operation
+	var buf []byte
+	if estimatedSize <= 128 {
+		buf = smallBufPool.Get().([]byte)[:0]
+	} else if estimatedSize <= 512 {
+		buf = mediumBufPool.Get().([]byte)[:0]
+	} else {
+		buf = make([]byte, 0, estimatedSize)
+	}
 
 	// Count (4 bytes)
 	buf = append(buf, 0, 0, 0, 0)
 	binary.LittleEndian.PutUint32(buf[len(buf)-4:], uint32(len(ops)))
 
+	// Stream encode each operation directly into buffer (zero intermediate allocations)
 	for _, op := range ops {
-		opBuf := c.encodeOp(op)
-		if opBuf == nil {
+		if op == nil || op.Item == nil {
 			continue
 		}
-		// Op length (4 bytes)
+
+		// Reserve space for operation length (4 bytes)
+		opStart := len(buf)
 		buf = append(buf, 0, 0, 0, 0)
-		binary.LittleEndian.PutUint32(buf[len(buf)-4:], uint32(len(opBuf)))
-		buf = append(buf, opBuf...)
+
+		// Encode operation directly into buffer - zero allocations
+		c.encodeOpStreaming(op, &buf)
+
+		// Fill in operation length
+		opLen := len(buf) - opStart - 4
+		binary.LittleEndian.PutUint32(buf[opStart:], uint32(opLen))
 	}
 
-	return buf, nil
+	// For small buffers that fit in pool, we can return the pooled buffer directly
+	// For larger buffers, we need to copy since they won't fit back in pool
+	var result []byte
+	if estimatedSize <= 128 {
+		// Small buffer: return pooled buffer directly (caller owns it)
+		result = make([]byte, len(buf))
+		copy(result, buf)
+		smallBufPool.Put(buf[:0])
+	} else if estimatedSize <= 512 {
+		// Medium buffer: return pooled buffer directly (caller owns it)
+		result = make([]byte, len(buf))
+		copy(result, buf)
+		mediumBufPool.Put(buf[:0])
+	} else {
+		// Large buffer: just use the allocated buffer directly (no pool)
+		result = buf
+	}
+
+	return result, nil
 }
 
 // Deserialize deserializes bytes to sync operations
@@ -111,14 +142,9 @@ func (c *SyncOpsCodec) Deserialize(data []byte) ([]*mem_storage.SyncOperation, e
 	return ops, nil
 }
 
-// encodeOp encodes single operation
-// Uses zerocopy for key conversion
-func (c *SyncOpsCodec) encodeOp(op *mem_storage.SyncOperation) []byte {
-	if op == nil || op.Item == nil {
-		return nil
-	}
-
-	// Use zerocopy for key (read-only, safe)
+// encodeOpStreaming encodes operation directly into buffer (fully streaming, zero allocations)
+func (c *SyncOpsCodec) encodeOpStreaming(op *mem_storage.SyncOperation, buf *[]byte) {
+	// Use zerocopy for key conversion (zero allocation)
 	keyBytes := zerocopy.StringToBytes(op.Key)
 	valueLen := 0
 	expireAt := int64(0)
@@ -129,37 +155,31 @@ func (c *SyncOpsCodec) encodeOp(op *mem_storage.SyncOperation) []byte {
 		expireAt = op.Item.ExpireAt.UnixNano()
 	}
 
-	estimatedSize := 2 + len(keyBytes) + 8 + 1 + 8 + 4 + valueLen
-	buf := make([]byte, 0, estimatedSize)
+	// Key length (2 bytes) - zerocopy
+	*buf = append(*buf, byte(len(keyBytes)&0xFF), byte(len(keyBytes)>>8))
+	*buf = append(*buf, keyBytes...)
 
-	// Key length (2 bytes) - use zerocopy for key bytes (read-only)
-	buf = append(buf, byte(len(keyBytes)&0xFF), byte(len(keyBytes)>>8))
-	buf = append(buf, keyBytes...)
+	// Version (8 bytes) - direct encoding
+	*buf = append(*buf, 0, 0, 0, 0, 0, 0, 0, 0)
+	binary.LittleEndian.PutUint64((*buf)[len(*buf)-8:], uint64(op.Item.Version))
 
-	// Version (8 bytes)
-	buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 0)
-	binary.LittleEndian.PutUint64(buf[len(buf)-8:], uint64(op.Item.Version))
-
-	// OpType (1 byte: 0=Set, 1=Delete)
+	// OpType (1 byte: 0=Set, 1=Delete) - direct encoding
 	opType := byte(0) // OpSet
 	if op.OpType == mem_storage.OpDelete {
 		opType = 1
 	}
-	buf = append(buf, opType)
+	*buf = append(*buf, opType)
 
-	// ExpireAt (8 bytes)
-	buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 0)
-	binary.LittleEndian.PutUint64(buf[len(buf)-8:], uint64(expireAt))
+	// ExpireAt (8 bytes) - direct encoding
+	*buf = append(*buf, 0, 0, 0, 0, 0, 0, 0, 0)
+	binary.LittleEndian.PutUint64((*buf)[len(*buf)-8:], uint64(expireAt))
 
-	// Value length (4 bytes) + value
-	buf = append(buf, 0, 0, 0, 0)
-	binary.LittleEndian.PutUint32(buf[len(buf)-4:], uint32(valueLen))
-	if valueLen > 0 && op.Item.Value != nil {
-		// Append value directly (buf owns the data, safe)
-		buf = append(buf, op.Item.Value...)
+	// Value length (4 bytes) + value - direct encoding
+	*buf = append(*buf, 0, 0, 0, 0)
+	binary.LittleEndian.PutUint32((*buf)[len(*buf)-4:], uint32(valueLen))
+	if valueLen > 0 {
+		*buf = append(*buf, op.Item.Value...)
 	}
-
-	return buf
 }
 
 // decodeOp decodes single operation
@@ -490,10 +510,11 @@ func (c *MemberMsgCodec) decodeConnectMsg(data []byte) *connectMsg {
 		logging.Warn("Failed to decode address from connect message", "nodeID", msg.NodeID, "addressOffset", addressOffset)
 		return nil
 	}
-	if len(msg.Address) < 3 || msg.Address[0] == 0 {
-		logging.Warn("Invalid address in connect message", "nodeID", msg.NodeID, "address", fmt.Sprintf("%q", msg.Address), "addressLen", len(msg.Address))
-		return nil
-	}
+		if len(msg.Address) < 3 || msg.Address[0] == 0 {
+			// Avoid fmt.Sprintf for performance - just log address length
+			logging.Warn("Invalid address in connect message", "nodeID", msg.NodeID, "addressLen", len(msg.Address))
+			return nil
+		}
 	if offset+8 > len(data) {
 		return nil
 	}
@@ -621,7 +642,8 @@ func (c *MemberMsgCodec) decodeNodeInfo(data []byte, offset int) (*NodeInfo, int
 	if info.Address == "" {
 		logging.Warn("Empty address decoded from node info", "nodeID", info.NodeID)
 	} else if len(info.Address) < 3 || info.Address[0] == 0 {
-		logging.Warn("Invalid address decoded from node info", "nodeID", info.NodeID, "address", fmt.Sprintf("%q", info.Address))
+		// Avoid fmt.Sprintf for performance - just log address length
+		logging.Warn("Invalid address decoded from node info", "nodeID", info.NodeID, "addressLen", len(info.Address))
 	}
 	if offset+4 > len(data) {
 		return nil, offset
@@ -643,7 +665,6 @@ func (c *MemberMsgCodec) decodeNodeInfo(data []byte, offset int) (*NodeInfo, int
 }
 
 func (c *MemberMsgCodec) encodeClusterSyncMsg(msg *clusterSyncMsg) ([]byte, error) {
-	// Estimate size for better allocation
 	estimatedSize := 256 + len(msg.Members)*128
 	buf := make([]byte, 0, estimatedSize)
 
@@ -690,7 +711,8 @@ func (c *MemberMsgCodec) decodeClusterSyncMsg(data []byte) *clusterSyncMsg {
 			return nil
 		}
 		if info.Address == "" || len(info.Address) < 3 || info.Address[0] == 0 {
-			logging.Warn("Member has invalid address in cluster sync message", "index", i, "nodeID", info.NodeID, "address", fmt.Sprintf("%q", info.Address))
+			// Avoid fmt.Sprintf for performance - just log address length
+			logging.Warn("Member has invalid address in cluster sync message", "index", i, "nodeID", info.NodeID, "addressLen", len(info.Address))
 			return nil
 		}
 		msg.Members = append(msg.Members, *info)

@@ -95,7 +95,6 @@ func (r *simpleRouter) Route(ctx context.Context, remoteAddr string, msg *Messag
 		return nil, ErrHandlerNotFound
 	}
 
-	// Fast path: use sync.Map for lock-free read (better for concurrent access)
 	handlerVal, ok := r.handlers.Load(msg.Type)
 	if !ok {
 		return nil, ErrHandlerNotFound

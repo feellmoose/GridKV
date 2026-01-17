@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"runtime"
@@ -14,6 +15,7 @@ import (
 	"github.com/feellmoose/gridkv/internal/utils/hlc"
 	"github.com/feellmoose/gridkv/internal/utils/lifecycle"
 	"github.com/feellmoose/gridkv/internal/utils/logging"
+	"github.com/feellmoose/gridkv/internal/utils/zerocopy"
 )
 
 // Cluster is unified cluster component that manages all distributed operations
@@ -74,14 +76,43 @@ type Config struct {
 	ReadRepairRateLimitPerSec int64
 }
 
+// Executor configuration constants
+const (
+	workerMultiplier        = 4                    // Workers = CPU cores * multiplier
+	minWorkerCount          = 16                    // Minimum workers for basic functionality
+	maxWorkerCount          = 256                   // Maximum workers to prevent excessive goroutines
+	requestsPerWorker       = 3000                 // Queue size per worker
+	maxQueueSize            = 300000               // Maximum queue size to prevent memory issues
+	cacheShards             = 256                  // Cache shard count
+	cacheSize               = 10000                // Cache size
+	cacheCleanupInterval    = 1 * time.Second     // Cache cleanup interval
+	sendTimeout             = 5 * time.Second       // Network send timeout
+	defaultCheckpointInterval = 1 * time.Minute     // Default checkpoint interval
+)
+
 // New creates a new Cluster
 func New(cfg Config) (*Cluster, error) {
-	// Create executor with increased capacity for high throughput
+	// Dynamic worker count for massive concurrency support
+	workerCount := runtime.NumCPU() * workerMultiplier
+	if workerCount < minWorkerCount {
+		workerCount = minWorkerCount
+	}
+	if workerCount > maxWorkerCount {
+		workerCount = maxWorkerCount
+	}
+
+	// Massive queue size for handling bursts of concurrent requests
+	// Further increased for high-load scenarios to reduce rejections
+	queueSize := workerCount * requestsPerWorker
+	if queueSize > maxQueueSize {
+		queueSize = maxQueueSize
+	}
+
 	exec, err := executor.New(executor.Opts{
-		Name:        "cluster",
-		Workers:     runtime.NumCPU() * 2, // Scale with CPU cores
-		QueueSize:   1000,                 // Larger queue to handle bursts
-		NonBlocking: false,
+		Name:        "executor",
+		Workers:     workerCount,
+		QueueSize:   queueSize,
+		NonBlocking: true, // Non-blocking for high concurrency, with proper error handling
 	})
 	if err != nil {
 		return nil, err
@@ -89,9 +120,9 @@ func New(cfg Config) (*Cluster, error) {
 
 	// Cache for hot reads
 	hotCache := cache.New(cache.Opts{
-		Shards:        256,
-		Size:          10000,
-		CleanupIntv:   1 * time.Second,
+		Shards:        cacheShards,
+		Size:          cacheSize,
+		CleanupIntv:   cacheCleanupInterval,
 		EnableCleanup: true,
 	})
 
@@ -127,7 +158,8 @@ func New(cfg Config) (*Cluster, error) {
 				return err
 			}
 			// Use timeout context for Send to avoid hanging
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			const sendTimeout = 5 * time.Second
+			ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 			defer cancel()
 			return net.Send(ctx, address, encoded)
 		}
@@ -212,6 +244,7 @@ func New(cfg Config) (*Cluster, error) {
 		Ring:         ring,
 		ReplicaCount: cfg.ReplicaCount,
 		Executor:     exec,
+		HLC:          cfg.HLC,
 		Interval:     cfg.GossipInterval,
 		Member:       member,
 		SendFunc:     gossipSendFunc,
@@ -284,7 +317,7 @@ func New(cfg Config) (*Cluster, error) {
 		Executor:       exec,
 		Gossip:         gossip,
 		Member:         member,
-		CheckpointIntv: 1 * time.Minute,
+		CheckpointIntv: defaultCheckpointInterval,
 	})
 
 	cluster := &Cluster{
@@ -304,27 +337,46 @@ func New(cfg Config) (*Cluster, error) {
 	}
 
 	// Register components with lifecycle
-	// Dependency order: member -> ring -> writer/gossip -> reader/repair -> entropy/replay
-	lm.Register(member)
+	// Dependency order: network -> storage -> executor -> cache -> member -> ring -> writer/gossip -> reader/repair -> entropy/replay
+	// Register infrastructure components first (no dependencies) - they now implement lifecycle.Component directly
+	if net != nil {
+		lm.Register(net)
+	}
+	
+	lm.Register(cfg.Store)
+	
+	lm.Register(exec, "storage")
+	
+	if hotCache != nil {
+		lm.Register(hotCache, "storage")
+	}
+	
+	// Register cluster components
+	lm.Register(member, "executor")
 	lm.Register(ring, "member-mgr")
 	lm.Register(writer, "member-mgr")
 	lm.Register(gossip, "member-mgr")
-	lm.Register(reader, "gossip")
+	lm.Register(reader, "gossip", "cache")
 	lm.Register(repair, "gossip")
 	lm.Register(entropy, "gossip")
 	lm.Register(replay, "gossip")
 
 	// Register network message handlers if network is provided
 	if net != nil {
+		logging.Info("Setting up network handlers", "node", cfg.NodeID)
 		if err := setupNetworkHandlers(net, member, gossip, cfg.Store); err != nil {
 			return nil, fmt.Errorf("failed to setup network handlers: %w", err)
 		}
+		logging.Info("Network handlers setup complete", "node", cfg.NodeID)
+	} else {
+		logging.Info("No network provided, skipping handler setup", "node", cfg.NodeID)
 	}
 
 	return cluster, nil
 }
 
 // createGetFunc creates GetFunc using network
+// Returns function that deserializes complete StoredItem from remote node
 func createGetFunc(net network.Network, member *memberMgr, store *mem_storage.MemStorage) func(nodeID string, key string) (*mem_storage.StoredItem, error) {
 	return func(nodeID string, key string) (*mem_storage.StoredItem, error) {
 		// Find node address
@@ -352,12 +404,65 @@ func createGetFunc(net network.Network, member *memberMgr, store *mem_storage.Me
 			return nil, nil // Key not found
 		}
 
-		// Create proper StoredItem with metadata
-		now := time.Now().UnixNano()
+		// Deserialize StoredItem from response (includes version from remote node)
+		// Format: keyLen(2) + key + version(8) + opType(1) + expireAt(8) + valueLen(4) + value
+		if len(respData) < 2 {
+			return nil, fmt.Errorf("invalid response format from node %s", nodeID)
+		}
+		
+		offset := 0
+		
+		// Key length (2 bytes)
+		keyLen := int(binary.LittleEndian.Uint16(respData[offset:]))
+		offset += 2
+		
+		if offset+keyLen+8+1+8+4 > len(respData) {
+			// Fallback for old format (just value) - for backward compatibility
+			return &mem_storage.StoredItem{
+				Key:     key,
+				Value:   respData,
+				Version: time.Now().UnixNano(),
+			}, nil
+		}
+		
+		// Skip key (we already know it)
+		offset += keyLen
+		
+		// Version (8 bytes) - this is the HLC version from remote node
+		version := int64(binary.LittleEndian.Uint64(respData[offset:]))
+		offset += 8
+		
+		// OpType (1 byte) - skip
+		offset++
+		
+		// ExpireAt (8 bytes)
+		expireAt := int64(binary.LittleEndian.Uint64(respData[offset:]))
+		offset += 8
+		
+		// Value length (4 bytes)
+		valueLen := int(binary.LittleEndian.Uint32(respData[offset:]))
+		offset += 4
+		
+		if offset+valueLen > len(respData) {
+			return nil, fmt.Errorf("invalid response format from node %s: value length mismatch", nodeID)
+		}
+		
+		// Value
+		var value []byte
+		if valueLen > 0 {
+			value = zerocopy.FastCloneBytes(respData[offset : offset+valueLen])
+		}
+		
+		var expireTime time.Time
+		if expireAt > 0 {
+			expireTime = time.Unix(0, expireAt)
+		}
+		
 		return &mem_storage.StoredItem{
-			Key:     key,
-			Value:   respData,
-			Version: now, // Use current timestamp as version
+			Key:      key,
+			Value:    value,
+			Version:  version, // Use HLC version from remote node
+			ExpireAt: expireTime,
 		}, nil
 	}
 }
@@ -368,7 +473,10 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 	if err := net.RegisterMessageHandler(network.MessageTypePing, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		decoded := decodeMemberMsg(data, network.MessageTypePing)
 		if decoded != nil {
-			_ = member.HandleMessage(decoded)
+			// Handle message (error ignored as this is async message handling)
+			if err := member.HandleMessage(decoded); err != nil {
+				logging.Debug("Failed to handle ping message", "remote", remoteAddr, "error", err)
+			}
 		}
 		return nil, nil
 	}); err != nil {
@@ -394,7 +502,10 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 	if err := net.RegisterMessageHandler(network.MessageTypeLeave, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		decoded := decodeMemberMsg(data, network.MessageTypeLeave)
 		if decoded != nil {
-			_ = member.HandleMessage(decoded)
+			// Handle message (error ignored as this is async message handling)
+			if err := member.HandleMessage(decoded); err != nil {
+				logging.Debug("Failed to handle leave message", "remote", remoteAddr, "error", err)
+			}
 		}
 		return nil, nil
 	}); err != nil {
@@ -402,15 +513,23 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 	}
 
 	// Gossip message handlers
+	// Note: Gossip messages use prefix format ("PUSH:" or "PULL:nodeID:")
+	// The network layer passes Message.Data directly to handlers
 	if err := net.RegisterMessageHandler(network.MessageTypeGossipPush, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
-		_ = gossip.HandleMessage(data)
+		// Handle gossip message (error ignored as this is async message handling)
+		if err := gossip.HandleMessage(data); err != nil {
+			logging.Debug("Failed to handle gossip push message", "remote", remoteAddr, "error", err, "dataLen", len(data))
+		}
 		return nil, nil
 	}); err != nil {
 		return err
 	}
 
 	if err := net.RegisterMessageHandler(network.MessageTypeGossipPull, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
-		_ = gossip.HandleMessage(data)
+		// Handle gossip message (error ignored as this is async message handling)
+		if err := gossip.HandleMessage(data); err != nil {
+			logging.Debug("Failed to handle gossip pull message", "remote", remoteAddr, "error", err, "dataLen", len(data))
+		}
 		return nil, nil
 	}); err != nil {
 		return err
@@ -421,7 +540,8 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 		if len(data) == 0 {
 			return nil, nil
 		}
-		key := string(data)
+		// Use zerocopy to avoid allocation
+		key := zerocopy.BytesToString(data)
 		item, _ := store.Get(key)
 		if item == nil {
 			return nil, nil
@@ -432,16 +552,57 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 	}
 
 	// Also register MessageTypeReadRequest for cluster-internal communication
+	// Returns serialized StoredItem with full metadata (version, expireAt, etc.)
 	if err := net.RegisterMessageHandler(network.MessageTypeReadRequest, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		if len(data) == 0 {
 			return nil, nil
 		}
-		key := string(data)
+		// Use zerocopy to avoid allocation
+		key := zerocopy.BytesToString(data)
 		item, _ := store.Get(key)
 		if item == nil {
 			return nil, nil
 		}
-		return item.Value, nil
+		// Serialize complete StoredItem (including version) using codec format
+		// Format: keyLen(2) + key + version(8) + opType(1) + expireAt(8) + valueLen(4) + value
+		keyBytes := zerocopy.StringToBytes(item.Key)
+		keyLen := len(keyBytes)
+		valueLen := 0
+		if item.Value != nil {
+			valueLen = len(item.Value)
+		}
+		expireAt := int64(0)
+		if !item.ExpireAt.IsZero() {
+			expireAt = item.ExpireAt.UnixNano()
+		}
+		
+		// Estimate size: 2 + keyLen + 8 + 1 + 8 + 4 + valueLen
+		totalSize := 2 + keyLen + 8 + 1 + 8 + 4 + valueLen
+		buf := make([]byte, 0, totalSize)
+		
+		// Key length (2 bytes)
+		buf = append(buf, byte(keyLen&0xFF), byte(keyLen>>8))
+		buf = append(buf, keyBytes...)
+		
+		// Version (8 bytes)
+		buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 0)
+		binary.LittleEndian.PutUint64(buf[len(buf)-8:], uint64(item.Version))
+		
+		// OpType (1 byte: 0=Set)
+		buf = append(buf, 0)
+		
+		// ExpireAt (8 bytes)
+		buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 0)
+		binary.LittleEndian.PutUint64(buf[len(buf)-8:], uint64(expireAt))
+		
+		// Value length (4 bytes) + value
+		buf = append(buf, 0, 0, 0, 0)
+		binary.LittleEndian.PutUint32(buf[len(buf)-4:], uint32(valueLen))
+		if valueLen > 0 {
+			buf = append(buf, item.Value...)
+		}
+		
+		return buf, nil
 	}); err != nil {
 		return err
 	}
@@ -514,19 +675,10 @@ func (c *Cluster) Stop(ctx context.Context) error {
 		c.ring.Update(time.Now().UnixNano(), nodeIDs)
 	}
 
-	// Close lifecycle-managed components
+	// Close all lifecycle-managed components (including infrastructure)
+	// Lifecycle manager handles dependency order and cleanup
 	if err := c.lifecycle.Close(ctx); err != nil {
 		return err
-	}
-
-	// Close cache
-	if c.cache != nil {
-		c.cache.Close()
-	}
-
-	// Stop executor
-	if c.executor != nil {
-		_ = c.executor.Stop(10 * time.Second)
 	}
 
 	return nil
@@ -538,9 +690,13 @@ func (c *Cluster) Join(seed []string) error {
 		return err
 	}
 
-	// Update hash ring after joining (wait for membership to stabilize)
-	time.Sleep(100 * time.Millisecond)
+	// Update hash ring after joining (use retry with timeout instead of fixed sleep)
 	members := c.member.Members()
+	// Retry a few times if no members yet (membership may need time to propagate)
+	for i := 0; i < 5 && len(members) == 0; i++ {
+		time.Sleep(20 * time.Millisecond)
+		members = c.member.Members()
+	}
 	nodeIDs := make([]string, 0, len(members))
 	for _, m := range members {
 		if m.State == NodeStateAlive {

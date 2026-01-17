@@ -2,6 +2,9 @@ package cluster
 
 import (
 	"context"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,36 +13,92 @@ import (
 	"github.com/feellmoose/gridkv/internal/utils/hlc"
 )
 
-func TestWriter_Basic(t *testing.T) {
-	ctx := context.Background()
+// testWriterDeps holds common test dependencies for writer tests
+type testWriterDeps struct {
+	store   *mem_storage.MemStorage
+	hlcInst *hlc.HLC
+	exec    *executor.Exec
+	ring    HashRing
+	gossip  Gossip
+	member  MemberMgr
+}
 
-	store, _ := mem_storage.New(mem_storage.DefaultConfig())
+// setupWriterDeps creates common test dependencies
+func setupWriterDeps(t *testing.T) *testWriterDeps {
+	t.Helper()
+
+	store, err := mem_storage.New(mem_storage.DefaultConfig())
+	if err != nil {
+		t.Fatalf("Failed to create mem storage: %v", err)
+	}
+
 	hlcInst := hlc.NewHLC("node1")
-	exec, _ := executor.New(executor.Opts{Name: "test", Workers: 2})
+	exec, err := executor.New(executor.Opts{Name: "test", Workers: 2})
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
 	ring := newHashRing(128)
 	ring.Update(1, []string{"node1"})
 
-	gossip, _ := newGossip(gossipConfig{
+	gossip, err := newGossip(gossipConfig{
 		NodeID:   "node1",
 		Store:    store,
 		Executor: exec,
 		SendFunc: func(address string, data []byte) error { return nil },
 	})
+	if err != nil {
+		t.Fatalf("Failed to create gossip: %v", err)
+	}
+
+	member, err := newMemberMgr(memberConfig{
+		NodeID:         "node1",
+		Address:        "localhost:8080",
+		PingInterval:   100 * time.Millisecond,
+		FailureTimeout: 1 * time.Second,
+		SuspectTimeout: 500 * time.Millisecond,
+		SendFunc:       noOpSendFunc,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create member: %v", err)
+	}
+
+	return &testWriterDeps{
+		store:   store,
+		hlcInst: hlcInst,
+		exec:    exec,
+		ring:    ring,
+		gossip:  gossip,
+		member:  member,
+	}
+}
+
+// createTestWriter creates a writer with test configuration
+func createTestWriter(t *testing.T, deps *testWriterDeps, batchThreshold int, batchWindow time.Duration) *writer {
+	t.Helper()
 
 	writer, err := newWriter(writerConfig{
 		NodeID:         "node1",
-		HLC:            hlcInst,
-		Store:          store,
-		Ring:           ring,
-		Gossip:         gossip,
-		Executor:       exec,
-		BatchThreshold: 10,
-		BatchWindow:    100 * time.Millisecond,
+		HLC:            deps.hlcInst,
+		Store:          deps.store,
+		Ring:           deps.ring,
+		Gossip:         deps.gossip,
+		Member:         deps.member,
+		Executor:       deps.exec,
+		BatchThreshold: batchThreshold,
+		BatchWindow:    batchWindow,
 		ReplicaCount:   3,
 	})
 	if err != nil {
-		t.Fatalf("newWriter() error = %v", err)
+		t.Fatalf("Failed to create writer: %v", err)
 	}
+	return writer
+}
+
+func TestWriter_Basic(t *testing.T) {
+	ctx := context.Background()
+	deps := setupWriterDeps(t)
+	writer := createTestWriter(t, deps, 10, 100*time.Millisecond)
 
 	// Test Set
 	item := &mem_storage.StoredItem{
@@ -50,7 +109,7 @@ func TestWriter_Basic(t *testing.T) {
 	}
 
 	// Verify stored
-	got, err := store.Get("key1")
+	got, err := deps.store.Get("key1")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -64,34 +123,8 @@ func TestWriter_Basic(t *testing.T) {
 
 func TestWriter_BatchSet(t *testing.T) {
 	ctx := context.Background()
-
-	store, _ := mem_storage.New(mem_storage.DefaultConfig())
-	hlcInst := hlc.NewHLC("node1")
-	exec, _ := executor.New(executor.Opts{Name: "test", Workers: 2})
-	ring := newHashRing(128)
-	ring.Update(1, []string{"node1"})
-
-	gossip, _ := newGossip(gossipConfig{
-		NodeID:   "node1",
-		Store:    store,
-		Executor: exec,
-		SendFunc: func(address string, data []byte) error { return nil },
-	})
-
-	writer, err := newWriter(writerConfig{
-		NodeID:         "node1",
-		HLC:            hlcInst,
-		Store:          store,
-		Ring:           ring,
-		Gossip:         gossip,
-		Executor:       exec,
-		BatchThreshold: 10,
-		BatchWindow:    100 * time.Millisecond,
-		ReplicaCount:   3,
-	})
-	if err != nil {
-		t.Fatalf("newWriter() error = %v", err)
-	}
+	deps := setupWriterDeps(t)
+	writer := createTestWriter(t, deps, 10, 100*time.Millisecond)
 
 	// Test BatchSet
 	items := map[string]*mem_storage.StoredItem{
@@ -106,7 +139,7 @@ func TestWriter_BatchSet(t *testing.T) {
 
 	// Verify all stored
 	for key, expected := range items {
-		got, err := store.Get(key)
+		got, err := deps.store.Get(key)
 		if err != nil {
 			t.Fatalf("Get(%s) error = %v", key, err)
 		}
@@ -202,13 +235,13 @@ func TestWriter_BatchTrigger(t *testing.T) {
 	ring := newHashRing(128)
 	ring.Update(1, []string{"node1", "node2", "node3"})
 
-	var pushed bool
+	var pushed int32
 	gossip, _ := newGossip(gossipConfig{
 		NodeID:   "node1",
 		Store:    store,
 		Executor: exec,
 		SendFunc: func(address string, data []byte) error {
-			pushed = true
+			atomic.StoreInt32(&pushed, 1)
 			return nil
 		},
 	})
@@ -253,12 +286,12 @@ func TestWriter_BatchTrigger(t *testing.T) {
 	// Wait for batch processing
 	time.Sleep(100 * time.Millisecond)
 
-	if !pushed {
+	if atomic.LoadInt32(&pushed) == 0 {
 		t.Error("Batch threshold did not trigger gossip push")
 	}
 
 	// Reset
-	pushed = false
+	atomic.StoreInt32(&pushed, 0)
 
 	// Trigger batch by time window
 	item := &mem_storage.StoredItem{
@@ -269,7 +302,185 @@ func TestWriter_BatchTrigger(t *testing.T) {
 	// Wait for window timeout
 	time.Sleep(100 * time.Millisecond)
 
-	if !pushed {
+	if atomic.LoadInt32(&pushed) == 0 {
 		t.Error("Batch window did not trigger gossip push")
+	}
+}
+
+func TestWriter_ConcurrentAccess(t *testing.T) {
+	ctx := context.Background()
+	deps := setupWriterDeps(t)
+	writer := createTestWriter(t, deps, 100, 1*time.Second) // Large threshold to avoid batching
+
+	const numGoroutines = 10
+	const opsPerGoroutine = 50
+
+	var wg sync.WaitGroup
+	errors := make(chan error, numGoroutines*opsPerGoroutine)
+
+	// Start concurrent writers
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(goroutineID int) {
+			defer wg.Done()
+			for j := 0; j < opsPerGoroutine; j++ {
+				key := fmt.Sprintf("concurrent-key-%d-%d", goroutineID, j)
+				item := &mem_storage.StoredItem{
+					Value: []byte(fmt.Sprintf("concurrent-value-%d-%d", goroutineID, j)),
+				}
+				if err := writer.Set(ctx, key, item); err != nil {
+					errors <- err
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	// Check for errors
+	errorCount := 0
+	for err := range errors {
+		t.Errorf("Concurrent write error: %v", err)
+		errorCount++
+	}
+
+	if errorCount > 0 {
+		t.Fatalf("Found %d errors in concurrent writes", errorCount)
+	}
+
+	// Verify all operations were stored
+	totalExpected := numGoroutines * opsPerGoroutine
+	storedCount := 0
+	for i := 0; i < numGoroutines; i++ {
+		for j := 0; j < opsPerGoroutine; j++ {
+			key := fmt.Sprintf("concurrent-key-%d-%d", i, j)
+			if got, err := deps.store.Get(key); err == nil && got != nil {
+				expectedValue := fmt.Sprintf("concurrent-value-%d-%d", i, j)
+				if string(got.Value) != expectedValue {
+					t.Errorf("Key %s has wrong value: got %s, want %s", key, string(got.Value), expectedValue)
+				}
+				storedCount++
+			}
+		}
+	}
+
+	if storedCount != totalExpected {
+		t.Errorf("Expected %d stored operations, got %d", totalExpected, storedCount)
+	}
+}
+
+func TestWriter_ErrorHandling(t *testing.T) {
+	deps := setupWriterDeps(t)
+
+	// Test with nil store
+	_, err := newWriter(writerConfig{
+		NodeID:         "node1",
+		HLC:            deps.hlcInst,
+		Store:          nil, // Invalid store
+		Ring:           deps.ring,
+		Gossip:         deps.gossip,
+		Member:         deps.member,
+		Executor:       deps.exec,
+		BatchThreshold: 10,
+		BatchWindow:    100 * time.Millisecond,
+		ReplicaCount:   3,
+	})
+	if err == nil {
+		t.Error("Expected error with nil store, got nil")
+	}
+
+	// Test with nil HLC
+	_, err = newWriter(writerConfig{
+		NodeID:         "node1",
+		HLC:            nil, // Invalid HLC
+		Store:          deps.store,
+		Ring:           deps.ring,
+		Gossip:         deps.gossip,
+		Member:         deps.member,
+		Executor:       deps.exec,
+		BatchThreshold: 10,
+		BatchWindow:    100 * time.Millisecond,
+		ReplicaCount:   3,
+	})
+	if err == nil {
+		t.Error("Expected error with nil HLC, got nil")
+	}
+
+	// Test with nil executor
+	_, err = newWriter(writerConfig{
+		NodeID:         "node1",
+		HLC:            deps.hlcInst,
+		Store:          deps.store,
+		Ring:           deps.ring,
+		Gossip:         deps.gossip,
+		Member:         deps.member,
+		Executor:       nil, // Invalid executor
+		BatchThreshold: 10,
+		BatchWindow:    100 * time.Millisecond,
+		ReplicaCount:   3,
+	})
+	if err == nil {
+		t.Error("Expected error with nil executor, got nil")
+	}
+}
+
+func TestWriter_BoundaryConditions(t *testing.T) {
+	ctx := context.Background()
+	deps := setupWriterDeps(t)
+	writer := createTestWriter(t, deps, 10, 100*time.Millisecond)
+
+	// Test empty key
+	item := &mem_storage.StoredItem{Value: []byte("value")}
+	err := writer.Set(ctx, "", item)
+	if err == nil {
+		t.Error("Expected error with empty key, got nil")
+	}
+
+	// Test very large value
+	largeValue := make([]byte, 1024*1024) // 1MB
+	for i := range largeValue {
+		largeValue[i] = byte(i % 256)
+	}
+	largeItem := &mem_storage.StoredItem{Value: largeValue}
+	err = writer.Set(ctx, "large-key", largeItem)
+	if err != nil {
+		t.Fatalf("Set with large value failed: %v", err)
+	}
+
+	// Verify large value was stored
+	got, err := deps.store.Get("large-key")
+	if err != nil {
+		t.Fatalf("Get large value failed: %v", err)
+	}
+	if got == nil || len(got.Value) != len(largeValue) {
+		t.Errorf("Large value not stored correctly: got len=%d, want len=%d", len(got.Value), len(largeValue))
+	}
+
+	// Test special characters in key
+	specialKeys := []string{
+		"key with spaces",
+		"key-with-dashes",
+		"key_with_underscores",
+		"key/with/slashes",
+		"key:with:colons",
+		"key@with@symbols",
+		"unicode-key-中文",
+	}
+
+	for _, key := range specialKeys {
+		value := fmt.Sprintf("value-for-%s", key)
+		item := &mem_storage.StoredItem{Value: []byte(value)}
+		err := writer.Set(ctx, key, item)
+		if err != nil {
+			t.Errorf("Set with special key '%s' failed: %v", key, err)
+		}
+
+		got, err := deps.store.Get(key)
+		if err != nil {
+			t.Errorf("Get with special key '%s' failed: %v", key, err)
+		} else if got == nil || string(got.Value) != value {
+			t.Errorf("Special key '%s' not stored correctly", key)
+		}
 	}
 }

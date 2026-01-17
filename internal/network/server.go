@@ -4,13 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/utils/logging"
-	"github.com/quic-go/quic-go"
 )
 
 // Handler handles incoming messages
@@ -109,7 +107,10 @@ type networkServer struct {
 func NewServer(cfg ServerConfig) Server {
 	workerPoolSize := cfg.WorkerPoolSize
 	if workerPoolSize <= 0 {
-		workerPoolSize = 100 // Default worker pool size
+		workerPoolSize = 100 // Reasonable default
+	}
+	if workerPoolSize > 5000 {
+		workerPoolSize = 5000 // Cap to prevent excessive goroutines
 	}
 	return &networkServer{
 		cfg:    cfg,
@@ -149,10 +150,17 @@ func (s *networkServer) StartRequestResponse(ctx context.Context, address string
 
 func (s *networkServer) acceptLoop() {
 	defer s.wg.Done()
+	
 	for {
 		select {
 		case <-s.stopCh:
-			close(s.connCh) // Signal workers to stop
+			// Close connCh to signal workers to stop (only once)
+			select {
+			case <-s.connCh:
+				// Channel already closed or being closed
+			default:
+				close(s.connCh)
+			}
 			return
 		default:
 		}
@@ -164,7 +172,6 @@ func (s *networkServer) acceptLoop() {
 			// Check if we should stop
 			select {
 			case <-s.stopCh:
-				close(s.connCh)
 				return
 			default:
 			}
@@ -180,7 +187,6 @@ func (s *networkServer) acceptLoop() {
 		case s.connCh <- conn:
 		case <-s.stopCh:
 			conn.Close()
-			close(s.connCh)
 			return
 		}
 	}
@@ -202,6 +208,7 @@ func (s *networkServer) handleConn(conn Conn) {
 
 	const maxHandlerErrors = 10
 	handlerErrorCount := 0
+	const maxMessageSize = 64 * 1024 * 1024 // 64MB max message size
 
 	for {
 		// Check if we should stop before each receive
@@ -230,6 +237,17 @@ func (s *networkServer) handleConn(conn Conn) {
 			// For non-timeout errors, close connection
 			return
 		}
+		
+		// Validate message size
+		if len(data) > maxMessageSize {
+			s.stats.Errors.Add(1)
+			logging.Warn("Message too large, closing connection",
+				"remoteAddr", conn.RemoteAddr(),
+				"size", len(data),
+				"maxSize", maxMessageSize)
+			return
+		}
+		
 		s.stats.Messages.Add(1)
 		s.stats.Bytes.Add(uint64(len(data)))
 		resp, err := s.handler(context.Background(), conn.RemoteAddr(), data)
@@ -301,27 +319,8 @@ func (s *networkServer) Stop(ctx context.Context) error {
 
 		// Close all collected connections synchronously
 		for _, conn := range conns {
-			// Use reflection to access underlying connection and set deadline
-			// This will cause io.ReadFull to return immediately
-			connVal := reflect.ValueOf(conn)
-			if connVal.Kind() == reflect.Ptr {
-				connVal = connVal.Elem()
-			}
-			if connVal.IsValid() && connVal.Kind() == reflect.Struct {
-				// Try to find net.Conn field (for tcpConn)
-				if connField := connVal.FieldByName("conn"); connField.IsValid() && connField.CanInterface() {
-					if netConn, ok := connField.Interface().(net.Conn); ok {
-						_ = netConn.SetReadDeadline(deadline)
-					}
-				}
-				// Try to find stream field (for quicConn)
-				if streamField := connVal.FieldByName("stream"); streamField.IsValid() && streamField.CanInterface() {
-					if streamPtr, ok := streamField.Interface().(*quic.Stream); ok && streamPtr != nil {
-						// quic.Stream has SetReadDeadline method
-						_ = (*streamPtr).SetReadDeadline(deadline)
-					}
-				}
-			}
+			// Set read deadline to force immediate timeout on blocked Receive() calls
+			_ = conn.SetReadDeadline(deadline)
 			// Close connection synchronously for immediate effect
 			conn.Close()
 		}

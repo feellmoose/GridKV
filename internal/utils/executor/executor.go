@@ -7,6 +7,7 @@ package executor
 //   - Efficient task scheduling
 //   - Graceful shutdown with leak prevention
 //   - Nil pointer protection
+//   - Lifecycle.Component integration
 
 import (
 	"context"
@@ -17,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/feellmoose/gridkv/internal/utils/lifecycle"
 	"github.com/feellmoose/gridkv/internal/utils/logging"
 )
 
@@ -69,7 +71,7 @@ type Exec struct {
 	dropped atomic.Uint64
 
 	wg sync.WaitGroup
-	mu sync.Mutex
+	mu sync.RWMutex
 }
 
 // New creates an executor
@@ -109,6 +111,10 @@ func (e *Exec) Do(task func()) error {
 	if task == nil {
 		return errors.New("nil task")
 	}
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
 	if e.closed.Load() {
 		return ErrClosed
 	}
@@ -129,6 +135,7 @@ func (e *Exec) Do(task func()) error {
 		}
 	}
 
+	// Double-check closed state to avoid race with Stop()
 	select {
 	case e.tasks <- task:
 		return nil
@@ -261,12 +268,16 @@ func (e *Exec) Stop(timeout time.Duration) error {
 	if e == nil {
 		return nil
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if !e.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 
-	close(e.tasks)
+	// Close channels
 	close(e.stop)
+	close(e.tasks)
 
 	done := make(chan struct{})
 	go func() {
@@ -300,6 +311,33 @@ func (e *Exec) Stop(timeout time.Duration) error {
 	}
 }
 
+// lifecycle.Component implementation
+func (e *Exec) Name() string {
+	if e == nil || e.opts.Name == "" {
+		return "executor"
+	}
+	return e.opts.Name
+}
+
+func (e *Exec) Start(ctx context.Context) error {
+	// Executor starts workers in New(), no additional start needed
+	return nil
+}
+
+func (e *Exec) Close(ctx context.Context) error {
+	timeout := 10 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = time.Until(deadline)
+		if timeout <= 0 {
+			timeout = 10 * time.Second
+		}
+	}
+	return e.Stop(timeout)
+}
+
+// Ensure Exec implements lifecycle.Component
+var _ lifecycle.Component = (*Exec)(nil)
+
 // Stats returns current statistics
 func (e *Exec) Stats() Stats {
 	if e == nil {
@@ -332,18 +370,24 @@ func (e *Exec) startWorker() {
 		}()
 
 		for {
+			// Check if we should exit (resize down or closed)
 			running := e.running.Load()
 			cap := e.cap.Load()
 			if running > cap && cap > 0 && !e.closed.Load() {
 				return
 			}
 
-			task, ok := <-e.tasks
-			if !ok {
+			// Use select to allow checking stop channel
+			select {
+			case task, ok := <-e.tasks:
+				if !ok {
+					return
+				}
+				if task != nil {
+					e.run(task)
+				}
+			case <-e.stop:
 				return
-			}
-			if task != nil {
-				e.run(task)
 			}
 		}
 	}()

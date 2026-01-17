@@ -7,14 +7,13 @@
 
 高性能分布式键值缓存SDK，使用内存，具有最终一致性保证。
 
-[English](./README.md)/中文
+[English](./README.md) / 中文
 
 ## 功能特性
 
-- **高性能与并发安全**: 亚毫秒级本地操作针对并发工作负载优化，所有公共方法支持并发访问
-- **最终一致性复制**: 流行病 gossip 协议配合批量复制确保节点间数据收敛
+- **高性能与并发安全**: 亚毫秒级本地操作，所有公共方法支持并发访问
+- **最终一致性复制**: Gossip协议配合批量复制确保节点间数据收敛
 - **分布式容错架构**: 一致性哈希配合虚拟节点和 SWIM 协议实现负载均衡和故障检测
-- **自适应网络通信**: LAN/WAN 环境优化，支持 TCP/QUIC 的节点间通信
 - **内存存储**: 内存后端支持 TTL 和自动压缩
 
 ## 安装
@@ -56,48 +55,27 @@ func main() {
 }
 ```
 
-## 性能
-
-运行基准测试：
+## 测试
 
 ```bash
+# 运行所有测试
+go test ./...
+
+# 运行短测试
+go test -short ./...
+
+# 运行基准测试
 go test -bench=. ./tests/
 ```
 
-### 集成测试配置
+## 架构
 
-集成测试和基准测试可以通过环境变量配置，以适应不同机器规格：
+- **SWIM协议**: 成员管理和故障检测
+- **一致性哈希**: 跨节点键分布
+- **Gossip协议**: 高效数据复制
+- **HLC (混合逻辑时钟)**: 因果关系跟踪和冲突解决
 
-#### 内存配置
-- `TEST_MAX_MEMORY_MB`: 默认每个节点的内存 (默认: 1024MB)
-- `BENCH_MAX_MEMORY_MB`: 基准测试每个节点的内存 (默认: 256MB)
-- `INTEGRATION_MAX_MEMORY_MB`: 集成测试每个节点的内存 (默认: 512MB)
-
-#### 集群配置
-- `TEST_NODE_COUNT`: 测试节点数量 (默认: 100)
-- `BENCH_NODE_COUNT`: 基准测试节点数量 (默认: 50)
-- `INTEGRATION_LARGE_CLUSTER_THRESHOLD`: 大集群阈值 (默认: 100)
-
-#### 性能调优
-- `INTEGRATION_CONCURRENCY`: 测试并发级别 (默认: 根据测试而异)
-- `INTEGRATION_TEST_DURATION`: 测试持续时间 (默认: 5s)
-- `BENCH_REPLICA_COUNT`: 基准测试复制因子 (默认: 3)
-
-使用示例：
-```bash
-# 低内存机器 (8GB RAM)
-export TEST_MAX_MEMORY_MB=256
-export BENCH_MAX_MEMORY_MB=128
-export TEST_NODE_COUNT=20
-
-# 高性能机器 (64GB RAM)
-export TEST_MAX_MEMORY_MB=4096
-export BENCH_MAX_MEMORY_MB=2048
-export TEST_NODE_COUNT=200
-export INTEGRATION_CONCURRENCY=100
-
-go test -v -short ./...
-```
+查看 [internal/cluster/README.md](internal/cluster/README.md) 获取详细架构文档。
 
 ## 许可证
 

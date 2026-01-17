@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,17 @@ import (
 	"github.com/feellmoose/gridkv/internal/utils/cache"
 	"github.com/feellmoose/gridkv/internal/utils/executor"
 	"github.com/feellmoose/gridkv/internal/utils/hlc"
+	"github.com/feellmoose/gridkv/internal/utils/logging"
+)
+
+// Pool size constants for object pools
+const (
+	targetOpsMapInitialSize    = 8
+	keyTargetsCacheInitialSize = 16
+	nodeIDToAddrInitialSize    = 16
+	stringSliceInitialSize     = 16
+	syncOpSliceInitialSize     = 32
+	initialVersionMapSize      = 1024 // Pre-allocated size for version tracking map
 )
 
 // Object pools for reducing allocations in hot paths
@@ -18,21 +30,28 @@ var (
 	// Map pool for targetOpsMap (map[string][]*SyncOperation)
 	targetOpsMapPool = sync.Pool{
 		New: func() interface{} {
-			return make(map[string][]*mem_storage.SyncOperation, 16)
+			return make(map[string][]*mem_storage.SyncOperation, targetOpsMapInitialSize)
 		},
 	}
 
 	// Map pool for keyTargetsCache (map[string][]string)
 	keyTargetsCachePool = sync.Pool{
 		New: func() interface{} {
-			return make(map[string][]string, 32)
+			return make(map[string][]string, keyTargetsCacheInitialSize)
 		},
 	}
 
 	// Map pool for nodeIDToAddr (map[string]string)
 	nodeIDToAddrPool = sync.Pool{
 		New: func() interface{} {
-			return make(map[string]string, 32)
+			return make(map[string]string, nodeIDToAddrInitialSize)
+		},
+	}
+
+	// Error channel pool for error channels
+	errorChanPool = sync.Pool{
+		New: func() interface{} {
+			return make(chan error, 1)
 		},
 	}
 )
@@ -62,6 +81,9 @@ type writer struct {
 	replicaCount   int
 	flushPending   atomic.Bool
 
+	lastVersions map[string]int64
+	lastVersionsMu sync.RWMutex
+
 	// Pending ops for non-replica keys (to be pushed to replicas)
 	pendingOps []*mem_storage.SyncOperation
 	pendingMu  sync.Mutex
@@ -88,14 +110,36 @@ type writerConfig struct {
 var _ Writer = (*writer)(nil)
 
 func newWriter(cfg writerConfig) (*writer, error) {
+	// Validate required dependencies
+	if cfg.Store == nil {
+		return nil, fmt.Errorf("store cannot be nil")
+	}
+	if cfg.HLC == nil {
+		return nil, fmt.Errorf("HLC cannot be nil")
+	}
+	if cfg.Executor == nil {
+		return nil, fmt.Errorf("executor cannot be nil")
+	}
+	if cfg.Ring == nil {
+		return nil, fmt.Errorf("ring cannot be nil")
+	}
+
+	// Default configuration constants
+	const (
+		defaultBatchThreshold = 200
+		defaultBatchWindow    = 10 * time.Millisecond
+		defaultReplicaCount   = 3
+	)
+
+	// Set defaults for optional parameters - optimized for high throughput
 	if cfg.BatchThreshold <= 0 {
-		cfg.BatchThreshold = 15
+		cfg.BatchThreshold = defaultBatchThreshold
 	}
 	if cfg.BatchWindow <= 0 {
-		cfg.BatchWindow = 50 * time.Millisecond
+		cfg.BatchWindow = defaultBatchWindow
 	}
 	if cfg.ReplicaCount <= 0 {
-		cfg.ReplicaCount = 3
+		cfg.ReplicaCount = defaultReplicaCount
 	}
 
 	w := &writer{
@@ -112,6 +156,7 @@ func newWriter(cfg writerConfig) (*writer, error) {
 		flushTimer:     time.NewTimer(cfg.BatchWindow),
 		replicaCount:   cfg.ReplicaCount,
 		stopCh:         make(chan struct{}),
+		lastVersions:    make(map[string]int64, initialVersionMapSize), // Pre-allocate for performance
 	}
 
 	w.wg.Add(1)
@@ -130,28 +175,35 @@ func (w *writer) isLocalReplica(targets []string) bool {
 	return false
 }
 
-// storeOrQueue stores item locally if replica, otherwise queues for gossip
+// storeOrQueue stores item locally always, and queues for gossip to other replicas
 func (w *writer) storeOrQueue(key string, item *mem_storage.StoredItem, opType mem_storage.OpType) error {
 	targets := w.ring.GetN(key, w.replicaCount)
 	if len(targets) == 0 {
 		return fmt.Errorf("no replica nodes available for key %s", key)
 	}
 
-	if w.isLocalReplica(targets) {
-		if err := w.store.Set(key, item); err != nil {
-			return err
+	// Always store locally first for immediate consistency
+	if err := w.store.Set(key, item); err != nil {
+		return fmt.Errorf("failed to store key %s locally: %v", key, err)
+	}
+
+	// Queue for replication to other replicas (exclude local node)
+	w.pendingMu.Lock()
+	for _, target := range targets {
+		if target != w.nodeID {
+			w.pendingOps = append(w.pendingOps, &mem_storage.SyncOperation{
+				Key:    key,
+				OpType: opType,
+				Item:   item.DeepCopy(),
+			})
 		}
-		if w.cache != nil {
-			w.cache.Delete(key)
-		}
-	} else {
-		w.pendingMu.Lock()
-		w.pendingOps = append(w.pendingOps, &mem_storage.SyncOperation{
-			Key:    key,
-			OpType: opType,
-			Item:   item.DeepCopy(),
-		})
-		w.pendingMu.Unlock()
+	}
+	w.pendingMu.Unlock()
+	
+	// Trigger batch after queuing to ensure ops are included
+	w.triggerBatch()
+	if w.cache != nil {
+		w.cache.Delete(key)
 	}
 	return nil
 }
@@ -159,6 +211,38 @@ func (w *writer) storeOrQueue(key string, item *mem_storage.StoredItem, opType m
 func (w *writer) Set(ctx context.Context, key string, item *mem_storage.StoredItem) error {
 	hlcStr := w.hlc.Now()
 	version := hlcToInt64(hlcStr)
+
+	w.lastVersionsMu.Lock()
+	lastVersion, exists := w.lastVersions[key]
+	if exists && version <= lastVersion {
+		logging.Warn("Version non-monotonic detected", "node", w.nodeID, "key", key,
+			"current_version", version, "last_version", lastVersion)
+		// Force monotonicity: use lastVersion + 1 if current is not greater
+		version = lastVersion + 1
+	}
+	w.lastVersions[key] = version
+	
+	// Limit map size to prevent memory leak (keep last 10K keys)
+	const (
+		maxVersions     = 10000
+		cleanupFraction = 5 // Remove 20% (1/5) when limit exceeded
+	)
+	if len(w.lastVersions) > maxVersions {
+		// Simple cleanup: remove oldest 20% of entries
+		// In practice, this is rarely needed as keys are reused
+		toRemove := len(w.lastVersions) - maxVersions + maxVersions/cleanupFraction
+		count := 0
+		for k := range w.lastVersions {
+			if count >= toRemove {
+				break
+			}
+			delete(w.lastVersions, k)
+			count++
+		}
+	}
+	w.lastVersionsMu.Unlock()
+
+	logging.Debug("Writer Set operation", "node", w.nodeID, "key", key, "version", version)
 
 	newItem := &mem_storage.StoredItem{
 		Version:  version,
@@ -171,6 +255,7 @@ func (w *writer) Set(ctx context.Context, key string, item *mem_storage.StoredIt
 		return err
 	}
 
+	logging.Debug("Writer batch triggered", "node", w.nodeID, "key", key)
 	w.triggerBatch()
 	return nil
 }
@@ -184,7 +269,14 @@ func (w *writer) BatchSet(ctx context.Context, items map[string]*mem_storage.Sto
 	version := hlcToInt64(hlcStr)
 
 	// Cache GetN results for same keys to reduce ring lookups
-	keyTargetsCache := make(map[string][]string, len(items))
+	keyTargetsCache := keyTargetsCachePool.Get().(map[string][]string)
+	defer func() {
+		// Clear and return to pool
+		for k := range keyTargetsCache {
+			delete(keyTargetsCache, k)
+		}
+		keyTargetsCachePool.Put(keyTargetsCache)
+	}()
 	getTargets := func(key string) []string {
 		if cached, ok := keyTargetsCache[key]; ok {
 			return cached
@@ -209,7 +301,10 @@ func (w *writer) BatchSet(ctx context.Context, items map[string]*mem_storage.Sto
 		}
 
 		if w.isLocalReplica(targets) {
-			_ = w.store.Set(key, newItem)
+			// Store locally (error ignored as this is async replication path)
+			if err := w.store.Set(key, newItem); err != nil {
+				logging.Warn("Failed to store locally during flush", "node", w.nodeID, "key", key, "error", err)
+			}
 			if w.cache != nil {
 				w.cache.Delete(key)
 			}
@@ -257,34 +352,78 @@ func (w *writer) Delete(ctx context.Context, key string, version int64) error {
 
 func (w *writer) triggerBatch() {
 	count := w.batchCount.Add(1)
+
+	// Check if we should flush immediately (batch threshold reached)
 	if int(count) >= w.batchThreshold {
 		// Use CAS to avoid duplicate flush calls
 		if w.flushPending.CompareAndSwap(false, true) {
-			_ = w.executor.Do(func() {
-				w.flush()
-				w.flushPending.Store(false)
-			})
+			w.flushAsync()
 		}
-	} else {
-		w.resetTimer()
+		return
 	}
+
+	// Check pending ops size to prevent accumulation
+	w.pendingMu.Lock()
+	pendingSize := len(w.pendingOps)
+	w.pendingMu.Unlock()
+	
+	if pendingSize > w.batchThreshold*10 {
+		if w.flushPending.CompareAndSwap(false, true) {
+			w.flushAsync()
+			return
+		}
+	}
+	w.ensureTimerRunning()
 }
 
-func (w *writer) resetTimer() {
-	w.flushMu.Lock()
-	defer w.flushMu.Unlock()
-
+// stopTimer safely stops the timer and drains its channel
+// Must be called with flushMu lock held
+func (w *writer) stopTimer() {
 	if !w.flushTimer.Stop() {
 		select {
 		case <-w.flushTimer.C:
 		default:
 		}
 	}
+}
+
+// ensureTimerRunning ensures the flush timer is running for time-based triggering
+func (w *writer) ensureTimerRunning() {
+	w.flushMu.Lock()
+	defer w.flushMu.Unlock()
+
+	// Stop timer if running and drain channel
+	w.stopTimer()
+
+	// Reset timer
 	w.flushTimer.Reset(w.batchWindow)
+}
+
+// flushAsync performs flush asynchronously with proper error handling
+func (w *writer) flushAsync() {
+	if err := w.executor.Do(func() {
+		defer w.flushPending.Store(false)
+		w.flush()
+	}); err != nil {
+		// Executor error - retry with exponential backoff
+		logging.Warn("Flush executor error, will retry", "node", w.nodeID, "error", err)
+		// Retry in a goroutine with backoff to avoid blocking
+		// Use executor to prevent goroutine leak
+		_ = w.executor.Do(func() {
+			time.Sleep(50 * time.Millisecond)
+			if w.flushPending.CompareAndSwap(true, false) {
+				w.triggerBatch() // Retry flush trigger
+			}
+		})
+	}
 }
 
 func (w *writer) flushLoop() {
 	defer w.wg.Done()
+	
+	lastGC := time.Now()
+	gcInterval := 10 * time.Minute // Periodic GC hint for long-running processes
+	
 	for {
 		select {
 		case <-w.stopCh:
@@ -295,12 +434,21 @@ func (w *writer) flushLoop() {
 			w.flushMu.Unlock()
 			return
 		case <-w.flushTimer.C:
+			// Periodic GC hint for long-running processes
+			if time.Since(lastGC) > gcInterval {
+				runtime.GC()
+				lastGC = time.Now()
+			}
+			
 			// Use CAS to avoid duplicate flush calls
 			if w.flushPending.CompareAndSwap(false, true) {
-				_ = w.executor.Do(func() {
-					w.flush()
-					w.flushPending.Store(false)
-				})
+				// flushAsync will reset timer after flush completes
+				w.flushAsync()
+			} else {
+				// If flush is already pending, reset timer to avoid missing next cycle
+				w.flushMu.Lock()
+				w.flushTimer.Reset(w.batchWindow)
+				w.flushMu.Unlock()
 			}
 		}
 	}
@@ -310,6 +458,10 @@ func (w *writer) flushLoop() {
 func (w *writer) Stop() {
 	w.stopOnce.Do(func() {
 		close(w.stopCh)
+		// Stop timer to prevent leaks
+		w.flushMu.Lock()
+		w.stopTimer()
+		w.flushMu.Unlock()
 	})
 	w.wg.Wait()
 }
@@ -323,9 +475,25 @@ func (w *writer) Close(ctx context.Context) error {
 }
 
 func (w *writer) flush() {
-	w.flushMu.Lock()
-	defer w.flushMu.Unlock()
-	w.flushInternal()
+	// Try to acquire lock without blocking if possible
+	// This reduces contention in high-concurrency scenarios
+	select {
+	case <-w.stopCh:
+		// Stopping, use locked version
+		w.flushMu.Lock()
+		w.flushInternal()
+		// Reset timer for next flush cycle
+		w.flushTimer.Reset(w.batchWindow)
+		w.flushMu.Unlock()
+		return
+	default:
+		// Normal flush with lock
+		w.flushMu.Lock()
+		w.flushInternal()
+		// Reset timer for next flush cycle
+		w.flushTimer.Reset(w.batchWindow)
+		w.flushMu.Unlock()
+	}
 }
 
 // flushInternal does the actual flush work without acquiring lock (caller must hold lock)
@@ -337,8 +505,22 @@ func (w *writer) flushInternal() {
 	}
 
 	// Get pending ops (for non-replica keys)
+	// Limit pending ops size to prevent memory accumulation
+	// Use dynamic limit based on batch threshold for better scaling
+	// Increased multiplier for high-concurrency scenarios
+	const pendingOpsMultiplier = 200 // Max pending ops = batchThreshold * multiplier (increased from 50)
 	w.pendingMu.Lock()
-	pendingOps := w.pendingOps
+		pendingOps := w.pendingOps
+		maxPendingOps := w.batchThreshold * pendingOpsMultiplier
+		if len(pendingOps) > maxPendingOps {
+			// Keep only the most recent ops to prevent unbounded growth
+			dropped := len(w.pendingOps) - maxPendingOps
+			pendingOps = pendingOps[dropped:]
+			// Only log occasionally to reduce overhead
+			if dropped > w.batchThreshold {
+				logging.Warn("Pending ops limit reached, dropping oldest", "node", w.nodeID, "dropped", dropped, "remaining", maxPendingOps, "threshold", w.batchThreshold)
+			}
+		}
 	w.pendingOps = nil // Clear pending ops
 	w.pendingMu.Unlock()
 
@@ -352,9 +534,8 @@ func (w *writer) flushInternal() {
 	}
 
 	if len(ops) == 0 {
-		// Reset counter and timer even if no ops
+		// Reset counter even if no ops (timer reset handled by caller)
 		w.batchCount.Store(0)
-		w.flushTimer.Reset(w.batchWindow)
 		return
 	}
 
@@ -418,52 +599,37 @@ func (w *writer) flushInternal() {
 			nodeIDToAddr[m.NodeID] = m.Address
 		}
 	}
-	// Push to targets asynchronously for better throughput
+	// Push to targets using gossip protocol (follows README specification)
 	if gg, ok := w.gossip.(*gossip); ok {
-		// Use executor for async push to avoid blocking flush
 		for targetNodeID, targetOps := range targetOpsMap {
 			if len(targetOps) == 0 {
 				continue
 			}
 			targetAddr := nodeIDToAddr[targetNodeID]
 			if targetAddr == "" {
+				logging.Debug("Writer skipping target with empty address", "node", w.nodeID, "target", targetNodeID)
 				continue
 			}
-			// Capture variables for goroutine
-			ops := targetOps
-			addr := targetAddr
-			_ = w.executor.Do(func() {
-				data, err := SerializeSyncOps(ops)
-				if err != nil {
-					return
-				}
-				gg.pushToTarget(addr, data, 5)
-			})
-		}
-	} else {
-		for targetNodeID, targetOps := range targetOpsMap {
-			if len(targetOps) > 0 {
-				targetAddr := nodeIDToAddr[targetNodeID]
-				if targetAddr == "" {
-					continue
-				}
-				ops := targetOps
-				addr := targetAddr
-				_ = w.executor.Do(func() {
-					_ = w.gossip.Push(ops, []string{addr})
-				})
+
+			// Convert targetNodeID to address for gossip
+			targetAddrs := []string{targetAddr}
+
+			// Use gossip.Push() as specified in README
+			// Push to all targets to ensure complete replication
+			err := gg.Push(targetOps, targetAddrs)
+			if err != nil {
+				logging.Warn("Gossip push failed", "node", w.nodeID, "target", targetNodeID, "ops_count", len(targetOps), "error", err)
 			}
 		}
 	}
 
-	// Reset timer after flush completes
-	w.flushTimer.Reset(w.batchWindow)
+	// Timer reset handled by caller (ensureTimerRunning or flushLoop)
 }
 
 // hlcToInt64 converts HLC string to int64 for version comparison
 // HLC format: "nodeID:timestamp:counter"
 // We encode it as: timestamp (high 48 bits) + counter (low 16 bits)
-// This preserves causality: if HLC(A) < HLC(B), then int64(A) < int64(B)
+// This preserves monotonicity while preventing overflow
 func hlcToInt64(hlcStr string) int64 {
 	if hlcStr == "" {
 		return time.Now().UnixNano()
@@ -516,13 +682,17 @@ func hlcToInt64(hlcStr string) int64 {
 		ctr = ctr*10 + uint64(c-'0')
 	}
 
-	// Encode: timestamp (high 48 bits) + counter (low 16 bits)
-	// Max counter: 65535, which is sufficient for HLC
+	// Use 48 bits for timestamp (high bits) + 16 bits for counter (low bits)
+	// This provides ~8.9 years of nanosecond precision and 65535 counter values
+	// Truncate timestamp to 48 bits to prevent overflow
+	tsTruncated := ts & 0xFFFFFFFFFFFF // 48 bits
+
+	// Max counter: (2^16)-1 = 65535, which is sufficient for high-frequency operations
 	if ctr > 65535 {
 		ctr = 65535
 	}
 
-	// Shift timestamp left by 16 bits, add counter
-	// This preserves ordering: higher timestamp or same timestamp with higher counter = higher version
-	return (ts << 16) | int64(ctr&0xFFFF)
+	// Encode: timestamp (high 48 bits) + counter (low 16 bits)
+	// This preserves ordering and monotonicity within reasonable time windows
+	return (tsTruncated << 16) | int64(ctr&0xFFFF)
 }

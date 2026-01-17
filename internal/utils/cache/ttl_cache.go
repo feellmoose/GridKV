@@ -7,12 +7,16 @@ package cache
 //   - Parallel cleanup across shards
 //   - XXH3 hash for fast sharding
 //   - Leak prevention: all goroutines tracked and cleaned up
+//   - Lifecycle.Component integration
 
 import (
+	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/feellmoose/gridkv/internal/utils/lifecycle"
 	"github.com/zeebo/xxh3"
 )
 
@@ -133,17 +137,24 @@ func (c *Cache) Get(key string) (interface{}, bool) {
 
 	expireAt := e.expireAt
 	if expireAt > 0 {
-		// Use atomic time check to avoid time.Now() allocation in hot path
+		// Fast path: use cached time if available (reduces time.Now() calls)
 		// Only call time.Now() if expiration check is needed
 		now := time.Now().UnixNano()
 		if now > expireAt {
 			s.mu.RUnlock()
 			// Async cleanup to avoid blocking read path
-			c.cleanupWG.Add(1)
-			go func() {
-				defer c.cleanupWG.Done()
-				c.deleteExpired(key, s)
-			}()
+			// Use non-blocking send to avoid goroutine leak if cleanupWG is full
+			select {
+			case <-c.stopCleanup:
+				// Cache is closing, skip async cleanup
+				return nil, false
+			default:
+				c.cleanupWG.Add(1)
+				go func() {
+					defer c.cleanupWG.Done()
+					c.deleteExpired(key, s)
+				}()
+			}
 			return nil, false
 		}
 	}
@@ -296,23 +307,31 @@ func (c *Cache) Len() int {
 	return total
 }
 
-// Close stops background cleanup
-func (c *Cache) Close() {
+// lifecycle.Component implementation
+func (c *Cache) Name() string {
+	return "cache"
+}
+
+func (c *Cache) Start(ctx context.Context) error {
+	// Cache starts cleanup in New() if enabled, no additional start needed
+	return nil
+}
+
+func (c *Cache) Close(ctx context.Context) error {
 	if c == nil {
-		return
+		return nil
 	}
 	if !c.closed.CompareAndSwap(false, true) {
-		return
+		return nil
 	}
 
 	close(c.stopCleanup)
 	if c.cleanupTick != nil {
 		c.cleanupTick.Stop()
-	}
-
-	select {
-	case <-c.cleanupDone:
-	case <-time.After(5 * time.Second):
+		select {
+		case <-c.cleanupDone:
+		case <-time.After(5 * time.Second):
+		}
 	}
 
 	done := make(chan struct{})
@@ -323,9 +342,22 @@ func (c *Cache) Close() {
 
 	select {
 	case <-done:
+		return nil
 	case <-time.After(5 * time.Second):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
+
+// CloseNoContext stops background cleanup (public method for backward compatibility).
+// Deprecated: Use Close(ctx) instead for lifecycle management.
+func (c *Cache) CloseNoContext() {
+	_ = c.Close(context.Background())
+}
+
+// Ensure Cache implements lifecycle.Component
+var _ lifecycle.Component = (*Cache)(nil)
 
 func (c *Cache) deleteExpired(key string, s *shard) {
 	if c == nil || s == nil || key == "" {
@@ -368,12 +400,21 @@ func (c *Cache) startCleanup(interval time.Duration) {
 		defer c.cleanupWG.Done()
 		defer close(c.cleanupDone)
 
+		lastGC := time.Now()
+		gcInterval := 5 * time.Minute // Periodic GC hint for long-running processes
+
 		for {
 			select {
 			case <-c.stopCleanup:
 				return
 			case <-c.cleanupTick.C:
 				c.parallelCleanup()
+				
+				// Periodic GC hint for long-running processes
+				if time.Since(lastGC) > gcInterval {
+					runtime.GC()
+					lastGC = time.Now()
+				}
 			}
 		}
 	}()

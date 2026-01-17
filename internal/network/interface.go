@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"sync"
 	"time"
 
+	"github.com/feellmoose/gridkv/internal/utils/bufferpool"
 	"github.com/feellmoose/gridkv/internal/utils/logging"
 )
 
 // Network provides unified network interface for cluster operations
+// Implements lifecycle.Component for unified resource management
 type Network interface {
 	// Client returns network client
 	Client() Client
@@ -23,6 +24,12 @@ type Network interface {
 
 	// Stop stops network layer
 	Stop(ctx context.Context) error
+
+	// Name returns component name for lifecycle management
+	Name() string
+
+	// Close stops network layer (lifecycle.Component interface)
+	Close(ctx context.Context) error
 
 	// Send sends message to address
 	Send(ctx context.Context, address string, data []byte) error
@@ -47,6 +54,9 @@ type Network interface {
 	ReceiveFunc() func() ([]byte, error)
 	// RegisterMessageHandler registers handler for specific message type
 	RegisterMessageHandler(msgType MessageType, handler Handler) error
+	
+	// GetPool returns connection pool for metrics
+	GetPool() ConnPool
 }
 
 // NetworkConfig configures network layer
@@ -109,6 +119,10 @@ type networkImpl struct {
 	backpressure *simpleBackpressure
 }
 
+func (n *networkImpl) GetPool() ConnPool {
+	return n.pool
+}
+
 // NewNetwork builds a full stack using provided config.
 func NewNetwork(cfg NetworkConfig) (Network, error) {
 	transport, err := NewTransport(cfg.TransportConfig)
@@ -158,6 +172,8 @@ func (n *networkImpl) Client() Client { return n.client }
 
 func (n *networkImpl) Server() Server { return n.server }
 
+func (n *networkImpl) Name() string { return "network" }
+
 func (n *networkImpl) Start(ctx context.Context) error {
 	return n.server.StartRequestResponse(ctx, n.cfg.LocalAddress, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		if len(data) < 22 {
@@ -181,6 +197,10 @@ func (n *networkImpl) Start(ctx context.Context) error {
 }
 
 func (n *networkImpl) Stop(ctx context.Context) error {
+	return n.Close(ctx)
+}
+
+func (n *networkImpl) Close(ctx context.Context) error {
 	var errs []error
 
 	// Stop server first to prevent new connections
@@ -318,11 +338,9 @@ func (n *networkImpl) RegisterMessageHandler(msgType MessageType, handler Handle
 // flags: bit0 compressed
 const msgFlagCompressed = 1 << 0
 
-var messageBufPool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 0, 2048) // Pre-allocate common size
-	},
-}
+// Tiered buffer pool for optimized memory allocation
+// Strategy: Multiple tiers (256B/1KB/4KB/16KB/64KB) for different message sizes
+var messagePool = bufferpool.NewTieredBufferPool()
 
 func encodeMessage(msg *Message) ([]byte, error) {
 	payload := msg.Data
@@ -332,16 +350,22 @@ func encodeMessage(msg *Message) ([]byte, error) {
 	}
 	total := 22 + len(payload)
 
+	// Get buffer from tiered pool
+	// Tiered pool handles size-based selection automatically
+	poolBuf := messagePool.Get(total)
 	var buf []byte
-	if total <= 2048 {
-		buf = make([]byte, total)
+	var fromPool bool
+
+	// Check if buffer came from pool (capacity >= requested size)
+	// For tiered pool, buffers <256B are direct allocations
+	if cap(poolBuf) >= total && total > 256 {
+		buf = poolBuf[:total] // Set length to total
+		fromPool = true
 	} else {
-		poolBuf := messageBufPool.Get().([]byte)
-		if cap(poolBuf) < total {
-			buf = make([]byte, total)
-			messageBufPool.Put(poolBuf[:0])
-		} else {
-			buf = poolBuf[:total]
+		// Pool buffer too small or total <= 256, allocate directly
+		buf = make([]byte, total)
+		if cap(poolBuf) > 0 {
+			messagePool.Put(poolBuf) // Return unused pool buffer
 		}
 	}
 
@@ -351,6 +375,15 @@ func encodeMessage(msg *Message) ([]byte, error) {
 	binary.BigEndian.PutUint64(buf[10:], uint64(msg.Timestamp))
 	binary.BigEndian.PutUint32(buf[18:], uint32(len(payload)))
 	copy(buf[22:], payload)
+
+	// For pool buffers, copy to result and return pool buffer
+	// For directly allocated buffers, return directly
+	if fromPool {
+		result := make([]byte, total)
+		copy(result, buf)
+		messagePool.Put(buf)
+		return result, nil
+	}
 
 	return buf, nil
 }
@@ -366,9 +399,9 @@ func decodeMessage(data []byte) (*Message, error) {
 	}
 	flags := data[1]
 
-	// Optimize: copy data efficiently
-	// For benchmark/test scenarios, we can use slice reference if data is from a stable source
-	// But for production safety, always copy to avoid reference issues
+	// Copy payload: always allocate new buffer for safety
+	// Caller owns the payload, so we can't reuse pool buffers here
+	// The copy is necessary to avoid reference issues with underlying buffers
 	payload := make([]byte, length)
 	copy(payload, data[22:22+length])
 
@@ -392,7 +425,8 @@ func DecodeMessage(data []byte) (*Message, error) {
 	return decodeMessage(data)
 }
 
-// ClusterMessageTypes defines message types used by cluster (references unified constants)
+// ClusterMessageTypes defines message types used by cluster
+// Note: These reference the unified constants defined in message.go
 var ClusterMessageTypes = struct {
 	Ping           MessageType
 	Connect        MessageType
@@ -404,13 +438,13 @@ var ClusterMessageTypes = struct {
 	ReadResponse   MessageType
 	SyncOperation  MessageType
 }{
-	Ping:           MessageTypePing,
-	Connect:        MessageTypeConnect,
-	Leave:          MessageTypeLeave,
-	GossipPush:     MessageTypeGossipPush,
-	GossipPull:     MessageTypeGossipPull,
-	GossipResponse: MessageTypeGossipResponse,
-	ReadRequest:    MessageTypeReadRequest,
-	ReadResponse:   MessageTypeReadResponse,
-	SyncOperation:  MessageTypeSyncOperation,
+	Ping:           10, // MessageTypePing
+	Connect:        11, // MessageTypeConnect
+	Leave:          12, // MessageTypeLeave
+	GossipPush:     20, // MessageTypeGossipPush
+	GossipPull:     21, // MessageTypeGossipPull
+	GossipResponse: 22, // MessageTypeGossipResponse
+	ReadRequest:    30, // MessageTypeReadRequest
+	ReadResponse:   31, // MessageTypeReadResponse
+	SyncOperation:  40, // MessageTypeSyncOperation
 }

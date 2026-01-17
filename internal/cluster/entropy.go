@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -43,7 +44,9 @@ type antiEntropyConfig struct {
 
 func newAntiEntropy(cfg antiEntropyConfig) *antiEntropy {
 	if cfg.Interval <= 0 {
-		cfg.Interval = 5 * time.Minute
+		// Reduced default interval for faster consistency convergence
+		// Original: 5 minutes, optimized: 30 seconds
+		cfg.Interval = 30 * time.Second
 	}
 
 	return &antiEntropy{
@@ -187,14 +190,25 @@ func (ae *antiEntropy) entropyLoop() {
 	ticker := time.NewTicker(ae.interval)
 	defer ticker.Stop()
 
+	lastGC := time.Now()
+	gcInterval := 10 * time.Minute // Periodic GC hint for long-running processes
+
 	for {
 		select {
 		case <-ae.stopCh:
 			return
 		case <-ticker.C:
-			_ = ae.executor.Do(func() {
+			// Periodic GC hint for long-running processes
+			if time.Since(lastGC) > gcInterval {
+				runtime.GC()
+				lastGC = time.Now()
+			}
+			
+			if err := ae.executor.Do(func() {
 				ae.doAntiEntropy()
-			})
+			}); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -219,10 +233,6 @@ func (ae *antiEntropy) doAntiEntropy() {
 
 	// Select random target for anti-entropy sync
 	// Use hash-based selection for deterministic but distributed load balancing
-	if len(aliveMembers) == 0 {
-		return
-	}
-	// Use current time hash for random selection
 	hash := int(time.Now().UnixNano() % int64(len(aliveMembers)))
 	if hash < 0 {
 		hash = -hash
@@ -391,9 +401,11 @@ func (r *replay) HintedHandoff(nodeID string, ops []*mem_storage.SyncOperation) 
 	r.hhMu.Unlock()
 
 	// Async retry
-	_ = r.executor.Do(func() {
+	if err := r.executor.Do(func() {
 		r.retryHintedHandoff(nodeID)
-	})
+	}); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -520,9 +532,11 @@ func (r *replay) Start(ctx context.Context) error {
 		r.hhMu.Lock()
 		for nodeID := range r.hintedHandoff {
 			nodeID := nodeID
-			_ = r.executor.Do(func() {
+			if err := r.executor.Do(func() {
 				r.retryHintedHandoff(nodeID)
-			})
+			}); err != nil {
+				break
+			}
 		}
 		r.hhMu.Unlock()
 	}

@@ -69,6 +69,9 @@ type Conn interface {
 	// RemoteAddr returns remote address
 	RemoteAddr() string
 
+	// SetReadDeadline sets read deadline for connection
+	SetReadDeadline(t time.Time) error
+
 	// Close closes connection
 	Close() error
 }
@@ -237,15 +240,11 @@ func (c *tcpConn) Send(ctx context.Context, data []byte) error {
 		// Write length header
 		if _, err := c.conn.Write(buf); err != nil {
 			lengthBufPool.Put(buf)
-			logging.Debug("tcpConn.Send: failed to write length header", "remote", c.conn.RemoteAddr(), "error", err)
 			return err
 		}
 		lengthBufPool.Put(buf)
 		// Use io.Copy for zero-copy (kernel handles copy)
 		_, err := io.Copy(c.conn, bytes.NewReader(data))
-		if err != nil {
-			logging.Debug("tcpConn.Send: failed in io.Copy", "remote", c.conn.RemoteAddr(), "error", err, "dataLen", len(data))
-		}
 		return err
 	}
 
@@ -253,17 +252,12 @@ func (c *tcpConn) Send(ctx context.Context, data []byte) error {
 		buf := lengthBufPool.Get().([]byte)
 		binary.BigEndian.PutUint32(buf, uint32(len(data)))
 		// Write both header and data in sequence (TCP will coalesce small writes)
-		// Use buffered writer for better batching
 		if _, err := c.conn.Write(buf); err != nil {
 			lengthBufPool.Put(buf)
-			logging.Debug("tcpConn.Send: failed to write length header", "remote", c.conn.RemoteAddr(), "error", err)
 			return err
 		}
 		lengthBufPool.Put(buf)
 		_, err := c.conn.Write(data)
-		if err != nil {
-			logging.Debug("tcpConn.Send: failed to write data", "remote", c.conn.RemoteAddr(), "error", err, "dataLen", len(data))
-		}
 		return err
 	}
 
@@ -272,7 +266,6 @@ func (c *tcpConn) Send(ctx context.Context, data []byte) error {
 	binary.BigEndian.PutUint32(buf, uint32(len(data)))
 	if _, err := c.conn.Write(buf); err != nil {
 		lengthBufPool.Put(buf)
-		logging.Debug("tcpConn.Send: failed to write length header", "remote", c.conn.RemoteAddr(), "error", err)
 		return err
 	}
 	lengthBufPool.Put(buf)
@@ -287,6 +280,10 @@ var lengthReadBufPool = sync.Pool{
 	New: func() interface{} {
 		return make([]byte, 4)
 	},
+}
+
+func (c *tcpConn) SetReadDeadline(t time.Time) error {
+	return c.conn.SetReadDeadline(t)
 }
 
 func (c *tcpConn) Receive(ctx context.Context) ([]byte, error) {
@@ -309,7 +306,6 @@ func (c *tcpConn) Receive(ctx context.Context) ([]byte, error) {
 			} else if isNetworkError(err) {
 				// Connection issues during shutdown/normal network behavior - don't log
 			} else {
-				logging.Debug("tcpConn.Receive: failed to read length header", "remote", c.conn.RemoteAddr(), "error", err)
 			}
 		}
 		return nil, err
@@ -330,7 +326,6 @@ func (c *tcpConn) Receive(ctx context.Context) ([]byte, error) {
 			} else if isNetworkError(err) {
 				// Connection issues during shutdown/normal network behavior - don't log
 			} else {
-				logging.Debug("tcpConn.Receive: failed to read payload", "remote", c.conn.RemoteAddr(), "error", err)
 			}
 		}
 		return nil, err
@@ -468,10 +463,13 @@ func (c *quicConn) Send(ctx context.Context, data []byte) error {
 		return fmt.Errorf("write length header: %w", err)
 	}
 	if _, err := c.stream.Write(data); err != nil {
-		logging.Debug("quicConn.Send: failed to write data", "remote", c.session.RemoteAddr(), "error", err, "dataLen", len(data))
 		return fmt.Errorf("write data: %w", err)
 	}
 	return nil
+}
+
+func (c *quicConn) SetReadDeadline(t time.Time) error {
+	return c.stream.SetReadDeadline(t)
 }
 
 func (c *quicConn) Receive(ctx context.Context) ([]byte, error) {
@@ -486,7 +484,6 @@ func (c *quicConn) Receive(ctx context.Context) ([]byte, error) {
 	if _, err := io.ReadFull(c.stream, lenBuf); err != nil {
 		// Don't log EOF as it's normal connection closure
 		if err != io.EOF {
-			logging.Debug("quicConn.Receive: failed to read length header", "remote", c.session.RemoteAddr(), "error", err)
 		}
 		return nil, fmt.Errorf("read length header: %w", err)
 	}
@@ -501,7 +498,6 @@ func (c *quicConn) Receive(ctx context.Context) ([]byte, error) {
 	if _, err := io.ReadFull(c.stream, buf); err != nil {
 		// Don't log EOF as it's normal connection closure
 		if err != io.EOF {
-			logging.Debug("quicConn.Receive: failed to read payload", "remote", c.session.RemoteAddr(), "error", err, "size", size)
 		}
 		return nil, fmt.Errorf("read payload: %w", err)
 	}

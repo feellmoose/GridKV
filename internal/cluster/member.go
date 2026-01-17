@@ -81,7 +81,6 @@ func newMemberMgr(cfg memberConfig) (*memberMgr, error) {
 	if cfg.PingInterval <= 0 {
 		cfg.PingInterval = 200 * time.Millisecond
 	}
-	// Increased default timeouts for better stability
 	if cfg.FailureTimeout <= 0 {
 		cfg.FailureTimeout = 5 * time.Second
 	}
@@ -157,9 +156,12 @@ func (m *memberMgr) pingLoop() {
 		case <-m.stopCh:
 			return
 		case <-ticker.C:
-			_ = m.executor.Do(func() {
+			if err := m.executor.Do(func() {
 				m.doPing()
-			})
+			}); err != nil {
+				// Executor is closed, exit gracefully
+				return
+			}
 		}
 	}
 }

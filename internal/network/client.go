@@ -3,6 +3,7 @@ package network
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,7 +33,7 @@ type ClientConfig struct {
 	// Pool is connection pool
 	Pool ConnPool
 
-	// DefaultTimeout is default operation timeout
+	// DefaultTimeout is default operation timeout (increased for high-load scenarios)
 	DefaultTimeout time.Duration
 
 	// RetryCount is retry count on failure
@@ -48,7 +49,7 @@ type ClientConfig struct {
 	MaxRetries int
 }
 
-// DefaultClientConfig returns default client config optimized for cluster communication
+// DefaultClientConfig returns default client config for cluster communication
 func DefaultClientConfig(pool ConnPool) ClientConfig {
 	return ClientConfig{
 		Pool:              pool,
@@ -64,6 +65,10 @@ type networkClient struct {
 	cfg ClientConfig
 }
 
+func (c *networkClient) GetPool() ConnPool {
+	return c.cfg.Pool
+}
+
 func NewClient(cfg ClientConfig) Client {
 	return &networkClient{cfg: cfg}
 }
@@ -73,15 +78,21 @@ func (c *networkClient) Send(ctx context.Context, address string, data []byte) e
 }
 
 func (c *networkClient) SendWithTimeout(ctx context.Context, address string, data []byte, timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// Only create new context if current context doesn't have timeout or deadline is longer
+	var cancel context.CancelFunc
+	if ctx == nil || ctx == context.Background() {
+		ctx, cancel = context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+	} else if ctxDeadline, hasDeadline := ctx.Deadline(); !hasDeadline || time.Until(ctxDeadline) > timeout {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 
-	// Fast path: try once with retry on error
 	for attempt := 0; attempt < 2; attempt++ {
 		conn, err := c.cfg.Pool.Get(ctx, address)
 		if err != nil {
-			if attempt == 0 {
-				logging.Debug("pool.Get failed", "address", address, "error", err)
+			if attempt == 0 && !isConnectionRefused(err) {
+				continue
 			}
 			return err
 		}
@@ -91,31 +102,35 @@ func (c *networkClient) SendWithTimeout(ctx context.Context, address string, dat
 			return nil
 		}
 
-		// On send error, remove the connection and retry once
 		c.cfg.Pool.Remove(conn)
-		if attempt == 0 {
-			logging.Debug("conn.Send failed, retrying", "address", address, "error", err, "dataLen", len(data))
+		if attempt == 0 && !isConnectionRefused(err) {
 			continue
 		}
 		return err
 	}
-	return nil // Should not reach here
+	return fmt.Errorf("unexpected: send loop completed without result")
 }
 
 func (c *networkClient) Request(ctx context.Context, address string, request []byte, timeout time.Duration) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// Only create new context if current context doesn't have timeout or deadline is longer
+	var cancel context.CancelFunc
+	if ctx == nil || ctx == context.Background() {
+		ctx, cancel = context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+	} else if ctxDeadline, hasDeadline := ctx.Deadline(); !hasDeadline || time.Until(ctxDeadline) > timeout {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 
-	// Fast path: try once with retry on error and better diagnostics
 	for attempt := 0; attempt < 2; attempt++ {
 		conn, err := c.cfg.Pool.Get(ctx, address)
 		if err != nil {
 			if attempt == 0 {
 				logging.Warn("Request: pool.Get failed - possible network connectivity issue",
-					"address", address, "error", err, "attempt", attempt+1)
+					"address", address, "attempt", attempt+1, "error", err)
 			} else {
 				logging.Warn("Request: pool.Get failed on retry",
-					"address", address, "error", err, "attempt", attempt+1)
+					"address", address, "attempt", attempt+1, "error", err)
 			}
 			return nil, fmt.Errorf("connection pool error for %s: %w", address, err)
 		}
@@ -123,7 +138,6 @@ func (c *networkClient) Request(ctx context.Context, address string, request []b
 		if err := conn.Send(ctx, request); err != nil {
 			c.cfg.Pool.Remove(conn)
 			if attempt == 0 {
-				logging.Debug("Request: Send failed, retrying", "address", address, "error", err, "requestLen", len(request))
 				continue
 			}
 			return nil, err
@@ -132,14 +146,16 @@ func (c *networkClient) Request(ctx context.Context, address string, request []b
 		resp, rerr := conn.Receive(ctx)
 		c.cfg.Pool.Put(conn)
 		if rerr != nil {
+			// On first attempt, retry once; on second attempt, return error
 			if attempt == 0 {
-				logging.Debug("Request: receive failed", "address", address, "error", rerr)
+				continue
 			}
 			return resp, rerr
 		}
 		return resp, nil
 	}
-	return nil, nil // Should not reach here
+	// Unreachable: loop always returns or continues
+	return nil, fmt.Errorf("unexpected: request loop completed without result")
 }
 
 func (c *networkClient) Broadcast(ctx context.Context, addresses []string, data []byte) error {
@@ -149,12 +165,16 @@ func (c *networkClient) Broadcast(ctx context.Context, addresses []string, data 
 
 	if len(addresses) <= 5 {
 		// Serial execution for small sets (lower overhead)
+		var firstErr error
 		for _, addr := range addresses {
 			if err := c.SendWithTimeout(ctx, addr, data, c.cfg.DefaultTimeout); err != nil {
-				return err
+				if firstErr == nil {
+					firstErr = err
+				}
+				// Continue to attempt all addresses even if some fail
 			}
 		}
-		return nil
+		return firstErr
 	}
 
 	// Concurrent execution for large sets
@@ -172,8 +192,10 @@ func (c *networkClient) Broadcast(ctx context.Context, addresses []string, data 
 
 			if err := c.SendWithTimeout(ctx, a, data, c.cfg.DefaultTimeout); err != nil {
 				select {
-				case errCh <- err:
+				case errCh <- fmt.Errorf("%s: %w", a, err):
 				default:
+					// Channel full, log but don't block
+					logging.Debug("Broadcast error channel full, dropping error", "address", a, "error", err)
 				}
 			}
 		}(addr)
@@ -182,9 +204,16 @@ func (c *networkClient) Broadcast(ctx context.Context, addresses []string, data 
 	wg.Wait()
 	close(errCh)
 
-	// Return first error if any
+	// Aggregate all errors
 	if len(errCh) > 0 {
-		return <-errCh
+		var errs []error
+		for err := range errCh {
+			errs = append(errs, err)
+		}
+		if len(errs) == 1 {
+			return errs[0]
+		}
+		return fmt.Errorf("broadcast failed for %d/%d addresses: %v", len(errs), len(addresses), errs[0])
 	}
 	return nil
 }
@@ -194,4 +223,13 @@ func (c *networkClient) Close() error {
 		return c.cfg.Pool.Close()
 	}
 	return nil
+}
+
+func isConnectionRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connect: connection refused")
 }
