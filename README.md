@@ -5,17 +5,16 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/feellmoose/gridkv)](https://goreportcard.com/report/github.com/feellmoose/gridkv)
 [![GitHub Tag](https://img.shields.io/github/v/tag/feellmoose/GridKV)]()
 
-A high-performance distributed key-value cache SDK using memory with eventual consistency guarantees.
+A high-performance distributed key-value cache with eventual consistency guarantees, using in-memory storage.
 
-English/[中文](./README_CN.md)
+[English](./README.md) / [中文](./README_CN.md)
 
 ## Features
 
-- **High Performance & Thread Safety**: Sub-millisecond local operations optimized for concurrent workloads with thread-safe public methods
-- **Eventual Consistency & Replication**: Epidemic gossip protocol with batch replication ensuring data convergence across nodes
-- **Distributed & Fault Tolerant**: Consistent hashing with virtual nodes and SWIM protocol for load balancing and failure detection
-- **Adaptive Networking**: LAN/WAN optimization with TCP/QUIC support for inter-node communication
-- **Memory Storage**: In-memory backend with TTL support and automatic compression
+- **High Performance & Thread-Safe**: Sub-millisecond local operations, all public methods support concurrent access
+- **Eventual Consistency Replication**: Gossip protocol with batched replication ensures data convergence across nodes
+- **Distributed Fault-Tolerant Architecture**: Consistent hashing with virtual nodes and SWIM protocol for load balancing and failure detection
+- **In-Memory Storage**: Memory backend supports TTL and automatic compression
 
 ## Installation
 
@@ -47,7 +46,7 @@ func main() {
     }
     defer kv.Close()
 
-    // Set key with TTL
+    // Set key-value pair
     kv.Set("key", []byte("value"), time.Hour)
 
     // Get value
@@ -56,48 +55,27 @@ func main() {
 }
 ```
 
-## Performance
-
-Run benchmarks:
+## Testing
 
 ```bash
+# Run all tests
+go test ./...
+
+# Run short tests only
+go test -short ./...
+
+# Run benchmarks
 go test -bench=. ./tests/
 ```
 
-### Integration Tests Configuration
+## Architecture
 
-Integration tests and benchmarks can be configured via environment variables for different machine specifications:
+- **SWIM Protocol**: Membership management and failure detection
+- **Consistent Hashing**: Key distribution across nodes
+- **Gossip Protocol**: Efficient data replication
+- **HLC (Hybrid Logical Clock)**: Causality tracking and conflict resolution
 
-#### Memory Configuration
-- `TEST_MAX_MEMORY_MB`: Default memory per node (default: 1024MB)
-- `BENCH_MAX_MEMORY_MB`: Benchmark memory per node (default: 256MB)
-- `INTEGRATION_MAX_MEMORY_MB`: Integration test memory per node (default: 512MB)
-
-#### Cluster Configuration
-- `TEST_NODE_COUNT`: Number of test nodes (default: 100)
-- `BENCH_NODE_COUNT`: Number of benchmark nodes (default: 50)
-- `INTEGRATION_LARGE_CLUSTER_THRESHOLD`: Large cluster threshold (default: 100)
-
-#### Performance Tuning
-- `INTEGRATION_CONCURRENCY`: Test concurrency level (default: varies by test)
-- `INTEGRATION_TEST_DURATION`: Test duration (default: 5s)
-- `BENCH_REPLICA_COUNT`: Benchmark replication factor (default: 3)
-
-Example usage:
-```bash
-# Low-memory machine (8GB RAM)
-export TEST_MAX_MEMORY_MB=256
-export BENCH_MAX_MEMORY_MB=128
-export TEST_NODE_COUNT=20
-
-# High-performance machine (64GB RAM)
-export TEST_MAX_MEMORY_MB=4096
-export BENCH_MAX_MEMORY_MB=2048
-export TEST_NODE_COUNT=200
-export INTEGRATION_CONCURRENCY=100
-
-go test -v -short ./...
-```
+See [internal/cluster/README.md](internal/cluster/README.md) for detailed architecture documentation.
 
 ## License
 

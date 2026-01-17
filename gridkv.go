@@ -57,6 +57,10 @@ type GridKV struct {
 	shuttingDown atomic.Bool
 }
 
+func (g *GridKV) GetNetwork() network.Network {
+	return g.network
+}
+
 // NewGridKV initializes a GridKV instance with the provided options.
 //
 // Required fields: LocalNodeID, LocalAddress
@@ -116,6 +120,7 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage: %w", err)
 	}
+	// Note: store.Close() is now managed by lifecycle, but we keep CloseNoContext() for backward compatibility
 
 	// Use BindAddr if provided, otherwise use LocalAddress
 	bindAddr := opts.LocalAddress
@@ -158,7 +163,7 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 
 	net, err := network.NewNetwork(netConfig)
 	if err != nil {
-		store.Close()
+		_ = store.Close(context.Background())
 		return nil, fmt.Errorf("failed to create network: %w", err)
 	}
 
@@ -180,8 +185,8 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 		ReplicaCount: opts.ReplicaCount,
 
 		// Writer
-		BatchThreshold: 100,
-		BatchWindow:    100 * time.Millisecond,
+		BatchThreshold: opts.BatchThreshold,
+		BatchWindow:    opts.BatchWindow,
 
 		// Gossip
 		GossipInterval: opts.GossipInterval,
@@ -201,33 +206,24 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 		if stopErr := net.Stop(context.Background()); stopErr != nil {
 			logging.Warn("failed to stop network during cleanup", "error", stopErr)
 		}
-		store.Close()
+		_ = store.Close(context.Background())
 		return nil, fmt.Errorf("failed to create cluster: %w", err)
 	}
 
-	// Start cluster
+	// Start cluster - lifecycle manager handles all component startup in dependency order
+	// This includes: network, storage, executor, cache, and all cluster components
 	ctx := context.Background()
 	if err := c.Start(ctx); err != nil {
+		// Cleanup: lifecycle manager will handle component shutdown
 		if stopErr := c.Stop(ctx); stopErr != nil {
 			logging.Warn("failed to stop cluster during cleanup", "error", stopErr)
 		}
+		// Manual cleanup for components not yet in lifecycle (shouldn't happen after migration)
 		if stopErr := net.Stop(ctx); stopErr != nil {
 			logging.Warn("failed to stop network during cleanup", "error", stopErr)
 		}
-		store.Close()
+		_ = store.Close(ctx)
 		return nil, fmt.Errorf("failed to start cluster: %w", err)
-	}
-
-	// Start network
-	if err := net.Start(ctx); err != nil {
-		if stopErr := c.Stop(ctx); stopErr != nil {
-			logging.Warn("failed to stop cluster during cleanup", "error", stopErr)
-		}
-		if stopErr := net.Stop(ctx); stopErr != nil {
-			logging.Warn("failed to stop network during cleanup", "error", stopErr)
-		}
-		store.Close()
-		return nil, fmt.Errorf("failed to start network on %s: %w", bindAddr, err)
 	}
 
 	// Start Join asynchronously if seed addresses provided
@@ -298,10 +294,10 @@ func (g *GridKV) Set(ctx context.Context, key string, value []byte, ttl ...time.
 	}
 
 	// Check cluster readiness for Set operations
-	status := g.Status()
-	if !status.Ready && status.HealthyNodes == 0 {
+	stats := g.Stats()
+	if !stats.Cluster.Ready && stats.Cluster.HealthyNodes == 0 {
 		return fmt.Errorf("cluster not ready: cannot Set key %s (nodes: %d, healthy: %d)",
-			key, status.ClusterSize, status.HealthyNodes)
+			key, stats.Cluster.ClusterSize, stats.Cluster.HealthyNodes)
 	}
 
 	// Use Writer directly to support TTL
@@ -414,18 +410,22 @@ func (g *GridKV) Delete(ctx context.Context, key string) (err error) {
 	return writer.Delete(ctx, key, version)
 }
 
-// Status returns cluster health and readiness state. Thread-safe.
-func (g *GridKV) Status() ReplicaStatus {
+// Stats returns complete GridKV statistics including cluster, network and storage stats. Thread-safe.
+func (g *GridKV) Stats() Stats {
 	if g.cluster == nil {
-		return ReplicaStatus{
-			Ready:         false,
-			ClusterSize:   0,
-			HealthyNodes:  0,
-			ReplicaFactor: 0,
-			LocalNodeID:   "",
+		return Stats{
+			Cluster: ClusterStats{
+				Ready:         false,
+				ClusterSize:   0,
+				HealthyNodes:  0,
+				ReplicaFactor: 0,
+				LocalNodeID:   "",
+			},
+			Version: Version,
 		}
 	}
 
+	// Get cluster status
 	members := g.cluster.Members()
 	healthyNodes := 0
 	localNodeID := ""
@@ -445,7 +445,7 @@ func (g *GridKV) Status() ReplicaStatus {
 		replicaCount = 3 // fallback default
 	}
 
-	return ReplicaStatus{
+	clusterStats := ClusterStats{
 		Ready:         healthyNodes > 0,
 		ClusterSize:   len(members),
 		HealthyNodes:  healthyNodes,
@@ -455,7 +455,40 @@ func (g *GridKV) Status() ReplicaStatus {
 		PubkeyCount:   0,
 		PeerCount:     len(members) - 1,
 	}
+
+	// Collect network stats
+	var networkStats network.NetworkSnapshot
+	if g.network != nil {
+		networkStats = network.GetStats().Snapshot()
+	}
+
+	// Collect storage stats
+	var storageStats mem_storage.Stats
+	if g.store != nil {
+		storageStats = g.store.Stats()
+	}
+
+	return Stats{
+		Cluster: clusterStats,
+		Network: networkStats,
+		Storage: storageStats,
+		Version: Version,
+	}
 }
+
+// ClusterStats returns only cluster statistics (backward compatibility).
+// Thread-safe.
+func (g *GridKV) ClusterStats() ClusterStats {
+	return g.Stats().Cluster
+}
+
+// Status is deprecated, use Stats instead.
+func (g *GridKV) Status() Stats {
+	return g.Stats()
+}
+
+// ReplicaStatus is deprecated, use ClusterStats instead.
+type ReplicaStatus = ClusterStats
 
 // WaitReady blocks until cluster is ready or timeout.
 func (g *GridKV) WaitReady(timeout time.Duration) error {
@@ -470,29 +503,30 @@ func (g *GridKV) WaitReady(timeout time.Duration) error {
 	var lastClusterSize, lastHealthyNodes int
 
 	for time.Now().Before(deadline) {
-		status := g.Status()
-		isReady := status.Ready && status.HealthyNodes > 0
+		stats := g.Stats()
+		cluster := stats.Cluster
+		isReady := cluster.Ready && cluster.HealthyNodes > 0
 
 		if isReady {
 			if firstReadyTime == nil {
 				now := time.Now()
 				firstReadyTime = &now
-				lastClusterSize = status.ClusterSize
-				lastHealthyNodes = status.HealthyNodes
+				lastClusterSize = cluster.ClusterSize
+				lastHealthyNodes = cluster.HealthyNodes
 			} else {
 				stableDuration := time.Since(*firstReadyTime)
 
-				if status.ClusterSize != lastClusterSize ||
-					status.HealthyNodes != lastHealthyNodes {
+				if cluster.ClusterSize != lastClusterSize ||
+					cluster.HealthyNodes != lastHealthyNodes {
 					now := time.Now()
 					firstReadyTime = &now
-					lastClusterSize = status.ClusterSize
-					lastHealthyNodes = status.HealthyNodes
+					lastClusterSize = cluster.ClusterSize
+					lastHealthyNodes = cluster.HealthyNodes
 				} else if stableDuration >= stabilityGracePeriod {
 					logging.Info("GridKV fully ready and stable",
-						"nodes", status.HealthyNodes,
-						"clusterSize", status.ClusterSize,
-						"replicaFactor", status.ReplicaFactor)
+						"nodes", cluster.HealthyNodes,
+						"clusterSize", cluster.ClusterSize,
+						"replicaFactor", cluster.ReplicaFactor)
 					return nil
 				}
 			}
@@ -503,10 +537,11 @@ func (g *GridKV) WaitReady(timeout time.Duration) error {
 		time.Sleep(checkInterval)
 	}
 
-	status := g.Status()
-	if !status.Ready {
+	stats := g.Stats()
+	cluster := stats.Cluster
+	if !cluster.Ready {
 		return fmt.Errorf("timeout waiting for cluster ready: nodes=%d, healthy=%d",
-			status.ClusterSize, status.HealthyNodes)
+			cluster.ClusterSize, cluster.HealthyNodes)
 	}
 	return fmt.Errorf("timeout waiting for cluster stability")
 }
@@ -517,28 +552,29 @@ func (g *GridKV) HealthCheck() error {
 		return errors.New("GridKV not initialized")
 	}
 
-	status := g.Status()
-	if !status.Ready {
+	stats := g.Stats()
+	cluster := stats.Cluster
+	if !cluster.Ready {
 		return fmt.Errorf("cluster not ready: nodes=%d, healthy=%d",
-			status.ClusterSize, status.HealthyNodes)
+			cluster.ClusterSize, cluster.HealthyNodes)
 	}
 
-	if status.HealthyNodes == 0 {
+	if cluster.HealthyNodes == 0 {
 		return errors.New("no healthy nodes available")
 	}
 
 	return nil
 }
 
-// Close shuts down GridKV: stops cluster, closes network, flushes storage.
+// Close shuts down GridKV: stops cluster (which manages all components via lifecycle).
 // Uses 30s default timeout if none provided. Idempotent. Thread-safe.
+// All resources (network, storage, executor, cache) are managed by cluster's lifecycle manager.
 func (g *GridKV) Close(timeout ...time.Duration) error {
 	defaultTimeout := 30 * time.Second
 	if len(timeout) > 0 {
 		defaultTimeout = timeout[0]
 	}
 
-	var errs []error
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancel()
 
@@ -546,37 +582,20 @@ func (g *GridKV) Close(timeout ...time.Duration) error {
 		g.shuttingDown.Store(true)
 	})
 
-	// Stop cluster
+	// Stop cluster - lifecycle manager handles all component shutdown in dependency order
+	// This includes: network, storage, executor, cache, and all cluster components
 	if g.cluster != nil {
 		if err := g.cluster.Stop(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("cluster stop failed: %w", err))
+			return fmt.Errorf("cluster stop failed: %w", err)
 		}
-	}
-
-	// Stop network
-	if g.network != nil {
-		if err := g.network.Stop(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("network stop failed: %w", err))
-		}
-	}
-
-	// Close storage
-	if g.store != nil {
-		if err := g.store.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("store close failed: %w", err))
-		}
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("errors during close: %v", errs)
 	}
 
 	logging.Info("GridKV closed successfully")
 	return nil
 }
 
-// ReplicaStatus represents cluster health and readiness state.
-type ReplicaStatus struct {
+// ClusterStats represents cluster health and readiness statistics.
+type ClusterStats struct {
 	Ready         bool
 	ClusterSize   int
 	HealthyNodes  int
@@ -585,6 +604,21 @@ type ReplicaStatus struct {
 	PubkeysReady  bool
 	PubkeyCount   int
 	PeerCount     int
+}
+
+// Stats represents complete GridKV statistics including cluster, network and storage stats.
+type Stats struct {
+	// Cluster stats
+	Cluster ClusterStats
+
+	// Network stats
+	Network network.NetworkSnapshot
+
+	// Storage stats
+	Storage mem_storage.Stats
+
+	// Version information
+	Version string
 }
 
 func (g *GridKV) isShuttingDown() bool {

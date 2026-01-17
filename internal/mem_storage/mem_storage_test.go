@@ -1,6 +1,7 @@
 package mem_storage
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -52,7 +53,7 @@ func TestMemStorage_New(t *testing.T) {
 				t.Error("New() returned nil storage")
 			}
 			if s != nil {
-				s.Close()
+				_ = s.Close(context.Background())
 			}
 		})
 	}
@@ -60,7 +61,7 @@ func TestMemStorage_New(t *testing.T) {
 
 func TestMemStorage_SetGet(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	item := &StoredItem{
 		Version: time.Now().UnixNano(),
@@ -96,7 +97,7 @@ func TestMemStorage_SetGet(t *testing.T) {
 
 func TestMemStorage_Delete(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	item := &StoredItem{
 		Version: 100,
@@ -119,7 +120,7 @@ func TestMemStorage_Delete(t *testing.T) {
 
 func TestMemStorage_DeleteVersionMismatch(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	item := &StoredItem{
 		Version: 200,
@@ -143,7 +144,7 @@ func TestMemStorage_DeleteVersionMismatch(t *testing.T) {
 
 func TestMemStorage_ConflictResolution(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	// Set initial value
 	item1 := &StoredItem{
@@ -182,7 +183,7 @@ func TestMemStorage_ConflictResolution(t *testing.T) {
 
 func TestMemStorage_ConflictResolutionSameVersion(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	now := time.Now()
 	item1 := &StoredItem{
@@ -212,7 +213,7 @@ func TestMemStorage_ConflictResolutionSameVersion(t *testing.T) {
 
 func TestMemStorage_Expiration(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	item := &StoredItem{
 		Version:  time.Now().UnixNano(),
@@ -231,7 +232,7 @@ func TestMemStorage_Expiration(t *testing.T) {
 
 func TestMemStorage_NoExpiration(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	item := &StoredItem{
 		Version: time.Now().UnixNano(),
@@ -257,7 +258,7 @@ func TestMemStorage_Compression(t *testing.T) {
 	config.CompressionThreshold = 64
 
 	s, _ := New(config)
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	// Create large value (should be compressed)
 	largeValue := make([]byte, 1000)
@@ -299,7 +300,7 @@ func TestMemStorage_CompressionDisabled(t *testing.T) {
 	config.CompressionEnabled = false
 
 	s, _ := New(config)
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	largeValue := make([]byte, 1000)
 	item := &StoredItem{
@@ -321,7 +322,7 @@ func TestMemStorage_CompressionThreshold(t *testing.T) {
 	config.CompressionThreshold = 200
 
 	s, _ := New(config)
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	// Small value (below threshold)
 	smallValue := make([]byte, 100)
@@ -349,7 +350,7 @@ func TestMemStorage_CompressionThreshold(t *testing.T) {
 
 func TestMemStorage_BatchGet(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	// Set multiple keys
 	for i := 0; i < 10; i++ {
@@ -384,7 +385,7 @@ func TestMemStorage_BatchGet(t *testing.T) {
 
 func TestMemStorage_BatchGetNoCopy(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	item := &StoredItem{
 		Version: 100,
@@ -409,7 +410,7 @@ func TestMemStorage_BatchGetNoCopy(t *testing.T) {
 
 func TestMemStorage_BatchSet(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	items := make(map[string]*StoredItem)
 	for i := 0; i < 10; i++ {
@@ -435,7 +436,7 @@ func TestMemStorage_BatchSet(t *testing.T) {
 
 func TestMemStorage_GetNoCopy(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	item := &StoredItem{
 		Version: 100,
@@ -460,7 +461,7 @@ func TestMemStorage_MemoryLimit(t *testing.T) {
 	config.EvictThreshold = 100       // Disable eviction for this test
 
 	s, _ := New(config)
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	// Fill close to limit (900KB)
 	for i := 0; i < 9; i++ {
@@ -499,7 +500,7 @@ func TestMemStorage_LRU_Eviction(t *testing.T) {
 	config.CompressionEnabled = false // Disable compression for predictable size
 
 	s, _ := New(config)
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	// Fill storage to trigger eviction (90% of 10MB = 9MB)
 	// Each item is ~10KB, so need ~900 items to hit threshold
@@ -534,7 +535,7 @@ func TestMemStorage_LRU_Eviction(t *testing.T) {
 
 func TestMemStorage_ConcurrentAccess(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	const numGoroutines = 100
 	const numOps = 1000
@@ -579,7 +580,7 @@ func TestMemStorage_ConcurrentAccess(t *testing.T) {
 
 func TestMemStorage_ConcurrentConflictResolution(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	const numGoroutines = 50
 
@@ -613,7 +614,7 @@ func TestMemStorage_ConcurrentConflictResolution(t *testing.T) {
 
 func TestMemStorage_Keys(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	// Set multiple keys
 	keys := []string{"key1", "key2", "key3"}
@@ -645,7 +646,7 @@ func TestMemStorage_Keys(t *testing.T) {
 
 func TestMemStorage_Clear(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	// Set some keys
 	for i := 0; i < 10; i++ {
@@ -676,7 +677,7 @@ func TestMemStorage_Clear(t *testing.T) {
 
 func TestMemStorage_GetSyncBuffer(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	// Set multiple keys
 	for i := 0; i < 10; i++ {
@@ -711,7 +712,7 @@ func TestMemStorage_GetSyncBuffer(t *testing.T) {
 
 func TestMemStorage_Stats(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	// Initial stats
 	stats := s.Stats()
@@ -754,7 +755,7 @@ func TestMemStorage_CompressionStats(t *testing.T) {
 	config.CompressionThreshold = 100
 
 	s, _ := New(config)
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	// Set compressed value
 	largeValue := make([]byte, 1000)
@@ -784,7 +785,7 @@ func TestMemStorage_CompressionStats(t *testing.T) {
 
 func TestMemStorage_HitRate(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	item := &StoredItem{
 		Version: 100,
@@ -826,7 +827,7 @@ func TestMemStorage_Close(t *testing.T) {
 	}
 
 	// Close
-	err := s.Close()
+	err := s.Close(context.Background())
 	if err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
@@ -840,7 +841,7 @@ func TestMemStorage_Close(t *testing.T) {
 
 func TestMemStorage_EmptyKey(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	item := &StoredItem{
 		Version: 100,
@@ -860,7 +861,7 @@ func TestMemStorage_EmptyKey(t *testing.T) {
 
 func TestMemStorage_NilItem(t *testing.T) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	err := s.Set("key1", nil)
 	if err != errNilItem {
@@ -870,7 +871,7 @@ func TestMemStorage_NilItem(t *testing.T) {
 
 func BenchmarkMemStorage_Set(b *testing.B) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	item := &StoredItem{
 		Version: 100,
@@ -881,7 +882,7 @@ func BenchmarkMemStorage_Set(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		i := int64(0)
 		for pb.Next() {
-			item.Version = i
+			item.Version = time.Now().UnixNano() + i
 			_ = s.Set("key"+string(rune(i%1000)), item)
 			i++
 		}
@@ -890,7 +891,7 @@ func BenchmarkMemStorage_Set(b *testing.B) {
 
 func BenchmarkMemStorage_Get(b *testing.B) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	item := &StoredItem{
 		Version: 100,
@@ -914,7 +915,7 @@ func BenchmarkMemStorage_Get(b *testing.B) {
 
 func BenchmarkMemStorage_BatchSet(b *testing.B) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	items := make(map[string]*StoredItem)
 	for i := 0; i < 100; i++ {
@@ -932,7 +933,7 @@ func BenchmarkMemStorage_BatchSet(b *testing.B) {
 
 func BenchmarkMemStorage_BatchGet(b *testing.B) {
 	s, _ := New(DefaultConfig())
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	// Pre-populate
 	for i := 0; i < 1000; i++ {
@@ -960,7 +961,7 @@ func BenchmarkMemStorage_Compression(b *testing.B) {
 	config.CompressionThreshold = 64
 
 	s, _ := New(config)
-	defer s.Close()
+	defer func() { _ = s.Close(context.Background()) }()
 
 	largeValue := make([]byte, 1000)
 	item := &StoredItem{

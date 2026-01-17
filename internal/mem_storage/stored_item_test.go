@@ -6,8 +6,6 @@ import (
 )
 
 func TestStoredItem_ResolveConflict(t *testing.T) {
-	now := time.Now()
-
 	tests := []struct {
 		name     string
 		item     *StoredItem
@@ -28,14 +26,14 @@ func TestStoredItem_ResolveConflict(t *testing.T) {
 		},
 		{
 			name:     "same version, prefer non-expired",
-			item:     &StoredItem{Version: 100, ExpireAt: now.Add(time.Hour)},
-			other:    &StoredItem{Version: 100, ExpireAt: now.Add(-time.Hour)},
+			item:     &StoredItem{Version: 100, ExpireAt: time.Unix(2000000000, 0)}, // Future time
+			other:    &StoredItem{Version: 100, ExpireAt: time.Unix(1000000000, 0)}, // Past time
 			expected: false,
 		},
 		{
 			name:     "same version, prefer non-expired (reversed)",
-			item:     &StoredItem{Version: 100, ExpireAt: now.Add(-time.Hour)},
-			other:    &StoredItem{Version: 100, ExpireAt: now.Add(time.Hour)},
+			item:     &StoredItem{Version: 100, ExpireAt: time.Unix(1000000000, 0)}, // Past time
+			other:    &StoredItem{Version: 100, ExpireAt: time.Unix(2000000000, 0)}, // Future time
 			expected: true,
 		},
 		{

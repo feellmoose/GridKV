@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -14,7 +15,7 @@ func TestTTLCache_BasicOperations(t *testing.T) {
 		CleanupIntv:   100 * time.Millisecond,
 		EnableCleanup: true,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Test Set and Get
 	cache.Set("key1", "value1", 1*time.Second)
@@ -47,7 +48,7 @@ func TestTTLCache_Expiration(t *testing.T) {
 		CleanupIntv:   50 * time.Millisecond,
 		EnableCleanup: true,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Set with short TTL
 	cache.Set("expiring", "value", 100*time.Millisecond)
@@ -75,7 +76,7 @@ func TestTTLCache_NoExpiration(t *testing.T) {
 		CleanupIntv:   100 * time.Millisecond,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Set with no TTL (0 duration)
 	cache.Set("permanent", "value", 0)
@@ -95,7 +96,7 @@ func TestTTLCache_LRUEviction(t *testing.T) {
 		CleanupIntv:   1 * time.Second,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Fill cache to capacity
 	for i := 0; i < 5; i++ {
@@ -127,7 +128,7 @@ func TestTTLCache_ConcurrentAccess(t *testing.T) {
 		CleanupIntv:   100 * time.Millisecond,
 		EnableCleanup: true,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	const goroutines = 100
 	const opsPerGoroutine = 1000
@@ -168,7 +169,7 @@ func TestTTLCache_BackgroundCleanup(t *testing.T) {
 		CleanupIntv:   50 * time.Millisecond,
 		EnableCleanup: true,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Add many entries with short TTL
 	for i := 0; i < 100; i++ {
@@ -197,7 +198,7 @@ func TestTTLCache_Update(t *testing.T) {
 		CleanupIntv:   100 * time.Millisecond,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Set initial value
 	cache.Set("key", "value1", 1*time.Second)
@@ -223,7 +224,7 @@ func BenchmarkTTLCache_Get_Hit(b *testing.B) {
 		CleanupIntv:   1 * time.Second,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Pre-populate cache
 	for i := 0; i < 10000; i++ {
@@ -248,7 +249,7 @@ func BenchmarkTTLCache_Get_Miss(b *testing.B) {
 		CleanupIntv:   1 * time.Second,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -268,7 +269,7 @@ func BenchmarkTTLCache_Set(b *testing.B) {
 		CleanupIntv:   1 * time.Second,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -288,7 +289,7 @@ func BenchmarkTTLCache_SetAndGet(b *testing.B) {
 		CleanupIntv:   1 * time.Second,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -354,13 +355,13 @@ func TestTTLCache_Close(t *testing.T) {
 	cache.Set("key2", "value2", 1*time.Second)
 
 	// Close cache
-	cache.Close()
+	_ = cache.Close(context.Background())
 
 	// Operations after close should be safe but may not work
 	_, _ = cache.Get("key1")
 
 	// Close again should be safe
-	cache.Close()
+	_ = cache.Close(context.Background())
 }
 
 func TestTTLCache_CloseMultipleTimes(t *testing.T) {
@@ -371,9 +372,9 @@ func TestTTLCache_CloseMultipleTimes(t *testing.T) {
 		EnableCleanup: true,
 	})
 
-	cache.Close()
-	cache.Close()
-	cache.Close()
+	_ = cache.Close(context.Background())
+	_ = cache.Close(context.Background())
+	_ = cache.Close(context.Background())
 }
 
 func TestTTLCache_HitCount(t *testing.T) {
@@ -383,7 +384,7 @@ func TestTTLCache_HitCount(t *testing.T) {
 		CleanupIntv:   100 * time.Millisecond,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Set some values
 	cache.Set("key1", "value1", 1*time.Second)
@@ -407,7 +408,7 @@ func TestTTLCache_LRUOrder(t *testing.T) {
 		CleanupIntv:   1 * time.Second,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	cache.Set("key1", "value1", 0)
 	cache.Set("key2", "value2", 0)
@@ -436,7 +437,7 @@ func TestTTLCache_UpdateTTL(t *testing.T) {
 		CleanupIntv:   100 * time.Millisecond,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Set with short TTL
 	cache.Set("key", "value1", 50*time.Millisecond)
@@ -464,7 +465,7 @@ func TestTTLCache_Clear(t *testing.T) {
 		CleanupIntv:   100 * time.Millisecond,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Add entries
 	for i := 0; i < 100; i++ {
@@ -498,7 +499,7 @@ func TestTTLCache_ZeroShardSize(t *testing.T) {
 		CleanupIntv:   100 * time.Millisecond,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Add many entries - should not evict
 	for i := 0; i < 1000; i++ {
@@ -512,7 +513,7 @@ func TestTTLCache_ZeroShardSize(t *testing.T) {
 
 func TestTTLCache_DefaultConfig(t *testing.T) {
 	cache := New(Opts{})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Should work with defaults
 	cache.Set("key1", "value1", 1*time.Second)
@@ -530,7 +531,7 @@ func TestTTLCache_ShardPowerOfTwo(t *testing.T) {
 		CleanupIntv:   100 * time.Millisecond,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Should work
 	cache.Set("key1", "value1", 1*time.Second)
@@ -547,7 +548,7 @@ func TestTTLCache_ConcurrentMixedOps(t *testing.T) {
 		CleanupIntv:   100 * time.Millisecond,
 		EnableCleanup: true,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	const goroutines = 50
 	const opsPerGoroutine = 500
@@ -583,7 +584,7 @@ func TestTTLCache_LazyExpiration(t *testing.T) {
 		CleanupIntv:   1 * time.Second,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	cache.Set("expiring", "value", 50*time.Millisecond)
 	time.Sleep(100 * time.Millisecond)
@@ -606,7 +607,7 @@ func TestTTLCache_StressTest(t *testing.T) {
 		CleanupIntv:   100 * time.Millisecond,
 		EnableCleanup: true,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	const goroutines = 200
 	const opsPerGoroutine = 1000
@@ -633,7 +634,7 @@ func TestTTLCache_DeleteNonExistent(t *testing.T) {
 		CleanupIntv:   100 * time.Millisecond,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Del non-existent key should be safe
 	cache.Del("nonexistent")
@@ -654,7 +655,7 @@ func TestTTLCache_UpdateExistingValue(t *testing.T) {
 		CleanupIntv:   100 * time.Millisecond,
 		EnableCleanup: false,
 	})
-	defer cache.Close()
+	defer func() { _ = cache.Close(context.Background()) }()
 
 	// Set initial value
 	cache.Set("key", "value1", 1*time.Second)

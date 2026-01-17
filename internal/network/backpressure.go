@@ -2,8 +2,8 @@ package network
 
 import "sync/atomic"
 
-// BackpressureStatus represents backpressure status
-type BackpressureStatus struct {
+// BackpressureStats represents backpressure statistics
+type BackpressureStats struct {
 	// Queued is number of queued operations
 	Queued int
 
@@ -46,8 +46,8 @@ const (
 // DefaultBackpressureConfig returns default backpressure config
 func DefaultBackpressureConfig() BackpressureConfig {
 	return BackpressureConfig{
-		Threshold:   1000,
-		MaxCapacity: 10000,
+		Threshold:   5000,  // Increased threshold for high-load scenarios
+		MaxCapacity: 20000, // Increased capacity to handle bursts
 		Strategy:    StrategyBlock,
 	}
 }
@@ -107,11 +107,45 @@ func (b *simpleBackpressure) Release() {
 	}
 }
 
-func (b *simpleBackpressure) Status() BackpressureStatus {
-	return BackpressureStatus{
+func (b *simpleBackpressure) Stats() BackpressureStats {
+	return BackpressureStats{
 		Queued:   len(b.permits),
 		Capacity: cap(b.permits),
 		Blocked:  len(b.permits) >= b.cfg.Threshold,
 		Rejected: atomic.LoadUint64(&b.rejected),
 	}
+}
+
+// Status is deprecated, use Stats instead.
+func (b *simpleBackpressure) Status() BackpressureStats {
+	return b.Stats()
+}
+
+// BackpressureStatus is deprecated, use BackpressureStats instead.
+type BackpressureStatus = BackpressureStats
+
+// ShouldReject returns true if backpressure should reject new requests
+func (b *simpleBackpressure) ShouldReject() bool {
+	return !b.Allow()
+}
+
+// RecordRequest records a request (equivalent to Acquire without blocking)
+func (b *simpleBackpressure) RecordRequest() {
+	// For tracking purposes, but don't block
+	if b.Allow() {
+		select {
+		case b.permits <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// RecordResponse records a successful response (equivalent to Release)
+func (b *simpleBackpressure) RecordResponse() {
+	b.Release()
+}
+
+// RecordError records an error response (equivalent to Release)
+func (b *simpleBackpressure) RecordError() {
+	b.Release()
 }

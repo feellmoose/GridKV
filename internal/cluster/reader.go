@@ -81,6 +81,17 @@ type readerConfig struct {
 var _ Reader = (*reader)(nil)
 
 func newReader(cfg readerConfig) (*reader, error) {
+	// Validate required dependencies
+	if cfg.Store == nil {
+		return nil, fmt.Errorf("store cannot be nil")
+	}
+	if cfg.Executor == nil {
+		return nil, fmt.Errorf("executor cannot be nil")
+	}
+	if cfg.Ring == nil {
+		return nil, fmt.Errorf("ring cannot be nil")
+	}
+
 	// Default TTL when cache is provided or not specified
 	if cfg.CacheTTL <= 0 {
 		cfg.CacheTTL = 15 * time.Millisecond
@@ -114,67 +125,114 @@ func (r *reader) Get(ctx context.Context, key string) (*mem_storage.StoredItem, 
 		}
 	}
 
-	// Route to target node
-	target := r.ring.Get(key)
-	if target == "" {
+	// Eventual consistency read: try local first, then distributed
+	// Local read first (fast path for high concurrency)
+	item, err := r.store.Get(key)
+	if err == nil && item != nil {
+		return item, nil
+	}
+
+	// Local read failed, try distributed read: preferred replica first, then fallback to next replicas on failure
+	// According to README: "Hash ring locates preferred replica; fast fallback to next replica when suspect/unreachable"
+	targets := r.ring.GetN(key, r.replicaCount)
+	if len(targets) == 0 {
 		return nil, fmt.Errorf("no target node found for key %s", key)
 	}
 
-	// Get data from target with timeout control
-	var item *mem_storage.StoredItem
-	var err error
-
-	if target == r.nodeID {
-		// Local read
-		item, err = r.store.Get(key)
-		if err != nil {
-			logging.Debug("Local store.Get failed", "key", key, "error", err)
+	// Filter alive nodes (skip local node as we already tried it)
+	aliveTargets := aliveTargetsPool.Get().([]string)[:0]
+	defer func() {
+		if cap(aliveTargets) <= 32 {
+			aliveTargetsPool.Put(aliveTargets[:0])
 		}
-	} else if r.getFunc != nil {
-		// Remote read with timeout control
-		// Increased timeout for distributed keys with better hash distribution
-		timeout := 5 * time.Second
-		readCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
+	}()
+
+	for _, target := range targets {
+		if target == r.nodeID {
+			// Already tried local, skip
+			continue
+		}
+		if r.member != nil && r.member.State(target) == NodeStateAlive {
+			aliveTargets = append(aliveTargets, target)
+		} else if r.member == nil {
+			// If no member manager, assume all targets are alive
+			aliveTargets = append(aliveTargets, target)
+		}
+	}
+
+	if len(aliveTargets) == 0 {
+		return nil, fmt.Errorf("key %s not found", key)
+	}
+
+	// Try targets sequentially: preferred replica first, then fallback to next on failure
+	if r.getFunc == nil {
+		return nil, fmt.Errorf("no remote read function available for key %s", key)
+	}
+
+	timeout := 5 * time.Second
+	var lastErr error
+	for _, target := range aliveTargets {
+		// Only create new context if current context doesn't have timeout or deadline is longer
+		var cancel context.CancelFunc
+		readCtx := ctx
+		if ctx == nil || ctx == context.Background() {
+			readCtx, cancel = context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+		} else if ctxDeadline, hasDeadline := ctx.Deadline(); !hasDeadline || time.Until(ctxDeadline) > timeout {
+			readCtx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
 
 		done := make(chan struct{})
-		go func() {
+		go func(t string) {
 			defer close(done)
-			var localItem *mem_storage.StoredItem
-			var localErr error
-			localItem, localErr = r.getFunc(target, key)
-			// Only assign if context not cancelled
+			// Check context before starting expensive operation
 			select {
 			case <-readCtx.Done():
 				return
 			default:
+			}
+			
+			var localItem *mem_storage.StoredItem
+			var localErr error
+			localItem, localErr = r.getFunc(t, key)
+			
+			// Check context again after operation completes
+			select {
+			case <-readCtx.Done():
+				// Context cancelled, discard result
+				return
+			default:
+				// Context still valid, use result
 				item = localItem
 				err = localErr
 			}
-		}()
+		}(target)
 
-		// Wait for completion or timeout
 		select {
 		case <-done:
 			// Remote read completed
+			if err == nil && item != nil && !item.IsTombstone() {
+				// Success, return immediately
+				goto success
+			}
+			// Failed, save error and try next replica
+			lastErr = err
+			if lastErr == nil {
+				lastErr = fmt.Errorf("key %s not found on node %s", key, target)
+			}
 		case <-readCtx.Done():
-			logging.Warn("Remote read operation timed out", "key", key, "targetNode", target, "timeout", timeout)
-			return nil, fmt.Errorf("remote read timeout for key %s on node %s after %v", key, target, timeout)
+			// Timeout, try next replica
+			lastErr = fmt.Errorf("remote read timeout for key %s on node %s", key, target)
+			continue
 		}
-
-		if err != nil {
-			logging.Warn("Remote read failed due to network connectivity issue",
-				"key", key, "targetNode", target, "error", err)
-			return nil, fmt.Errorf("remote read failed for key %s on node %s: %w", key, target, err)
-		}
-	} else {
-		return nil, fmt.Errorf("no remote read function available for key %s", key)
 	}
 
-	if err != nil || item == nil || item.IsTombstone() {
-		return nil, err
-	}
+	// All replicas failed
+	return nil, fmt.Errorf("remote read failed for key %s after trying %d replicas: %w", key, len(aliveTargets), lastErr)
 
+success:
+	// Success path - item is already set and validated
 	// Cache the original item (zero-copy)
 	if r.cache != nil {
 		r.cache.Set(key, item, r.cacheTTL)
@@ -189,7 +247,9 @@ func (r *reader) BatchGet(ctx context.Context, keys []string) (map[string]*mem_s
 		return make(map[string]*mem_storage.StoredItem), nil
 	}
 
+	// Pre-allocate result map with known size
 	result := make(map[string]*mem_storage.StoredItem, len(keys))
+	// Use buffered channel to avoid blocking
 	resultCh := make(chan struct {
 		key  string
 		item *mem_storage.StoredItem
@@ -201,7 +261,7 @@ func (r *reader) BatchGet(ctx context.Context, keys []string) (map[string]*mem_s
 	for _, key := range keys {
 		key := key
 		wg.Add(1)
-		_ = r.executor.Do(func() {
+		if err := r.executor.Do(func() {
 			defer wg.Done()
 			if item, err := r.Get(ctx, key); err == nil && item != nil {
 				resultCh <- struct {
@@ -209,7 +269,10 @@ func (r *reader) BatchGet(ctx context.Context, keys []string) (map[string]*mem_s
 					item *mem_storage.StoredItem
 				}{key, item}
 			}
-		})
+		}); err != nil {
+			wg.Done()
+			break
+		}
 	}
 
 	// Close channel when all goroutines done
@@ -265,10 +328,9 @@ func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_st
 	// Query all targets in parallel
 	for _, target := range aliveTargets {
 		target := target
-		_ = r.executor.Do(func() {
+		if err := r.executor.Do(func() {
 			var item *mem_storage.StoredItem
 			var err error
-
 			if target == r.nodeID {
 				item, err = r.store.Get(key)
 			} else if r.getFunc != nil {
@@ -282,7 +344,9 @@ func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_st
 			}{item, err}:
 			case <-ctx.Done():
 			}
-		})
+		}); err != nil {
+			break
+		}
 	}
 
 	var best *mem_storage.StoredItem
@@ -293,10 +357,9 @@ func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_st
 		}
 	}()
 
-	// Wait for first successful response, then cancel remaining
-	firstSuccess := false
+	// Wait for all responses to get the highest version
 	count := 0
-	for count < len(aliveTargets) && !firstSuccess {
+	for count < len(aliveTargets) {
 		select {
 		case res := <-results:
 			count++
@@ -304,11 +367,6 @@ func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_st
 				items = append(items, res.item)
 				if best == nil || res.item.CompareVersion(best) > 0 {
 					best = res.item
-				}
-				// First success: cancel remaining requests for fast path
-				if !firstSuccess {
-					firstSuccess = true
-					cancel()
 				}
 			}
 		case <-ctx.Done():
@@ -332,9 +390,21 @@ func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_st
 		}
 
 		if len(versions) > 1 {
-			repairItems := make([]*mem_storage.StoredItem, len(items))
-			copy(repairItems, items)
-			_ = r.repair.Repair(key, repairItems)
+			// Use object pool for repair items
+			repairItems := storedItemSlicePool.Get().([]*mem_storage.StoredItem)
+			repairItems = repairItems[:0] // Reset length
+			if cap(repairItems) < len(items) {
+				repairItems = make([]*mem_storage.StoredItem, 0, len(items))
+			}
+			repairItems = append(repairItems, items...)
+			// Trigger read repair (error ignored as this is async repair path)
+			if err := r.repair.Repair(key, repairItems); err != nil {
+				logging.Debug("Read repair failed", "key", key, "error", err)
+			}
+			// Return to pool if capacity is reasonable
+			if cap(repairItems) <= 64 {
+				storedItemSlicePool.Put(repairItems[:0])
+			}
 		}
 	}
 
@@ -402,32 +472,30 @@ func (r *reader) GetWithConsistency(ctx context.Context, key string, level Consi
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	results := make(chan struct {
+	type result struct {
 		item *mem_storage.StoredItem
 		err  error
-	}, len(aliveTargets))
+	}
+	results := make(chan result, len(aliveTargets))
 
 	// Query all replicas
 	for _, target := range aliveTargets {
 		target := target
-		_ = r.executor.Do(func() {
+		if err := r.executor.Do(func() {
 			var item *mem_storage.StoredItem
 			var err error
-
 			if target == r.nodeID {
 				item, err = r.store.Get(key)
 			} else if r.getFunc != nil {
 				item, err = r.getFunc(target, key)
 			}
-
 			select {
-			case results <- struct {
-				item *mem_storage.StoredItem
-				err  error
-			}{item, err}:
+			case results <- result{item, err}:
 			case <-ctx.Done():
 			}
-		})
+		}); err != nil {
+			break
+		}
 	}
 
 	// Collect responses
@@ -479,23 +547,29 @@ func (r *reader) GetWithConsistency(ctx context.Context, key string, level Consi
 		}
 
 		if len(versions) > 1 {
-			repairItems := make([]*mem_storage.StoredItem, len(items))
-			copy(repairItems, items)
+			repairItems := storedItemSlicePool.Get().([]*mem_storage.StoredItem)[:0]
+			if cap(repairItems) < len(items) {
+				repairItems = make([]*mem_storage.StoredItem, 0, len(items))
+			}
+			repairItems = append(repairItems, items...)
 			_ = r.repair.Repair(key, repairItems)
+			if cap(repairItems) <= 64 {
+				storedItemSlicePool.Put(repairItems[:0])
+			}
 		}
 	}
 
+	if best == nil {
+		return nil, nil
+	}
+	
 	// Cache result (only for eventual consistency)
-	if best != nil && level == ConsistencyLevelOne && r.cache != nil {
+	if level == ConsistencyLevelOne && r.cache != nil {
 		r.cache.Set(key, best, r.cacheTTL)
 	}
-
-	if best != nil {
-		// DeepCopy is necessary for safety: user can modify returned value
-		return best.DeepCopy(), nil
-	}
-
-	return nil, nil
+	
+	// DeepCopy is necessary for safety: user can modify returned value
+	return best.DeepCopy(), nil
 }
 
 // ReadRepair handles asynchronous read repair
@@ -546,10 +620,12 @@ func (rr *readRepair) Repair(key string, versions []*mem_storage.StoredItem) err
 	}
 
 	// Async repair
-	_ = rr.executor.Do(func() {
+	if err := rr.executor.Do(func() {
 		ctx := context.Background()
 		_ = rr.writer.Set(ctx, key, maxVersion)
-	})
+	}); err != nil {
+		return nil
+	}
 
 	return nil
 }

@@ -2,11 +2,16 @@ package cluster
 
 import (
 	"context"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/mem_storage"
 	"github.com/feellmoose/gridkv/internal/utils/executor"
+	"github.com/feellmoose/gridkv/internal/utils/hlc"
+	"github.com/feellmoose/gridkv/internal/utils/logging"
+	"github.com/feellmoose/gridkv/internal/utils/zerocopy"
 )
 
 // Object pools for gossip operations
@@ -39,6 +44,7 @@ type gossip struct {
 	ring         HashRing
 	replicaCount int
 	executor     *executor.Exec
+	hlc          *hlc.HLC
 	interval     time.Duration
 	stopCh       chan struct{}
 	stopOnce     sync.Once
@@ -57,6 +63,7 @@ type gossipConfig struct {
 	ReplicaCount int
 	Executor     *executor.Exec
 	Interval     time.Duration
+	HLC          *hlc.HLC
 	SendFunc     func(address string, data []byte) error
 	RecvFunc     func() ([]byte, error)
 	Member       MemberMgr
@@ -64,7 +71,7 @@ type gossipConfig struct {
 
 func newGossip(cfg gossipConfig) (*gossip, error) {
 	if cfg.Interval <= 0 {
-		cfg.Interval = 400 * time.Millisecond
+		cfg.Interval = 100 * time.Millisecond // Balanced gossip interval for high concurrency
 	}
 	if cfg.ReplicaCount <= 0 {
 		cfg.ReplicaCount = 3
@@ -76,6 +83,7 @@ func newGossip(cfg gossipConfig) (*gossip, error) {
 		ring:         cfg.Ring,
 		replicaCount: cfg.ReplicaCount,
 		executor:     cfg.Executor,
+		hlc:          cfg.HLC,
 		interval:     cfg.Interval,
 		stopCh:       make(chan struct{}),
 		sendFunc:     cfg.SendFunc,
@@ -109,14 +117,47 @@ func (g *gossip) gossipLoop() {
 	ticker := time.NewTicker(g.interval)
 	defer ticker.Stop()
 
+	consecutiveFailures := 0
+	originalInterval := g.interval
+	lastGC := time.Now()
+	gcInterval := 5 * time.Minute // Periodic GC hint for long-running processes
+
 	for {
 		select {
 		case <-g.stopCh:
 			return
 		case <-ticker.C:
-			_ = g.executor.Do(func() {
+			// Periodic GC hint for long-running processes
+			if time.Since(lastGC) > gcInterval {
+				runtime.GC()
+				lastGC = time.Now()
+			}
+			
+			if err := g.executor.Do(func() {
 				g.doGossip()
-			})
+			}); err != nil {
+				consecutiveFailures++
+				// On executor failures, increase frequency temporarily for high concurrency
+				if consecutiveFailures >= 3 && g.interval > 50*time.Millisecond {
+					g.interval = g.interval / 2
+					if g.interval < 50*time.Millisecond {
+						g.interval = 50 * time.Millisecond
+					}
+					ticker.Reset(g.interval)
+					logging.Info("Gossip increasing frequency due to executor pressure", "node", g.nodeID, "new_interval", g.interval)
+				}
+				continue
+			} else {
+				consecutiveFailures = 0
+				// Gradually restore normal interval
+				if g.interval < originalInterval {
+					g.interval = g.interval * 5 / 4
+					if g.interval > originalInterval {
+						g.interval = originalInterval
+					}
+					ticker.Reset(g.interval)
+				}
+			}
 		}
 	}
 }
@@ -174,7 +215,6 @@ func (g *gossip) doGossip() {
 		selected[i], selected[j] = selected[j], selected[i]
 	}
 
-	// Convert nodeID to address
 	nodeIDToAddr := gossipNodeIDToAddrPool.Get().(map[string]string)
 	defer func() {
 		for k := range nodeIDToAddr {
@@ -182,19 +222,25 @@ func (g *gossip) doGossip() {
 		}
 		gossipNodeIDToAddrPool.Put(nodeIDToAddr)
 	}()
+	memberMap := make(map[string]NodeInfo, len(members))
 	for _, m := range members {
 		nodeIDToAddr[m.NodeID] = m.Address
+		memberMap[m.NodeID] = m
 	}
 	for _, targetNodeID := range selected {
 		targetAddr := nodeIDToAddr[targetNodeID]
 		if targetAddr == "" {
-			continue // Skip if address not found
+			continue
 		}
-		// Capture for goroutine
+		if member, ok := memberMap[targetNodeID]; ok && member.State != NodeStateAlive {
+			continue
+		}
 		addr := targetAddr
-		_ = g.executor.Do(func() {
+		if err := g.executor.Do(func() {
 			_, _ = g.Pull(addr)
-		})
+		}); err != nil {
+			return
+		}
 	}
 }
 
@@ -202,32 +248,55 @@ func (g *gossip) Push(ops []*mem_storage.SyncOperation, targets []string) error 
 	if len(ops) == 0 || len(targets) == 0 {
 		return nil
 	}
+	
+	// Log for large batches only
+	if len(ops) > 50 {
+		logging.Debug("Gossip Push large batch", "node", g.nodeID, "ops_count", len(ops), "targets_count", len(targets))
+	}
 
 	data, err := SerializeSyncOps(ops)
 	if err != nil {
+		logging.Warn("Gossip Push serialization failed", "node", g.nodeID, "ops_count", len(ops), "error", err)
 		return err
 	}
+	
+	if len(ops) > 50 {
+		logging.Debug("Gossip Push data serialized", "node", g.nodeID, "data_size", len(data), "ops_count", len(ops))
+	}
 
-	// Fan-out = log2(N) to avoid full broadcast
-	fanOut := 1
-	if len(targets) > 1 {
-		n := len(targets)
-		fanOut = 0
-		for n > 0 {
-			fanOut++
-			n >>= 1
+	// For direct replication (writer calls Push with specific targets),
+	// push to ALL targets to ensure data replication completeness
+	// Fan-out is only used for epidemic gossip propagation
+	fanOut := len(targets)
+	
+	// Push to all targets to ensure complete replication
+	var lastErr error
+	for i := 0; i < fanOut; i++ {
+		target := targets[i]
+		if g.member != nil {
+			members := g.member.Members()
+			isAlive := false
+			for _, m := range members {
+				if m.Address == target && m.State == NodeStateAlive {
+					isAlive = true
+					break
+				}
+			}
+			if !isAlive {
+				continue
+			}
 		}
-		if fanOut > len(targets) {
-			fanOut = len(targets)
+		if err := g.executor.Do(func() {
+			g.pushToTarget(target, data, 15)
+		}); err != nil {
+			logging.Warn("Gossip Push executor error", "node", g.nodeID, "target", target, "error", err)
+			lastErr = err
 		}
 	}
 
-	// Push to first fanOut targets
-	for i := 0; i < fanOut; i++ {
-		target := targets[i]
-		_ = g.executor.Do(func() {
-			g.pushToTarget(target, data, 3) // Max 3 retries
-		})
+	// Return last error if any, but don't fail the entire push
+	if lastErr != nil {
+		logging.Warn("Gossip Push completed with errors", "node", g.nodeID, "fanOut", fanOut, "last_error", lastErr)
 	}
 
 	return nil
@@ -235,25 +304,78 @@ func (g *gossip) Push(ops []*mem_storage.SyncOperation, targets []string) error 
 
 func (g *gossip) pushToTarget(target string, data []byte, maxRetries int) {
 	if g.sendFunc == nil {
+		logging.Debug("Gossip pushToTarget: no sendFunc", "node", g.nodeID, "target", target)
 		return
 	}
 
-	// Pre-allocate message with prefix to avoid repeated allocation on retry
-	prefix := []byte("PUSH:")
+	// Use constant to avoid repeated allocation
+	const pushPrefix = "PUSH:"
+	prefix := zerocopy.StringToBytes(pushPrefix)
 	msg := make([]byte, len(prefix)+len(data))
 	copy(msg, prefix)
 	copy(msg[len(prefix):], data)
 
 	for i := 0; i < maxRetries; i++ {
-		if err := g.sendFunc(target, msg); err == nil {
-			return
+		if g.member != nil {
+			members := g.member.Members()
+			isAlive := false
+			for _, m := range members {
+				if m.Address == target && m.State == NodeStateAlive {
+					isAlive = true
+					break
+				}
+			}
+			if !isAlive {
+				return
+			}
+		}
+		
+		// Use timeout channel directly instead of context for better performance
+		timeout := time.NewTimer(8 * time.Second)
+		defer timeout.Stop()
+		done := errorChanPool.Get().(chan error)
+
+		go func() {
+			done <- g.sendFunc(target, msg)
+		}()
+
+		select {
+		case err := <-done:
+			errorChanPool.Put(done)
+			if err == nil {
+				return
+			}
+			if isConnectionRefused(err) && i == 0 {
+				return
+			}
+			if i == maxRetries-1 || i%3 == 0 {
+				logging.Warn("Gossip pushToTarget failed", "node", g.nodeID, "target", target, "attempt", i+1, "error", err)
+			}
+		case <-timeout.C:
+			errorChanPool.Put(done)
+			if i == maxRetries-1 || i%3 == 0 {
+				logging.Warn("Gossip pushToTarget timeout", "node", g.nodeID, "target", target, "attempt", i+1)
+			}
 		}
 
 		if i < maxRetries-1 {
-			backoff := time.Duration(i+1) * 100 * time.Millisecond
+			backoff := time.Duration(1<<uint(i)) * 50 * time.Millisecond
+			if backoff > 500*time.Millisecond {
+				backoff = 500 * time.Millisecond
+			}
 			time.Sleep(backoff)
 		}
 	}
+	logging.Debug("Gossip pushToTarget exhausted retries", "node", g.nodeID, "target", target)
+}
+
+func isConnectionRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connect: connection refused")
 }
 
 func (g *gossip) Pull(target string) ([]*mem_storage.SyncOperation, error) {
@@ -263,6 +385,7 @@ func (g *gossip) Pull(target string) ([]*mem_storage.SyncOperation, error) {
 
 	// Get local sync buffer to send
 	localOps, err := g.store.GetSyncBuffer()
+	logging.Debug("Gossip Pull sync buffer", "node", g.nodeID, "target", target, "ops_count", len(localOps), "error", err)
 	if err != nil || len(localOps) == 0 {
 		return nil, nil
 	}
@@ -274,7 +397,11 @@ func (g *gossip) Pull(target string) ([]*mem_storage.SyncOperation, error) {
 	}
 
 	// Send pull request with local ops (push-pull pattern)
-	pullReq := append([]byte("PULL:"+g.nodeID+":"), data...)
+	// Use zerocopy to avoid string allocation
+	pullPrefix := zerocopy.StringToBytes("PULL:" + g.nodeID + ":")
+	pullReq := make([]byte, len(pullPrefix)+len(data))
+	copy(pullReq, pullPrefix)
+	copy(pullReq[len(pullPrefix):], data)
 	if err := g.sendFunc(target, pullReq); err != nil {
 		return nil, err
 	}
@@ -286,8 +413,11 @@ func (g *gossip) applyOps(ops []*mem_storage.SyncOperation) error {
 	if len(ops) == 0 {
 		return nil
 	}
+	if len(ops) > 100 {
+		logging.Debug("Gossip applyOps large batch", "node", g.nodeID, "ops_count", len(ops))
+	}
 
-	// Cache GetN results for same keys to reduce ring lookups
+	// Cache replica checks to reduce ring lookups
 	keyReplicaCache := make(map[string]bool, len(ops))
 	getReplica := func(key string) bool {
 		if cached, ok := keyReplicaCache[key]; ok {
@@ -308,33 +438,47 @@ func (g *gossip) applyOps(ops []*mem_storage.SyncOperation) error {
 		return isReplica
 	}
 
+	appliedCount := 0
+	skippedCount := 0
 	for _, op := range ops {
 		if op.Item == nil {
+			skippedCount++
 			continue
 		}
 
-		// Check if local node is a replica for this key (use cache)
 		if !getReplica(op.Key) {
+			skippedCount++
 			continue
 		}
 
-		existing, err := g.store.Get(op.Key)
-		if err == nil && existing != nil {
-			if !op.Item.ResolveConflict(existing) {
-				continue // Existing version wins
-			}
+		// Version check: skip if existing version >= incoming (LWW)
+		existing, err := g.store.GetNoCopy(op.Key)
+		if err == nil && existing != nil && existing.Version >= op.Item.Version {
+			skippedCount++
+			continue
 		}
 
+		// Store: new version wins or key doesn't exist
 		if err := g.store.Set(op.Key, op.Item); err != nil {
+			logging.Warn("Gossip store failed", "node", g.nodeID, "key", op.Key, "error", err)
 			return err
 		}
+		appliedCount++
+	}
+
+	if len(ops) > 50 {
+		logging.Debug("Gossip applyOps completed", "node", g.nodeID, "total", len(ops), "applied", appliedCount, "skipped", skippedCount)
 	}
 	return nil
 }
 
 // HandleMessage processes incoming gossip messages
+// Expected format:
+//   - Push: "PUSH:" + serializedOps
+//   - Pull: "PULL:nodeID:" + serializedOps
 func (g *gossip) HandleMessage(data []byte) error {
 	if len(data) < 5 {
+		logging.Debug("Gossip HandleMessage: message too short", "node", g.nodeID, "dataLen", len(data))
 		return nil
 	}
 
@@ -342,6 +486,15 @@ func (g *gossip) HandleMessage(data []byte) error {
 	// Check prefix: "PUSH:" or "PULL:"
 	isPush := len(data) >= 5 && data[0] == 'P' && data[1] == 'U' && data[2] == 'S' && data[3] == 'H' && data[4] == ':'
 	isPull := len(data) >= 5 && data[0] == 'P' && data[1] == 'U' && data[2] == 'L' && data[3] == 'L' && data[4] == ':'
+
+	if !isPush && !isPull {
+		prefixLen := 10
+		if len(data) < prefixLen {
+			prefixLen = len(data)
+		}
+		logging.Debug("Gossip HandleMessage: unknown message format", "node", g.nodeID, "prefix", string(data[:prefixLen]))
+		return nil
+	}
 
 	payload := data[5:]
 
@@ -364,17 +517,27 @@ func (g *gossip) HandleMessage(data []byte) error {
 		if idx < len(payload) {
 			remoteOps, err := DeserializeSyncOps(payload[idx+1:])
 			if err == nil && len(remoteOps) > 0 {
-				_ = g.applyOps(remoteOps)
+				// Apply remote operations (error ignored as this is async gossip path)
+				if err := g.applyOps(remoteOps); err != nil {
+					logging.Debug("Failed to apply remote ops in gossip pull", "node", g.nodeID, "ops_count", len(remoteOps), "error", err)
+				}
 			}
 		}
-		// Send back local ops (push-pull)
-		localOps, err := g.store.GetSyncBuffer()
-		if err == nil && len(localOps) > 0 {
-			serializedData, _ := SerializeSyncOps(localOps)
-			if serializedData != nil && g.sendFunc != nil {
-				// Extract target nodeID from pull request (use bytes, avoid string conversion)
-				targetNodeIDBytes := payload[:idx]
-				targetNodeID := string(targetNodeIDBytes) // Only convert when needed
+		// Send back local ops (push-pull pattern)
+		// Use executor to avoid blocking
+		if g.executor != nil && g.sendFunc != nil {
+			targetNodeIDBytes := payload[:idx]
+			// Use zerocopy to avoid allocation
+			targetNodeID := zerocopy.BytesToString(targetNodeIDBytes)
+			_ = g.executor.Do(func() {
+				localOps, err := g.store.GetSyncBuffer()
+				if err != nil || len(localOps) == 0 {
+					return
+				}
+				serializedData, err := SerializeSyncOps(localOps)
+				if err != nil || serializedData == nil {
+					return
+				}
 				// Convert nodeID to address
 				var targetAddr string
 				if g.member != nil {
@@ -386,15 +549,19 @@ func (g *gossip) HandleMessage(data []byte) error {
 						}
 					}
 				}
-				if targetAddr != "" {
-					// Pre-allocate message to avoid repeated allocation
-					pushPrefix := []byte("PUSH:")
-					responseMsg := make([]byte, len(pushPrefix)+len(serializedData))
-					copy(responseMsg, pushPrefix)
-					copy(responseMsg[len(pushPrefix):], serializedData)
-					_ = g.sendFunc(targetAddr, responseMsg)
+				if targetAddr == "" {
+					return
 				}
-			}
+				// Pre-allocate message to avoid repeated allocation
+				pushPrefix := []byte("PUSH:")
+				responseMsg := make([]byte, len(pushPrefix)+len(serializedData))
+				copy(responseMsg, pushPrefix)
+				copy(responseMsg[len(pushPrefix):], serializedData)
+				// Send response (error ignored as this is async gossip path)
+				if err := g.sendFunc(targetAddr, responseMsg); err != nil {
+					logging.Debug("Failed to send gossip pull response", "node", g.nodeID, "target", targetAddr, "error", err)
+				}
+			})
 		}
 	}
 	return nil

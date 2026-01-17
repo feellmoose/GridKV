@@ -15,7 +15,6 @@
 package hlc
 
 import (
-	"fmt"
 	"sync"
 	"time"
 )
@@ -110,22 +109,65 @@ func (h *HLC) Update(remote string) {
 		return
 	}
 
-	var node string
-	var ts int64
-	var ctr uint64
-	if _, err := fmt.Sscanf(remote, "%[^:]:%d:%d", &node, &ts, &ctr); err != nil {
+	// Fast path: manual parsing (faster than fmt.Sscanf)
+	// Format: "nodeID:timestamp:counter"
+	idx1 := -1
+	for i := 0; i < len(remote); i++ {
+		if remote[i] == ':' {
+			idx1 = i
+			break
+		}
+	}
+	if idx1 < 0 || idx1 >= len(remote)-1 {
 		return
+	}
+
+	idx2 := -1
+	for i := idx1 + 1; i < len(remote); i++ {
+		if remote[i] == ':' {
+			idx2 = i
+			break
+		}
+	}
+	if idx2 < 0 || idx2 >= len(remote)-1 {
+		return
+	}
+
+	// Parse timestamp
+	var ts int64
+	tsStr := remote[idx1+1 : idx2]
+	for i := 0; i < len(tsStr); i++ {
+		c := tsStr[i]
+		if c < '0' || c > '9' {
+			return
+		}
+		ts = ts*10 + int64(c-'0')
+	}
+
+	// Parse counter
+	var ctr uint64
+	ctrStr := remote[idx2+1:]
+	for i := 0; i < len(ctrStr); i++ {
+		c := ctrStr[i]
+		if c < '0' || c > '9' {
+			break
+		}
+		ctr = ctr*10 + uint64(c-'0')
 	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	// Critical for consistency: ensure local clock is at least as recent as remote
 	if ts > h.lastTs {
 		h.lastTs = ts
 		h.counter = ctr
+		h.cacheValid = false
 	} else if ts == h.lastTs && ctr > h.counter {
 		h.counter = ctr
+		h.cacheValid = false
 	}
+	// If remote is older or equal, no update needed (maintains monotonicity)
 }
 
 // AppendInt appends an integer to a byte buffer without allocations.

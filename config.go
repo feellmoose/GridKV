@@ -79,6 +79,9 @@ type GridKVOptions struct {
 	StartupGracePeriod time.Duration
 	DisableAuth        bool
 
+	BatchThreshold int
+	BatchWindow    time.Duration
+
 	Network *NetworkOptions
 	Storage *StorageOptions
 
@@ -153,6 +156,12 @@ func applyDefaults(opts *GridKVOptions) {
 	}
 	if opts.ReplicationTimeout == 0 {
 		opts.ReplicationTimeout = 2 * time.Second
+	}
+	if opts.BatchThreshold == 0 {
+		opts.BatchThreshold = 10 // Balanced batching for massive concurrency throughput
+	}
+	if opts.BatchWindow == 0 {
+		opts.BatchWindow = 10 * time.Millisecond // Fast batching for real-time consistency
 	}
 	if opts.StartupGracePeriod == 0 {
 		opts.StartupGracePeriod = 1 * time.Second

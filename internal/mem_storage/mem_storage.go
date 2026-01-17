@@ -2,6 +2,7 @@ package mem_storage
 
 import (
 	"container/list"
+	"context"
 	"errors"
 	"fmt"
 	"runtime"
@@ -10,6 +11,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/feellmoose/gridkv/internal/utils/lifecycle"
 	"github.com/feellmoose/gridkv/internal/utils/zerocopy"
 	"github.com/klauspost/compress/zstd"
 	"github.com/zeebo/xxh3"
@@ -91,12 +93,13 @@ type storageShard struct {
 	lru   *shardLRU
 	lruMu sync.Mutex
 
-	// Per-shard sync buffer (lock-free ring buffer)
+	// Per-shard sync buffer (protected by mutex)
 	syncBuffer   []atomicSyncOp
 	syncHead     atomic.Uint64
 	syncTail     atomic.Uint64
 	syncCapacity uint64
 	syncMask     uint64
+	syncMu       sync.Mutex
 
 	// Per-shard stats
 	keyCount       atomic.Int64
@@ -159,14 +162,14 @@ func DefaultConfig() Config {
 func New(config Config) (*MemStorage, error) {
 	shardCount := config.ShardCount
 	if shardCount == 0 {
-		// Auto: 2-4x CPU cores
+		// Auto: 8x CPU cores for massive concurrency (10000+ workers)
 		cpuCount := runtime.GOMAXPROCS(0)
-		shardCount = cpuCount * 2
-		if shardCount < 64 {
-			shardCount = 64
+		shardCount = cpuCount * 8
+		if shardCount < 256 {
+			shardCount = 256 // Minimum for basic concurrency
 		}
-		if shardCount > 512 {
-			shardCount = 512
+		if shardCount > 4096 {
+			shardCount = 4096 // Cap to prevent excessive overhead
 		}
 	}
 
@@ -222,7 +225,7 @@ func New(config Config) (*MemStorage, error) {
 	}
 
 	// Initialize shards
-	syncCapacity := nextPowerOf2(16384)
+	syncCapacity := nextPowerOf2(8192) // Massive capacity for 10000+ concurrent operations
 	for i := 0; i < shardCount; i++ {
 		s.shards[i] = &storageShard{
 			lru: &shardLRU{
@@ -260,6 +263,25 @@ func (s *MemStorage) Set(key string, item *StoredItem) error {
 
 	shard := s.getShard(key)
 
+	// Compress if enabled and prepare item
+	compItem, itemSize, err := s.prepareCompressedItem(key, item)
+	if err != nil {
+		return err
+	}
+
+	// Memory limit check and eviction
+	if s.maxMemoryMB > 0 {
+		if err := s.checkAndEvict(itemSize); err != nil {
+			return err
+		}
+	}
+
+	// Atomic conflict resolution with retry loop
+	return s.storeItemWithConflictResolution(shard, key, compItem, itemSize, item)
+}
+
+// prepareCompressedItem handles compression and size calculation for an item
+func (s *MemStorage) prepareCompressedItem(key string, item *StoredItem) (*compressedItem, int64, error) {
 	// Compress if enabled
 	origSize := len(item.Value)
 	var compressedValue []byte
@@ -274,13 +296,6 @@ func (s *MemStorage) Set(key string, item *StoredItem) error {
 	// Calculate size
 	itemSize := s.calculateItemSize(key, compressedValue)
 
-	// Memory limit check and eviction
-	if s.maxMemoryMB > 0 {
-		if err := s.checkAndEvict(itemSize); err != nil {
-			return err
-		}
-	}
-
 	// Create compressed item
 	compItem := &compressedItem{
 		Version:    item.Version,
@@ -290,24 +305,17 @@ func (s *MemStorage) Set(key string, item *StoredItem) error {
 		OrigSize:   origSize,
 	}
 
+	return compItem, itemSize, nil
+}
+
+// storeItemWithConflictResolution handles the atomic storage with conflict resolution
+func (s *MemStorage) storeItemWithConflictResolution(shard *storageShard, key string, compItem *compressedItem, itemSize int64, originalItem *StoredItem) error {
 	// Atomic conflict resolution with retry loop for CAS
 	for {
 		existing, loaded := shard.data.Load(key)
 		if !loaded {
 			// New key: try to store
-			if _, exists := shard.data.LoadOrStore(key, compItem); !exists {
-				// Successfully stored new key
-				shard.keyCount.Add(1)
-				shard.byteCount.Add(itemSize)
-				shard.compressedSize.Add(int64(len(compressedValue)))
-				shard.originalSize.Add(int64(origSize))
-				s.totalKeys.Add(1)
-				s.totalBytes.Add(itemSize)
-				s.compressedBytes.Add(int64(len(compressedValue)))
-				s.originalBytes.Add(int64(origSize))
-				s.setCount.Add(1)
-				s.touchLRU(shard, key)
-				s.addToSyncBuffer(shard, key, OpSet, item)
+			if err := s.tryStoreNewKey(shard, key, compItem, itemSize, originalItem); err == nil {
 				return nil
 			}
 			// Race condition: key was inserted by another goroutine, retry
@@ -315,82 +323,102 @@ func (s *MemStorage) Set(key string, item *StoredItem) error {
 		}
 
 		// Key exists: resolve conflict
-		existingItem := existing.(*compressedItem)
-
-		// Snapshot existing item for comparison (concurrent-safe read)
-		existingVersion := existingItem.Version
-		existingExpireAt := existingItem.ExpireAt
-		existingOrigSize := existingItem.OrigSize
-
-		// Copy value data for safe comparison (use zerocopy where safe)
-		var existingValue []byte
-		if existingItem.Compressed {
-			// Decompress for comparison (creates new allocation, safe)
-			decompressed, err := s.decompress(existingItem.Value, true)
-			if err != nil {
-				// On error, use compressed value for comparison
-				existingValue = zerocopy.FastCloneBytes(existingItem.Value)
-			} else {
-				existingValue = decompressed // Already new allocation
-			}
-		} else {
-			// Use zerocopy fast clone for uncompressed values
-			existingValue = zerocopy.FastCloneBytes(existingItem.Value)
-		}
-
-		// Build comparison items (all data is now safely copied)
-		newItem := &StoredItem{
-			Version:  compItem.Version,
-			ExpireAt: compItem.ExpireAt,
-			Value:    item.Value, // Original uncompressed value
-		}
-
-		existingStoredItem := &StoredItem{
-			Version:  existingVersion,
-			ExpireAt: existingExpireAt,
-			Value:    existingValue, // Safely copied/decompressed
-		}
-
-		// Resolve conflict: ResolveConflict returns true if 'other' should replace 'item'
-		// So existingStoredItem.ResolveConflict(newItem) returns true if newItem should replace existingStoredItem
-		shouldReplace := existingStoredItem.ResolveConflict(newItem)
-		if !shouldReplace {
-			// Existing wins, skip update
-			s.setCount.Add(1)
+		if err := s.tryUpdateExistingKey(shard, key, existing, compItem, itemSize, originalItem); err == nil {
 			return nil
 		}
-
-		// Verify existing item hasn't changed (concurrent-safe check)
-		// Reload to ensure we're comparing against current state
-		current, currentLoaded := shard.data.Load(key)
-		if !currentLoaded {
-			// Item was deleted, retry from beginning
-			continue
-		}
-		currentItem := current.(*compressedItem)
-		if currentItem.Version != existingVersion || currentItem.OrigSize != existingOrigSize {
-			// Item changed, retry
-			continue
-		}
-
-		// New wins: atomic replace using CAS (with verified existing state)
-		if shard.data.CompareAndSwap(key, existing, compItem) {
-			// Successfully replaced
-			oldSize := s.calculateItemSize(key, existingItem.Value)
-			shard.byteCount.Add(itemSize - oldSize)
-			shard.compressedSize.Add(int64(len(compressedValue) - len(existingItem.Value)))
-			shard.originalSize.Add(int64(origSize - existingItem.OrigSize))
-			s.totalBytes.Add(itemSize - oldSize)
-			s.compressedBytes.Add(int64(len(compressedValue) - len(existingItem.Value)))
-			s.originalBytes.Add(int64(origSize - existingItem.OrigSize))
-			s.setCount.Add(1)
-			s.touchLRU(shard, key)
-			s.addToSyncBuffer(shard, key, OpSet, item)
-			return nil
-		}
-		// CAS failed: retry (another goroutine modified the key)
-		// Continue loop to reload and retry
+		// Update failed, retry
 	}
+}
+
+// tryStoreNewKey attempts to store a new key
+func (s *MemStorage) tryStoreNewKey(shard *storageShard, key string, compItem *compressedItem, itemSize int64, originalItem *StoredItem) error {
+	if _, exists := shard.data.LoadOrStore(key, compItem); !exists {
+		// Successfully stored new key
+		s.updateStatsForNewKey(shard, compItem, itemSize)
+		s.touchLRU(shard, key)
+		s.addToSyncBuffer(shard, key, OpSet, originalItem)
+		return nil
+	}
+	return errRetry // Signal that storage failed due to race condition
+}
+
+// updateStatsForNewKey updates all statistics for a newly stored key
+func (s *MemStorage) updateStatsForNewKey(shard *storageShard, compItem *compressedItem, itemSize int64) {
+	shard.keyCount.Add(1)
+	shard.byteCount.Add(itemSize)
+	shard.compressedSize.Add(int64(len(compItem.Value)))
+	shard.originalSize.Add(int64(compItem.OrigSize))
+	s.totalKeys.Add(1)
+	s.totalBytes.Add(itemSize)
+	s.compressedBytes.Add(int64(len(compItem.Value)))
+	s.originalBytes.Add(int64(compItem.OrigSize))
+	s.setCount.Add(1)
+}
+
+// tryUpdateExistingKey attempts to update an existing key with conflict resolution
+func (s *MemStorage) tryUpdateExistingKey(shard *storageShard, key string, existing interface{}, compItem *compressedItem, itemSize int64, originalItem *StoredItem) error {
+	existingItem := existing.(*compressedItem)
+
+	// Fast path: version-only comparison (no decompression needed for LWW)
+	// This is sufficient for consistency and much faster
+	existingVersion := existingItem.Version
+	if compItem.Version <= existingVersion {
+		// Existing version wins, skip update (no decompression needed)
+		s.setCount.Add(1)
+		return nil
+	}
+
+	// Verify existing item hasn't changed (atomic snapshot)
+	current, currentLoaded := shard.data.Load(key)
+	if !currentLoaded {
+		// Item was deleted, retry from beginning
+		return errRetry
+	}
+	currentItem := current.(*compressedItem)
+	if currentItem.Version != existingVersion {
+		// Item changed, retry
+		return errRetry
+	}
+
+	// New version wins: atomic replace using CAS
+	if shard.data.CompareAndSwap(key, existing, compItem) {
+		s.updateStatsForExistingKey(shard, existingItem, compItem, itemSize)
+		s.touchLRU(shard, key)
+		s.addToSyncBuffer(shard, key, OpSet, originalItem)
+		return nil
+	}
+
+	// CAS failed, retry
+	return errRetry
+}
+
+// getExistingValueForComparison safely extracts the value from an existing item for comparison
+// NOTE: This function is now deprecated in favor of version-only comparison for performance
+// Kept for backward compatibility but should not be used in hot paths
+func (s *MemStorage) getExistingValueForComparison(existingItem *compressedItem) ([]byte, error) {
+	if existingItem.Compressed {
+		// Decompress for comparison
+		decompressed, err := s.decompress(existingItem.Value, true)
+		if err != nil {
+			// On error, use compressed value for comparison
+			return zerocopy.FastCloneBytes(existingItem.Value), nil
+		}
+		return decompressed, nil // Already new allocation
+	}
+	// Use zerocopy fast clone for uncompressed values
+	return zerocopy.FastCloneBytes(existingItem.Value), nil
+}
+
+// updateStatsForExistingKey updates statistics when replacing an existing key
+func (s *MemStorage) updateStatsForExistingKey(shard *storageShard, oldItem, newItem *compressedItem, newItemSize int64) {
+	oldSize := s.calculateItemSize("", oldItem.Value) // Key not needed for size calc
+	shard.byteCount.Add(newItemSize - oldSize)
+	shard.compressedSize.Add(int64(len(newItem.Value) - len(oldItem.Value)))
+	shard.originalSize.Add(int64(newItem.OrigSize - oldItem.OrigSize))
+	s.totalBytes.Add(newItemSize - oldSize)
+	s.compressedBytes.Add(int64(len(newItem.Value) - len(oldItem.Value)))
+	s.originalBytes.Add(int64(newItem.OrigSize - oldItem.OrigSize))
+	s.setCount.Add(1)
 }
 
 // Get retrieves key with automatic decompression.
@@ -648,12 +676,18 @@ func (s *MemStorage) removeFromLRU(shard *storageShard, key string) {
 }
 
 // addToSyncBuffer adds operation to shard's sync buffer.
-// Item already contains Version, no need to duplicate.
+// Designed to reduce memory allocations for sync operations.
 func (s *MemStorage) addToSyncBuffer(shard *storageShard, key string, opType OpType, item *StoredItem) {
-	// Deep copy item for sync buffer to avoid sharing memory
+	// Create minimal sync item to reduce memory usage
 	var syncItem *StoredItem
 	if item != nil {
-		syncItem = item.DeepCopy()
+		// Shallow copy essential fields only - don't copy value for sync
+		syncItem = &StoredItem{
+			Version:  item.Version,
+			ExpireAt: item.ExpireAt,
+			Key:      key, // Use provided key instead of item.Key
+			Value:    nil, // Don't copy value - not needed for sync
+		}
 	}
 
 	op := &SyncOperation{
@@ -662,13 +696,28 @@ func (s *MemStorage) addToSyncBuffer(shard *storageShard, key string, opType OpT
 		Item:   syncItem,
 	}
 
-	head := shard.syncHead.Add(1) - 1
-	shard.syncBuffer[head&shard.syncMask].op = op
+	shard.syncMu.Lock()
+	defer shard.syncMu.Unlock()
 
+	head := shard.syncHead.Load()
 	tail := shard.syncTail.Load()
+
+	// Check if buffer is full
+	// Prevent unbounded growth in long-running processes
 	if head-tail >= shard.syncCapacity {
-		shard.syncTail.CompareAndSwap(tail, tail+1)
+		// Buffer is full, advance tail to make room (drop oldest operations)
+		// This prevents memory accumulation in long-running processes
+		newTail := head - shard.syncCapacity + 1
+		// Clear dropped operations to help GC
+		for i := tail; i < newTail; i++ {
+			shard.syncBuffer[i&shard.syncMask].op = nil
+		}
+		shard.syncTail.Store(newTail)
 	}
+
+	// Add operation to buffer
+	shard.syncBuffer[head&shard.syncMask].op = op
+	shard.syncHead.Store(head + 1)
 }
 
 // startCleaner starts background expiration cleaner.
@@ -697,6 +746,7 @@ func (s *MemStorage) startCleaner() {
 // cleanExpired removes expired items.
 func (s *MemStorage) cleanExpired() {
 	now := time.Now()
+	totalExpired := 0
 
 	for _, shard := range s.shards {
 		expiredKeys := make([]string, 0, 100)
@@ -724,8 +774,14 @@ func (s *MemStorage) cleanExpired() {
 				s.compressedBytes.Add(-int64(len(compItem.Value)))
 				s.originalBytes.Add(-int64(compItem.OrigSize))
 				s.removeFromLRU(shard, key)
+				totalExpired++
 			}
 		}
+	}
+	
+	// Periodic GC hint for long-running processes when many items expired
+	if totalExpired > 1000 {
+		runtime.GC()
 	}
 }
 
@@ -748,26 +804,35 @@ func (s *MemStorage) GetSyncBuffer() ([]*SyncOperation, error) {
 	ops := make([]*SyncOperation, 0, estimatedCap)
 
 	for _, shard := range s.shards {
+		shard.syncMu.Lock()
+
 		head := shard.syncHead.Load()
 		tail := shard.syncTail.Load()
-		size := head - tail
 
-		if size == 0 {
+		if head == tail {
+			shard.syncMu.Unlock()
 			continue
 		}
 
-		if size > shard.syncCapacity {
-			size = shard.syncCapacity
-			tail = head - size
-		}
-
+		// Collect all pending operations
 		for i := tail; i < head; i++ {
 			if op := shard.syncBuffer[i&shard.syncMask].op; op != nil {
+				// Restore Value if missing (saved memory in addToSyncBuffer)
+				if op.Item != nil && op.Item.Value == nil && op.OpType == OpSet {
+					if stored, err := s.GetNoCopy(op.Key); err == nil && stored != nil && len(stored.Value) > 0 {
+						op.Item.Value = make([]byte, len(stored.Value))
+						copy(op.Item.Value, stored.Value)
+					}
+				}
 				ops = append(ops, op)
+				// Clear the buffer slot
+				shard.syncBuffer[i&shard.syncMask].op = nil
 			}
 		}
 
+		// Advance tail to indicate all operations consumed
 		shard.syncTail.Store(head)
+		shard.syncMu.Unlock()
 	}
 
 	return ops, nil
@@ -821,8 +886,8 @@ func (s *MemStorage) Clear() error {
 	return nil
 }
 
-// Close releases resources.
-func (s *MemStorage) Close() error {
+// closeInternal releases resources (internal implementation).
+func (s *MemStorage) closeInternal() error {
 	if s.cleanerRunning.Swap(false) {
 		select {
 		case s.cleanerStop <- struct{}{}:
@@ -834,8 +899,25 @@ func (s *MemStorage) Close() error {
 	return s.Clear()
 }
 
+// lifecycle.Component implementation
+func (s *MemStorage) Name() string {
+	return "storage"
+}
+
+func (s *MemStorage) Start(ctx context.Context) error {
+	// Storage starts cleaner in New(), no additional start needed
+	return nil
+}
+
+func (s *MemStorage) Close(ctx context.Context) error {
+	return s.closeInternal()
+}
+
+// Ensure MemStorage implements lifecycle.Component
+var _ lifecycle.Component = (*MemStorage)(nil)
+
 // GetNoCopy retrieves key without copying value.
-// ⚠️ WARNING: Returned item shares memory. Do not modify.
+// WARNING: Returned item shares memory. Do not modify.
 func (s *MemStorage) GetNoCopy(key string) (*StoredItem, error) {
 	if key == "" {
 		return nil, errEmptyKey
@@ -1180,4 +1262,5 @@ var (
 	ErrMemoryLimit     = errors.New("memory limit exceeded")
 	errEmptyKey        = errors.New("empty key")
 	errNilItem         = errors.New("nil item")
+	errRetry           = errors.New("retry operation")
 )
