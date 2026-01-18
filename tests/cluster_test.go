@@ -102,18 +102,18 @@ func TestReplicationValidation(t *testing.T) {
 
 	// Wait for replication with multiple checks
 	sim.WaitForReplicationSettle()
-	
+
 	// Check replication multiple times and take the best result
 	criteria := simulator.GetCriteria(simulator.TargetReplication)
 	bestReplicationRate := 0.0
-	
+
 	// For eventual consistency, accept if keys are on at least 1 node initially
 	// (replication is async and may take time)
 	minNodesPerKey := 1
-	
+
 	for attempt := 0; attempt < 10; attempt++ {
 		keysWithMinReplicas := 0
-		
+
 		for _, key := range testKeys {
 			nodesWithKey := 0
 			for _, node := range nodes {
@@ -130,18 +130,18 @@ func TestReplicationValidation(t *testing.T) {
 				t.Logf("Key %s found on %d/%d nodes (min required: %d)", key, nodesWithKey, len(nodes), minNodesPerKey)
 			}
 		}
-		
+
 		// Replication rate is the percentage of keys that meet the minimum replica requirement
 		replicationRate := float64(keysWithMinReplicas) / float64(len(testKeys))
 		if replicationRate > bestReplicationRate {
 			bestReplicationRate = replicationRate
 		}
-		
+
 		// If we've reached the required rate, we're done
 		if replicationRate >= criteria.MinReplicationRate {
 			break
 		}
-		
+
 		// Wait before next check - longer waits for later attempts
 		if attempt < 9 {
 			waitTime := 2 * time.Second

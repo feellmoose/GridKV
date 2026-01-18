@@ -69,16 +69,16 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 	// Perform final consistency check
 	t.Logf("⏳ Waiting for replication to settle...")
 	simulator.WaitForReplicationSettle()
-	
+
 	// Get written keys from executor
 	writtenKeys := executor.GetWrittenKeys()
 	t.Logf("📝 Checking consistency for %d written keys...", len(writtenKeys))
-	
+
 	// Wait for replication to complete - adaptive wait time based on cluster size and workload
 	// Gossip propagation needs time: gossip interval (100ms) * log2(nodes) * replication factor
 	// For eventual consistency, we need multiple gossip cycles to propagate all writes
 	keyCount := len(writtenKeys)
-	
+
 	// Optimize wait times for large-scale tests to prevent timeouts
 	baseWait := 5 * time.Second // Base wait time for replication
 	if config.NodeCount > 3 {
@@ -91,7 +91,7 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 	if config.NodeCount > 7 {
 		baseWait = 10 * time.Second
 	}
-	
+
 	// Account for write volume: more keys need more replication time (capped)
 	if keyCount > 1000 {
 		baseWait += 2 * time.Second
@@ -105,43 +105,43 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 	if config.WorkerCount > 50 {
 		baseWait += 4 * time.Second // Additional wait time for high concurrency (reduced)
 	}
-	
+
 	// Cap maximum wait time to prevent test timeouts
 	maxWait := 20 * time.Second
 	if baseWait > maxWait {
 		baseWait = maxWait
 	}
-	
+
 	t.Logf("⏳ Waiting %v for replication to complete (keys: %d, workers: %d)...", baseWait, keyCount, config.WorkerCount)
 	time.Sleep(baseWait)
-	
+
 	// Check consistency multiple times with progressive waiting
 	// Replication is asynchronous, so we check multiple times and take the best result
 	bestConsistency := 0.0
 	// Reduce checks for large-scale tests to prevent timeouts
-	checkCount := 10 // Number of consistency checks
+	checkCount := 10                 // Number of consistency checks
 	checkInterval := 4 * time.Second // Interval between consistency checks
-	
+
 	// For large-scale tests, reduce number of checks and intervals
 	if config.NodeCount > 7 || config.WorkerCount > 50 || keyCount > 5000 {
-		checkCount = 6 // Fewer checks for large tests
+		checkCount = 6                  // Fewer checks for large tests
 		checkInterval = 3 * time.Second // Shorter intervals
 	}
-	
+
 	for i := 0; i < checkCount; i++ {
 		consistencyRate := simulator.CheckConsistency(writtenKeys)
 		if consistencyRate > bestConsistency {
 			bestConsistency = consistencyRate
 			t.Logf("   Consistency check %d/%d: %.1f%% (best: %.1f%%)", i+1, checkCount, consistencyRate, bestConsistency)
 		}
-		
+
 		// Early exit if we've reached target consistency
 		targetConsistency := criteria.MinConsistencyRate * 100.0
 		if bestConsistency >= targetConsistency {
 			t.Logf("✅ Consistency reached target (%.1f%% >= %.1f%%) after %d checks", bestConsistency, targetConsistency, i+1)
 			break
 		}
-		
+
 		// If consistency is not improving after several checks, continue anyway
 		if i >= 3 && bestConsistency < 50.0 {
 			t.Logf("⚠️  Consistency still low (%.1f%%) after %d checks, continuing...", bestConsistency, i+1)
@@ -150,7 +150,7 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 				break
 			}
 		}
-		
+
 		if i < checkCount-1 {
 			time.Sleep(checkInterval)
 		}
@@ -159,7 +159,7 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 
 	// Get failure breakdown
 	setFailed, getFailed, timeoutFailed, contextFailed := executor.GetFailureStats()
-	
+
 	// Report results
 	t.Logf("📊 %s Test Results (Target: %s):", config.Name, config.Target)
 	t.Logf("   Duration: %v", duration)
@@ -172,7 +172,7 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 	validateResults(t, config.Target, criteria, successRate, finalConsistencyRate, avgQPS)
 
 	t.Logf("✅ %s test suite completed successfully!", config.Name)
-	
+
 	// Print metrics summary if debug enabled
 	if os.Getenv("DEBUG_POOL") == "true" {
 		if metricsDone != nil {
@@ -182,7 +182,7 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 			PrintMetricsSummary(metricsSnapshots)
 		}
 	}
-	
+
 	// Additional cleanup wait to ensure resources are fully released before next test
 	// This is critical when running multiple tests sequentially to prevent resource leaks
 	// Scale wait time with cluster size and worker count - larger tests need more cleanup time

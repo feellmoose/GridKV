@@ -54,7 +54,7 @@ type Network interface {
 	ReceiveFunc() func() ([]byte, error)
 	// RegisterMessageHandler registers handler for specific message type
 	RegisterMessageHandler(msgType MessageType, handler Handler) error
-	
+
 	// GetPool returns connection pool for metrics
 	GetPool() ConnPool
 }

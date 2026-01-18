@@ -191,7 +191,7 @@ func TestTTLCache_BackgroundCleanup(t *testing.T) {
 	checkInterval := 50 * time.Millisecond
 	deadline := time.Now().Add(maxWait)
 	var count int
-	
+
 	for time.Now().Before(deadline) {
 		count = cache.Len()
 		if count <= 10 {
@@ -201,7 +201,7 @@ func TestTTLCache_BackgroundCleanup(t *testing.T) {
 		// Wait a bit more for cleanup to complete
 		time.Sleep(checkInterval)
 	}
-	
+
 	// Final check
 	count = cache.Len()
 	if count > 10 {

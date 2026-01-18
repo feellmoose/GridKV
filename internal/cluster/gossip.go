@@ -132,7 +132,7 @@ func (g *gossip) gossipLoop() {
 				runtime.GC()
 				lastGC = time.Now()
 			}
-			
+
 			if err := g.executor.Do(func() {
 				g.doGossip()
 			}); err != nil {
@@ -248,7 +248,7 @@ func (g *gossip) Push(ops []*mem_storage.SyncOperation, targets []string) error 
 	if len(ops) == 0 || len(targets) == 0 {
 		return nil
 	}
-	
+
 	// Log for large batches only
 	if len(ops) > 50 {
 		logging.Debug("Gossip Push large batch", "node", g.nodeID, "ops_count", len(ops), "targets_count", len(targets))
@@ -259,7 +259,7 @@ func (g *gossip) Push(ops []*mem_storage.SyncOperation, targets []string) error 
 		logging.Warn("Gossip Push serialization failed", "node", g.nodeID, "ops_count", len(ops), "error", err)
 		return err
 	}
-	
+
 	if len(ops) > 50 {
 		logging.Debug("Gossip Push data serialized", "node", g.nodeID, "data_size", len(data), "ops_count", len(ops))
 	}
@@ -268,7 +268,7 @@ func (g *gossip) Push(ops []*mem_storage.SyncOperation, targets []string) error 
 	// push to ALL targets to ensure data replication completeness
 	// Fan-out is only used for epidemic gossip propagation
 	fanOut := len(targets)
-	
+
 	// Push to all targets to ensure complete replication
 	var lastErr error
 	for i := 0; i < fanOut; i++ {
@@ -329,7 +329,7 @@ func (g *gossip) pushToTarget(target string, data []byte, maxRetries int) {
 				return
 			}
 		}
-		
+
 		// Use timeout channel directly instead of context for better performance
 		timeout := time.NewTimer(8 * time.Second)
 		defer timeout.Stop()

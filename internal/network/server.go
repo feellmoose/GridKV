@@ -150,7 +150,7 @@ func (s *networkServer) StartRequestResponse(ctx context.Context, address string
 
 func (s *networkServer) acceptLoop() {
 	defer s.wg.Done()
-	
+
 	for {
 		select {
 		case <-s.stopCh:
@@ -237,7 +237,7 @@ func (s *networkServer) handleConn(conn Conn) {
 			// For non-timeout errors, close connection
 			return
 		}
-		
+
 		// Validate message size
 		if len(data) > maxMessageSize {
 			s.stats.Errors.Add(1)
@@ -247,7 +247,7 @@ func (s *networkServer) handleConn(conn Conn) {
 				"maxSize", maxMessageSize)
 			return
 		}
-		
+
 		s.stats.Messages.Add(1)
 		s.stats.Bytes.Add(uint64(len(data)))
 		resp, err := s.handler(context.Background(), conn.RemoteAddr(), data)

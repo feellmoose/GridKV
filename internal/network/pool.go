@@ -31,12 +31,12 @@ type PoolStats struct {
 	Errors  uint64
 
 	// Performance stats
-	AvgWaitTime  time.Duration
-	MaxWaitTime  time.Duration
-	AvgHoldTime  time.Duration
-	RequestRate  float64
-	WaitSamples  uint64
-	HoldSamples  uint64
+	AvgWaitTime time.Duration
+	MaxWaitTime time.Duration
+	AvgHoldTime time.Duration
+	RequestRate float64
+	WaitSamples uint64
+	HoldSamples uint64
 }
 
 type PoolConfig struct {
@@ -69,19 +69,19 @@ type connPool struct {
 	stats       PoolStats
 	closed      int32
 	cleanupDone chan struct{}
-	
-	waitTimeEMA      atomic.Uint64
-	waitTimeCount    atomic.Uint64
-	waitTimeMax      atomic.Uint64
-	holdTimeEMA      atomic.Uint64
-	holdTimeCount    atomic.Uint64
-	requestCount     atomic.Uint64
-	lastResetTime    atomic.Int64
-	alphaEMA         float64
-	windowDuration   time.Duration
-	
-	adaptive *adaptive
-	debugStats PoolDebugStats
+
+	waitTimeEMA    atomic.Uint64
+	waitTimeCount  atomic.Uint64
+	waitTimeMax    atomic.Uint64
+	holdTimeEMA    atomic.Uint64
+	holdTimeCount  atomic.Uint64
+	requestCount   atomic.Uint64
+	lastResetTime  atomic.Int64
+	alphaEMA       float64
+	windowDuration time.Duration
+
+	adaptive     *adaptive
+	debugStats   PoolDebugStats
 	debugEnabled atomic.Bool
 }
 
@@ -141,7 +141,7 @@ func (p *connPool) EnableAdaptive(cfg AdaptiveCfg) {
 func (p *connPool) adjustLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ticker.C:
@@ -188,7 +188,7 @@ func (p *connPool) cleanupLoop() {
 func (p *connPool) cleanupIdleConns() {
 	now := time.Now()
 	closedCount := 0
-	
+
 	for _, shard := range p.shards {
 		shard.mu.RLock()
 		pools := make([]*addrPool, 0, len(shard.pools))
@@ -196,7 +196,7 @@ func (p *connPool) cleanupIdleConns() {
 			pools = append(pools, ap)
 		}
 		shard.mu.RUnlock()
-		
+
 		for _, ap := range pools {
 			ap.mu.Lock()
 			validIdle := ap.idle[:0]
@@ -212,7 +212,7 @@ func (p *connPool) cleanupIdleConns() {
 				validIdle = append(validIdle, ic)
 			}
 			ap.idle = validIdle
-			
+
 			if len(ap.waiters) > 0 && ap.active < p.cfg.MaxActive {
 				batchSize := len(ap.waiters)
 				available := p.cfg.MaxActive - ap.active
@@ -235,7 +235,7 @@ func (p *connPool) cleanupIdleConns() {
 			ap.mu.Unlock()
 		}
 	}
-	
+
 	if closedCount > 10 {
 		runtime.GC()
 	}
@@ -245,7 +245,7 @@ func (p *connPool) isConnectionHealthy(conn Conn) bool {
 	if conn == nil {
 		return false
 	}
-	
+
 	if tcpConn, ok := conn.(*tcpConn); ok {
 		now := time.Now().Unix()
 		lastCheck := atomic.LoadInt64(&tcpConn.lastHealthCheck)
@@ -259,7 +259,7 @@ func (p *connPool) isConnectionHealthy(conn Conn) bool {
 			atomic.StoreInt32(&tcpConn.healthCheckCached, 0)
 			return false
 		}
-		
+
 		testDeadline := time.Now().Add(1 * time.Millisecond)
 		if err := tcpConn.conn.SetReadDeadline(testDeadline); err != nil {
 			atomic.StoreInt64(&tcpConn.lastHealthCheck, now)
@@ -272,7 +272,7 @@ func (p *connPool) isConnectionHealthy(conn Conn) bool {
 		atomic.StoreInt32(&tcpConn.healthCheckCached, 1)
 		return true
 	}
-	
+
 	if err := conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond)); err != nil {
 		return false
 	}
@@ -410,7 +410,7 @@ func (p *connPool) activateConn(shard *poolShard, ap *addrPool, conn Conn) {
 func (p *connPool) removeWaiter(shard *poolShard, ap *addrPool, waiter chan struct{}) {
 	ap.mu.Lock()
 	defer ap.mu.Unlock()
-	
+
 	for i, w := range ap.waiters {
 		if w == waiter {
 			ap.waiters = append(ap.waiters[:i], ap.waiters[i+1:]...)
@@ -452,7 +452,7 @@ func (p *connPool) Put(conn Conn) {
 	ap.mu.Lock()
 	ap.active--
 	atomic.AddInt64(&p.stats.Active, -1)
-	
+
 	if p.cfg.MaxIdle > 0 && len(ap.idle) < p.cfg.MaxIdle {
 		if !p.isConnectionHealthy(conn) {
 			atomic.AddUint64(&p.stats.Closed, 1)
@@ -461,7 +461,7 @@ func (p *connPool) Put(conn Conn) {
 			_ = conn.Close()
 			return
 		}
-		
+
 		ap.idle = append(ap.idle, idleConn{
 			conn:      conn,
 			idleSince: time.Now(),
@@ -470,7 +470,7 @@ func (p *connPool) Put(conn Conn) {
 		if p.debugEnabled.Load() {
 			p.debugStats.PutSuccess.Add(1)
 		}
-		
+
 		if len(ap.waiters) > 0 {
 			batchSize := len(ap.waiters)
 			if batchSize > 10 {
@@ -491,7 +491,7 @@ func (p *connPool) Put(conn Conn) {
 		ap.mu.Unlock()
 		return
 	}
-	
+
 	ap.mu.Unlock()
 	atomic.AddUint64(&p.stats.Closed, 1)
 	atomic.AddInt64(&p.stats.Total, -1)
@@ -648,7 +648,7 @@ func (p *connPool) recordWait(d time.Duration) {
 		return
 	}
 	ns := uint64(d.Nanoseconds())
-	
+
 	for {
 		old := p.waitTimeMax.Load()
 		if ns <= old {
@@ -658,7 +658,7 @@ func (p *connPool) recordWait(d time.Duration) {
 			break
 		}
 	}
-	
+
 	p.updateEMA(&p.waitTimeEMA, ns, &p.waitTimeCount)
 }
 
@@ -688,7 +688,7 @@ func (p *connPool) updateEMA(ema *atomic.Uint64, ns uint64, count *atomic.Uint64
 func (p *connPool) metrics() PoolStats {
 	now := time.Now().UnixNano()
 	lastReset := p.lastResetTime.Load()
-	
+
 	var rate float64
 	if lastReset == 0 {
 		p.lastResetTime.Store(now)
@@ -702,7 +702,7 @@ func (p *connPool) metrics() PoolStats {
 			rate = float64(p.requestCount.Load()) / elapsed.Seconds()
 		}
 	}
-	
+
 	return PoolStats{
 		AvgWaitTime: time.Duration(p.waitTimeEMA.Load()),
 		MaxWaitTime: time.Duration(p.waitTimeMax.Load()),
@@ -717,16 +717,16 @@ func (p *connPool) metrics() PoolStats {
 type PoolMetrics = PoolStats
 
 type AdaptiveCfg struct {
-	MinSize         int
-	MaxSize         int
-	InitialSize     int
-	TargetWaitTime  time.Duration
-	HighThreshold   time.Duration
-	LowThreshold    time.Duration
-	IncreaseStep    int
-	DecreaseStep    int
-	CooldownPeriod  time.Duration
-	EMAAlpha        float64
+	MinSize        int
+	MaxSize        int
+	InitialSize    int
+	TargetWaitTime time.Duration
+	HighThreshold  time.Duration
+	LowThreshold   time.Duration
+	IncreaseStep   int
+	DecreaseStep   int
+	CooldownPeriod time.Duration
+	EMAAlpha       float64
 }
 
 func DefaultAdaptive() AdaptiveCfg {
@@ -770,7 +770,7 @@ func newAdaptive(cfg AdaptiveCfg) *adaptive {
 	if cfg.EMAAlpha <= 0 || cfg.EMAAlpha > 1 {
 		cfg.EMAAlpha = 0.2
 	}
-	
+
 	return &adaptive{
 		minSize:        cfg.MinSize,
 		maxSize:        cfg.MaxSize,
@@ -788,43 +788,43 @@ func newAdaptive(cfg AdaptiveCfg) *adaptive {
 func (a *adaptive) adjust(stats PoolStats, perfStats PoolStats) int {
 	now := time.Now()
 	lastAdjust := time.Unix(0, a.lastAdjustTime.Load())
-	
+
 	if now.Sub(lastAdjust) < a.cooldownPeriod {
 		return a.currentSize
 	}
-	
+
 	a.updateEMA(&a.emaWaitTime, uint64(perfStats.AvgWaitTime.Nanoseconds()))
-	
+
 	utilization := float64(0)
 	if a.currentSize > 0 {
 		utilization = float64(stats.Active) / float64(a.currentSize) * 10000
 	}
 	a.updateEMA(&a.emaUtilization, uint64(utilization))
-	
+
 	emaWait := time.Duration(a.emaWaitTime.Load())
 	emaUtil := float64(a.emaUtilization.Load()) / 10000
-	
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	
+
 	newSize := a.currentSize
-	
-	if (emaWait > a.highThreshold || emaUtil > 0.8 || stats.Waiters > 5) && 
+
+	if (emaWait > a.highThreshold || emaUtil > 0.8 || stats.Waiters > 5) &&
 		a.currentSize < a.maxSize {
 		newSize = minInt(a.currentSize+a.increaseStep, a.maxSize)
 	}
-	
-	if emaWait < a.lowThreshold && emaUtil < 0.5 && 
+
+	if emaWait < a.lowThreshold && emaUtil < 0.5 &&
 		stats.Idle > int64(float64(a.currentSize)*0.3) &&
 		a.currentSize > a.minSize {
 		newSize = maxInt(a.currentSize-a.decreaseStep, a.minSize)
 	}
-	
+
 	if newSize != a.currentSize {
 		a.currentSize = newSize
 		a.lastAdjustTime.Store(now.UnixNano())
 	}
-	
+
 	return a.currentSize
 }
 

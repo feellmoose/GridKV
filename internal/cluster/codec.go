@@ -510,11 +510,11 @@ func (c *MemberMsgCodec) decodeConnectMsg(data []byte) *connectMsg {
 		logging.Warn("Failed to decode address from connect message", "nodeID", msg.NodeID, "addressOffset", addressOffset)
 		return nil
 	}
-		if len(msg.Address) < 3 || msg.Address[0] == 0 {
-			// Avoid fmt.Sprintf for performance - just log address length
-			logging.Warn("Invalid address in connect message", "nodeID", msg.NodeID, "addressLen", len(msg.Address))
-			return nil
-		}
+	if len(msg.Address) < 3 || msg.Address[0] == 0 {
+		// Avoid fmt.Sprintf for performance - just log address length
+		logging.Warn("Invalid address in connect message", "nodeID", msg.NodeID, "addressLen", len(msg.Address))
+		return nil
+	}
 	if offset+8 > len(data) {
 		return nil
 	}

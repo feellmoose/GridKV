@@ -553,7 +553,7 @@ func createTestClusterWithNetworkForMember(t *testing.T, store *mem_storage.MemS
 	netConfig.TransportType = network.TransportTCP
 	netConfig.TransportConfig = network.DefaultTransportConfig()
 	netConfig.TransportConfig.Type = network.TransportTCP
-	
+
 	net, err := network.NewNetwork(netConfig)
 	if err != nil {
 		t.Fatalf("Failed to create network for %s: %v", nodeID, err)

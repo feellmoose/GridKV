@@ -124,7 +124,7 @@ func TestGossip_HandlePullAppliesRemoteAndResponds(t *testing.T) {
 	sentCopy := make([][]byte, len(sent))
 	copy(sentCopy, sent)
 	sentMu.Unlock()
-	
+
 	if len(sentCopy) == 0 {
 		t.Fatalf("expected response push, got none")
 	}

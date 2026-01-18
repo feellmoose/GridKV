@@ -81,7 +81,7 @@ type writer struct {
 	replicaCount   int
 	flushPending   atomic.Bool
 
-	lastVersions map[string]int64
+	lastVersions   map[string]int64
 	lastVersionsMu sync.RWMutex
 
 	// Pending ops for non-replica keys (to be pushed to replicas)
@@ -156,7 +156,7 @@ func newWriter(cfg writerConfig) (*writer, error) {
 		flushTimer:     time.NewTimer(cfg.BatchWindow),
 		replicaCount:   cfg.ReplicaCount,
 		stopCh:         make(chan struct{}),
-		lastVersions:    make(map[string]int64, initialVersionMapSize), // Pre-allocate for performance
+		lastVersions:   make(map[string]int64, initialVersionMapSize), // Pre-allocate for performance
 	}
 
 	w.wg.Add(1)
@@ -199,7 +199,7 @@ func (w *writer) storeOrQueue(key string, item *mem_storage.StoredItem, opType m
 		}
 	}
 	w.pendingMu.Unlock()
-	
+
 	// Trigger batch after queuing to ensure ops are included
 	w.triggerBatch()
 	if w.cache != nil {
@@ -221,7 +221,7 @@ func (w *writer) Set(ctx context.Context, key string, item *mem_storage.StoredIt
 		version = lastVersion + 1
 	}
 	w.lastVersions[key] = version
-	
+
 	// Limit map size to prevent memory leak (keep last 10K keys)
 	const (
 		maxVersions     = 10000
@@ -366,7 +366,7 @@ func (w *writer) triggerBatch() {
 	w.pendingMu.Lock()
 	pendingSize := len(w.pendingOps)
 	w.pendingMu.Unlock()
-	
+
 	if pendingSize > w.batchThreshold*10 {
 		if w.flushPending.CompareAndSwap(false, true) {
 			w.flushAsync()
@@ -420,10 +420,10 @@ func (w *writer) flushAsync() {
 
 func (w *writer) flushLoop() {
 	defer w.wg.Done()
-	
+
 	lastGC := time.Now()
 	gcInterval := 10 * time.Minute // Periodic GC hint for long-running processes
-	
+
 	for {
 		select {
 		case <-w.stopCh:
@@ -439,7 +439,7 @@ func (w *writer) flushLoop() {
 				runtime.GC()
 				lastGC = time.Now()
 			}
-			
+
 			// Use CAS to avoid duplicate flush calls
 			if w.flushPending.CompareAndSwap(false, true) {
 				// flushAsync will reset timer after flush completes
@@ -510,17 +510,17 @@ func (w *writer) flushInternal() {
 	// Increased multiplier for high-concurrency scenarios
 	const pendingOpsMultiplier = 200 // Max pending ops = batchThreshold * multiplier (increased from 50)
 	w.pendingMu.Lock()
-		pendingOps := w.pendingOps
-		maxPendingOps := w.batchThreshold * pendingOpsMultiplier
-		if len(pendingOps) > maxPendingOps {
-			// Keep only the most recent ops to prevent unbounded growth
-			dropped := len(w.pendingOps) - maxPendingOps
-			pendingOps = pendingOps[dropped:]
-			// Only log occasionally to reduce overhead
-			if dropped > w.batchThreshold {
-				logging.Warn("Pending ops limit reached, dropping oldest", "node", w.nodeID, "dropped", dropped, "remaining", maxPendingOps, "threshold", w.batchThreshold)
-			}
+	pendingOps := w.pendingOps
+	maxPendingOps := w.batchThreshold * pendingOpsMultiplier
+	if len(pendingOps) > maxPendingOps {
+		// Keep only the most recent ops to prevent unbounded growth
+		dropped := len(w.pendingOps) - maxPendingOps
+		pendingOps = pendingOps[dropped:]
+		// Only log occasionally to reduce overhead
+		if dropped > w.batchThreshold {
+			logging.Warn("Pending ops limit reached, dropping oldest", "node", w.nodeID, "dropped", dropped, "remaining", maxPendingOps, "threshold", w.batchThreshold)
 		}
+	}
 	w.pendingOps = nil // Clear pending ops
 	w.pendingMu.Unlock()
 

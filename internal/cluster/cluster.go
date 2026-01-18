@@ -78,16 +78,16 @@ type Config struct {
 
 // Executor configuration constants
 const (
-	workerMultiplier        = 4                    // Workers = CPU cores * multiplier
-	minWorkerCount          = 16                    // Minimum workers for basic functionality
-	maxWorkerCount          = 256                   // Maximum workers to prevent excessive goroutines
-	requestsPerWorker       = 3000                 // Queue size per worker
-	maxQueueSize            = 300000               // Maximum queue size to prevent memory issues
-	cacheShards             = 256                  // Cache shard count
-	cacheSize               = 10000                // Cache size
-	cacheCleanupInterval    = 1 * time.Second     // Cache cleanup interval
-	sendTimeout             = 5 * time.Second       // Network send timeout
-	defaultCheckpointInterval = 1 * time.Minute     // Default checkpoint interval
+	workerMultiplier          = 4               // Workers = CPU cores * multiplier
+	minWorkerCount            = 16              // Minimum workers for basic functionality
+	maxWorkerCount            = 256             // Maximum workers to prevent excessive goroutines
+	requestsPerWorker         = 3000            // Queue size per worker
+	maxQueueSize              = 300000          // Maximum queue size to prevent memory issues
+	cacheShards               = 256             // Cache shard count
+	cacheSize                 = 10000           // Cache size
+	cacheCleanupInterval      = 1 * time.Second // Cache cleanup interval
+	sendTimeout               = 5 * time.Second // Network send timeout
+	defaultCheckpointInterval = 1 * time.Minute // Default checkpoint interval
 )
 
 // New creates a new Cluster
@@ -342,15 +342,15 @@ func New(cfg Config) (*Cluster, error) {
 	if net != nil {
 		lm.Register(net)
 	}
-	
+
 	lm.Register(cfg.Store)
-	
+
 	lm.Register(exec, "storage")
-	
+
 	if hotCache != nil {
 		lm.Register(hotCache, "storage")
 	}
-	
+
 	// Register cluster components
 	lm.Register(member, "executor")
 	lm.Register(ring, "member-mgr")
@@ -409,13 +409,13 @@ func createGetFunc(net network.Network, member *memberMgr, store *mem_storage.Me
 		if len(respData) < 2 {
 			return nil, fmt.Errorf("invalid response format from node %s", nodeID)
 		}
-		
+
 		offset := 0
-		
+
 		// Key length (2 bytes)
 		keyLen := int(binary.LittleEndian.Uint16(respData[offset:]))
 		offset += 2
-		
+
 		if offset+keyLen+8+1+8+4 > len(respData) {
 			// Fallback for old format (just value) - for backward compatibility
 			return &mem_storage.StoredItem{
@@ -424,40 +424,40 @@ func createGetFunc(net network.Network, member *memberMgr, store *mem_storage.Me
 				Version: time.Now().UnixNano(),
 			}, nil
 		}
-		
+
 		// Skip key (we already know it)
 		offset += keyLen
-		
+
 		// Version (8 bytes) - this is the HLC version from remote node
 		version := int64(binary.LittleEndian.Uint64(respData[offset:]))
 		offset += 8
-		
+
 		// OpType (1 byte) - skip
 		offset++
-		
+
 		// ExpireAt (8 bytes)
 		expireAt := int64(binary.LittleEndian.Uint64(respData[offset:]))
 		offset += 8
-		
+
 		// Value length (4 bytes)
 		valueLen := int(binary.LittleEndian.Uint32(respData[offset:]))
 		offset += 4
-		
+
 		if offset+valueLen > len(respData) {
 			return nil, fmt.Errorf("invalid response format from node %s: value length mismatch", nodeID)
 		}
-		
+
 		// Value
 		var value []byte
 		if valueLen > 0 {
 			value = zerocopy.FastCloneBytes(respData[offset : offset+valueLen])
 		}
-		
+
 		var expireTime time.Time
 		if expireAt > 0 {
 			expireTime = time.Unix(0, expireAt)
 		}
-		
+
 		return &mem_storage.StoredItem{
 			Key:      key,
 			Value:    value,
@@ -575,33 +575,33 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 		if !item.ExpireAt.IsZero() {
 			expireAt = item.ExpireAt.UnixNano()
 		}
-		
+
 		// Estimate size: 2 + keyLen + 8 + 1 + 8 + 4 + valueLen
 		totalSize := 2 + keyLen + 8 + 1 + 8 + 4 + valueLen
 		buf := make([]byte, 0, totalSize)
-		
+
 		// Key length (2 bytes)
 		buf = append(buf, byte(keyLen&0xFF), byte(keyLen>>8))
 		buf = append(buf, keyBytes...)
-		
+
 		// Version (8 bytes)
 		buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 0)
 		binary.LittleEndian.PutUint64(buf[len(buf)-8:], uint64(item.Version))
-		
+
 		// OpType (1 byte: 0=Set)
 		buf = append(buf, 0)
-		
+
 		// ExpireAt (8 bytes)
 		buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 0)
 		binary.LittleEndian.PutUint64(buf[len(buf)-8:], uint64(expireAt))
-		
+
 		// Value length (4 bytes) + value
 		buf = append(buf, 0, 0, 0, 0)
 		binary.LittleEndian.PutUint32(buf[len(buf)-4:], uint32(valueLen))
 		if valueLen > 0 {
 			buf = append(buf, item.Value...)
 		}
-		
+
 		return buf, nil
 	}); err != nil {
 		return err

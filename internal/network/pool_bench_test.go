@@ -10,34 +10,34 @@ import (
 func BenchmarkPoolMetrics_Baseline(b *testing.B) {
 	cfg := DefaultTransportConfig()
 	cfg.Type = TransportTCP
-	
+
 	transport, err := NewTransport(cfg)
 	if err != nil {
 		b.Fatalf("NewTransport: %v", err)
 	}
 	defer transport.Close()
-	
+
 	poolCfg := DefaultPoolConfig(transport)
 	poolCfg.MaxIdle = 100
 	poolCfg.MaxActive = 500
 	pool := NewConnPool(poolCfg).(*connPool)
 	defer pool.Close()
-	
+
 	ctx := context.Background()
 	addr := "127.0.0.1:0"
-	
+
 	// Start a simple server
 	ln, err := transport.Listen(ctx, addr)
 	if err != nil {
 		b.Fatalf("Listen: %v", err)
 	}
 	defer ln.Close()
-	
+
 	serverAddr := ln.Address()
-	
+
 	b.ResetTimer()
 	b.ReportAllocs()
-	
+
 	b.Run("GetPut", func(b *testing.B) {
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {
@@ -50,11 +50,11 @@ func BenchmarkPoolMetrics_Baseline(b *testing.B) {
 			}
 		})
 	})
-	
+
 	// Report baseline metrics
 	stats := pool.Stats()
 	metrics := pool.Metrics()
-	
+
 	b.Logf("=== BASELINE METRICS ===")
 	b.Logf("Pool Stats: Total=%d, Active=%d, Idle=%d, Waiters=%d, Created=%d, Closed=%d, Errors=%d",
 		stats.Total, stats.Active, stats.Idle, stats.Waiters, stats.Created, stats.Closed, stats.Errors)
@@ -69,33 +69,33 @@ func BenchmarkPoolMetrics_Baseline(b *testing.B) {
 func BenchmarkPoolMetrics_HighLoad(b *testing.B) {
 	cfg := DefaultTransportConfig()
 	cfg.Type = TransportTCP
-	
+
 	transport, err := NewTransport(cfg)
 	if err != nil {
 		b.Fatalf("NewTransport: %v", err)
 	}
 	defer transport.Close()
-	
+
 	poolCfg := DefaultPoolConfig(transport)
 	poolCfg.MaxIdle = 50
 	poolCfg.MaxActive = 200 // Smaller pool to create contention
 	pool := NewConnPool(poolCfg).(*connPool)
 	defer pool.Close()
-	
+
 	ctx := context.Background()
 	addr := "127.0.0.1:0"
-	
+
 	ln, err := transport.Listen(ctx, addr)
 	if err != nil {
 		b.Fatalf("Listen: %v", err)
 	}
 	defer ln.Close()
-	
+
 	serverAddr := ln.Address()
-	
+
 	b.ResetTimer()
 	b.ReportAllocs()
-	
+
 	b.Run("HighLoad", func(b *testing.B) {
 		b.SetParallelism(100) // High parallelism
 		b.RunParallel(func(pb *testing.PB) {
@@ -110,10 +110,10 @@ func BenchmarkPoolMetrics_HighLoad(b *testing.B) {
 			}
 		})
 	})
-	
+
 	stats := pool.Stats()
 	metrics := pool.Metrics()
-	
+
 	b.Logf("=== HIGH LOAD METRICS ===")
 	b.Logf("Pool Stats: Total=%d, Active=%d, Idle=%d, Waiters=%d, Errors=%d",
 		stats.Total, stats.Active, stats.Idle, stats.Waiters, stats.Errors)
@@ -127,39 +127,39 @@ func BenchmarkPoolMetrics_HighLoad(b *testing.B) {
 func BenchmarkPoolMetrics_Adaptive(b *testing.B) {
 	cfg := DefaultTransportConfig()
 	cfg.Type = TransportTCP
-	
+
 	transport, err := NewTransport(cfg)
 	if err != nil {
 		b.Fatalf("NewTransport: %v", err)
 	}
 	defer transport.Close()
-	
+
 	poolCfg := DefaultPoolConfig(transport)
 	poolCfg.MaxIdle = 50
 	poolCfg.MaxActive = 200
 	pool := NewConnPool(poolCfg).(*connPool)
 	defer pool.Close()
-	
+
 	adaptiveCfg := DefaultAdaptive()
 	adaptiveCfg.MinSize = 100
 	adaptiveCfg.MaxSize = 1000
 	adaptiveCfg.InitialSize = 200
 	pool.EnableAdaptive(adaptiveCfg)
-	
+
 	ctx := context.Background()
 	addr := "127.0.0.1:0"
-	
+
 	ln, err := transport.Listen(ctx, addr)
 	if err != nil {
 		b.Fatalf("Listen: %v", err)
 	}
 	defer ln.Close()
-	
+
 	serverAddr := ln.Address()
-	
+
 	b.ResetTimer()
 	b.ReportAllocs()
-	
+
 	b.Run("Adaptive", func(b *testing.B) {
 		b.SetParallelism(50)
 		b.RunParallel(func(pb *testing.PB) {
@@ -173,14 +173,14 @@ func BenchmarkPoolMetrics_Adaptive(b *testing.B) {
 			}
 		})
 	})
-	
+
 	// Wait for adjustment
 	time.Sleep(6 * time.Second)
-	
+
 	stats := pool.Stats()
 	metrics := pool.Metrics()
 	currentSize := pool.adaptive.size()
-	
+
 	b.Logf("=== ADAPTIVE METRICS ===")
 	b.Logf("Pool Stats: Total=%d, Active=%d, Idle=%d, Waiters=%d",
 		stats.Total, stats.Active, stats.Idle, stats.Waiters)

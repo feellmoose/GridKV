@@ -66,7 +66,7 @@ func createTestCluster(t *testing.T, deps *testClusterDeps, nodeID string, addre
 		Address:                   address,
 		Store:                     deps.store,
 		HLC:                       deps.hlcInst,
-		Network:                   net, // Pass the network instance (nil for no-op)
+		Network:                   net,      // Pass the network instance (nil for no-op)
 		SendFunc:                  sendFunc, // Provide SendFunc when Network is nil
 		VirtualNodes:              128,
 		ReplicaCount:              3,
@@ -141,7 +141,7 @@ func createTestClusterWithNetwork(t *testing.T, deps *testClusterDeps, nodeID st
 	netConfig.TransportType = network.TransportTCP
 	netConfig.TransportConfig = network.DefaultTransportConfig()
 	netConfig.TransportConfig.Type = network.TransportTCP
-	
+
 	net, err := network.NewNetwork(netConfig)
 	if err != nil {
 		t.Fatalf("Failed to create network for %s: %v", nodeID, err)
@@ -849,7 +849,7 @@ func TestCluster_SWIM_FailureDetection(t *testing.T) {
 	for elapsed < maxWait {
 		time.Sleep(interval)
 		elapsed += interval
-		
+
 		members1 := cluster1.Members()
 		healthyCount1 := 0
 		for _, member := range members1 {
@@ -857,7 +857,7 @@ func TestCluster_SWIM_FailureDetection(t *testing.T) {
 				healthyCount1++
 			}
 		}
-		
+
 		members2 := cluster2.Members()
 		healthyCount2 := 0
 		for _, member := range members2 {
@@ -865,13 +865,13 @@ func TestCluster_SWIM_FailureDetection(t *testing.T) {
 				healthyCount2++
 			}
 		}
-		
+
 		// Both nodes should see at least 2 healthy nodes (including themselves)
 		if healthyCount1 >= 2 && healthyCount2 >= 2 {
 			return // Success
 		}
 	}
-	
+
 	// Final check after waiting
 	members1 := cluster1.Members()
 	healthyCount1 := 0
@@ -883,7 +883,7 @@ func TestCluster_SWIM_FailureDetection(t *testing.T) {
 	if healthyCount1 < 2 {
 		t.Errorf("Node1 should see 2 healthy nodes, got %d", healthyCount1)
 	}
-	
+
 	members2 := cluster2.Members()
 	healthyCount2 := 0
 	for _, member := range members2 {
