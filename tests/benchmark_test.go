@@ -102,9 +102,19 @@ func BenchmarkSimulatorWorkload(b *testing.B) {
 	}
 	defer sim.Cleanup()
 
+	// Limit duration to prevent long-running benchmarks
+	// Scale with b.N but cap at 5 seconds to prevent resource exhaustion
+	duration := time.Duration(b.N/1000) * time.Millisecond
+	if duration > 5*time.Second {
+		duration = 5 * time.Second
+	}
+	if duration < 100*time.Millisecond {
+		duration = 100 * time.Millisecond
+	}
+
 	executor := simulator.NewWorkloadExecutor(&simulator.WorkloadConfig{
 		WorkerCount:  10,
-		Duration:     time.Duration(b.N/1000) * time.Millisecond, // Scale duration with b.N
+		Duration:     duration,
 		WriteRatio:   0.8,
 		ReadRatio:    0.2,
 		KeySpaceSize: 1000,

@@ -4,6 +4,7 @@ package simulator
 
 import (
 	"os"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -180,6 +181,22 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 		if len(metricsSnapshots) > 0 {
 			PrintMetricsSummary(metricsSnapshots)
 		}
+	}
+	
+	// Additional cleanup wait to ensure resources are fully released before next test
+	// This is critical when running multiple tests sequentially to prevent resource leaks
+	// Scale wait time with cluster size and worker count - larger tests need more cleanup time
+	if config.NodeCount > 15 {
+		// Very large clusters (20 nodes) need significantly more cleanup time
+		time.Sleep(2 * time.Second)
+		runtime.GC()
+		time.Sleep(500 * time.Millisecond)
+	} else if config.NodeCount > 7 || config.WorkerCount > 50 {
+		time.Sleep(1500 * time.Millisecond)
+		runtime.GC()
+		time.Sleep(200 * time.Millisecond)
+	} else {
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 
