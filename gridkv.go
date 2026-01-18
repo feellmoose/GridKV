@@ -22,7 +22,7 @@ import (
 )
 
 // Version represents the current version of GridKV
-const Version = "v0.3.5"
+const Version = "v0.3.6"
 
 // Error constants exported for application error handling
 var (
