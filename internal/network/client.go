@@ -125,8 +125,6 @@ func (c *networkClient) Request(ctx context.Context, address string, request []b
 	for attempt := 0; attempt < 2; attempt++ {
 		conn, err := c.cfg.Pool.Get(ctx, address)
 		if err != nil {
-			// Removed frequent warn logs for pool.Get failures - will retry automatically
-			// Only log at debug level for troubleshooting
 			return nil, fmt.Errorf("connection pool error for %s: %w", address, err)
 		}
 
@@ -141,7 +139,6 @@ func (c *networkClient) Request(ctx context.Context, address string, request []b
 		resp, rerr := conn.Receive(ctx)
 		c.cfg.Pool.Put(conn)
 		if rerr != nil {
-			// On first attempt, retry once; on second attempt, return error
 			if attempt == 0 {
 				continue
 			}
@@ -159,14 +156,12 @@ func (c *networkClient) Broadcast(ctx context.Context, addresses []string, data 
 	}
 
 	if len(addresses) <= 5 {
-		// Serial execution for small sets (lower overhead)
 		var firstErr error
 		for _, addr := range addresses {
 			if err := c.SendWithTimeout(ctx, addr, data, c.cfg.DefaultTimeout); err != nil {
 				if firstErr == nil {
 					firstErr = err
 				}
-				// Continue to attempt all addresses even if some fail
 			}
 		}
 		return firstErr

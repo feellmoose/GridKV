@@ -39,6 +39,9 @@ type Network interface {
 	// Request sends request and waits for response
 	Request(ctx context.Context, address string, request []byte, timeout time.Duration) ([]byte, error)
 
+	// RequestMessage sends typed message request and waits for typed response
+	RequestMessage(ctx context.Context, address string, request *Message, timeout time.Duration) (*Message, error)
+
 	// RegisterHandler registers message handler
 	RegisterHandler(msgType MessageType, handler Handler) error
 
@@ -176,12 +179,10 @@ func (n *networkImpl) Name() string { return "network" }
 func (n *networkImpl) Start(ctx context.Context) error {
 	return n.server.StartRequestResponse(ctx, n.cfg.LocalAddress, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		if len(data) < 22 {
-			// Removed frequent debug log "message too short" - too verbose for production
 			return nil, nil
 		}
 		msg, err := decodeMessage(data)
 		if err != nil {
-			// Removed frequent debug log "failed to decode network message" - too verbose for production
 			return nil, nil
 		}
 		resp, err := n.router.Route(ctx, remoteAddr, msg)
@@ -275,6 +276,22 @@ func (n *networkImpl) Request(ctx context.Context, address string, request []byt
 		return nil, err
 	}
 	return respMsg.Data, nil
+}
+
+func (n *networkImpl) RequestMessage(ctx context.Context, address string, request *Message, timeout time.Duration) (*Message, error) {
+	data, err := encodeMessage(request)
+	if err != nil {
+		return nil, err
+	}
+	respData, err := n.client.Request(ctx, address, data, timeout)
+	if err != nil {
+		return nil, err
+	}
+	respMsg, err := decodeMessage(respData)
+	if err != nil {
+		return nil, err
+	}
+	return respMsg, nil
 }
 
 func (n *networkImpl) RegisterHandler(msgType MessageType, handler Handler) error {

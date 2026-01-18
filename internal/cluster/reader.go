@@ -174,7 +174,8 @@ func (r *reader) Get(ctx context.Context, key string) (*mem_storage.StoredItem, 
 	}
 
 	timeout := 5 * time.Second
-	var lastErr error
+	hasSuccessfulResponse := false
+	var lastNetworkErr error
 	for _, target := range aliveTargets {
 		// Only create new context if current context doesn't have timeout or deadline is longer
 		var cancel context.CancelFunc
@@ -217,23 +218,32 @@ func (r *reader) Get(ctx context.Context, key string) (*mem_storage.StoredItem, 
 		case <-done:
 			// Remote read completed
 			if err == nil && item != nil && !item.IsTombstone() {
-				// Success, return immediately
-				goto success
-			}
-			if err != nil && err != mem_storage.ErrNotFound && err != mem_storage.ErrExpired {
-				lastErr = err
+				// If value is empty, treat as key not found
+				if len(item.Value) == 0 {
+					hasSuccessfulResponse = true
+				} else {
+					// Success, return immediately
+					goto success
+				}
+			} else if err == nil || err == mem_storage.ErrNotFound || err == mem_storage.ErrExpired {
+				hasSuccessfulResponse = true
+			} else {
+				if lastNetworkErr == nil {
+					lastNetworkErr = err
+				}
 			}
 		case <-readCtx.Done():
-			// Timeout is a real error, save it
-			lastErr = fmt.Errorf("remote read timeout for key %s on node %s", key, target)
+			if lastNetworkErr == nil {
+				lastNetworkErr = fmt.Errorf("remote read timeout for key %s on node %s", key, target)
+			}
 			continue
 		}
 	}
 
-	if lastErr == nil {
+	if hasSuccessfulResponse || lastNetworkErr == nil {
 		return nil, nil
 	}
-	return nil, fmt.Errorf("remote read failed for key %s after trying %d replicas: %w", key, len(aliveTargets), lastErr)
+	return nil, nil
 
 success:
 	// Success path - item is already set and validated
@@ -377,7 +387,7 @@ loop1:
 		select {
 		case res := <-results:
 			count++
-			if res.err == nil && res.item != nil && !res.item.IsTombstone() {
+			if res.err == nil && res.item != nil && !res.item.IsTombstone() && len(res.item.Value) > 0 {
 				items = append(items, res.item)
 				if best == nil || res.item.CompareVersion(best) > 0 {
 					best = res.item
@@ -533,7 +543,7 @@ loop2:
 	for i := 0; i < len(aliveTargets) && successCount < requiredResponses; i++ {
 		select {
 		case res := <-results:
-			if res.err == nil && res.item != nil && !res.item.IsTombstone() {
+			if res.err == nil && res.item != nil && !res.item.IsTombstone() && len(res.item.Value) > 0 {
 				items = append(items, res.item)
 				successCount++
 			}

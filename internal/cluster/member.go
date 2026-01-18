@@ -212,8 +212,6 @@ func (m *memberMgr) doPing() {
 				}
 
 				if err := m.sendFunc(info.Address, pingMsg); err != nil {
-					// Removed frequent debug log "ping failed" - too verbose for production
-					// Ping failures are normal during network issues and don't need debug logging
 				} else {
 					// Update LastActive on successful ping to prevent false failure detection
 					m.updateLastActive(nodeID)
@@ -566,8 +564,6 @@ func (m *memberMgr) updateLastActive(nodeID string) {
 	// Atomic timestamp update: modify existing object instead of creating new one
 	// This eliminates memory allocation and reduces sync.Map Store operations
 	info.LastActive = now
-	// Note: This modifies the object in-place, which is safe since we're only
-	// updating the timestamp field that doesn't affect cluster membership logic
 }
 
 func (m *memberMgr) updateNode(nodeID string, address string, incarnation int64, state NodeState) {
@@ -597,7 +593,6 @@ func (m *memberMgr) updateNode(nodeID string, address string, incarnation int64,
 		}
 
 		stateChanged = (info.State != state)
-		// Removed frequent debug log "node address updated" - too verbose
 		newInfo := &NodeInfo{
 			NodeID:      nodeID,
 			Address:     address,
@@ -606,7 +601,6 @@ func (m *memberMgr) updateNode(nodeID string, address string, incarnation int64,
 			LastActive:  time.Now(),
 		}
 		m.members.Store(nodeID, newInfo)
-		// Removed frequent debug log "node state changed" - too verbose for production
 	}
 
 	if (wasNew || stateChanged) && m.onMembershipChange != nil {

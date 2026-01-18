@@ -534,7 +534,6 @@ func (p *connPool) Remove(conn Conn) {
 	ap.mu.Unlock()
 	atomic.AddInt64(&p.stats.Total, -1)
 	atomic.AddUint64(&p.stats.Closed, 1)
-	// Removed frequent debug log "connPool: removed connection" - too verbose for production
 	_ = conn.Close()
 }
 

@@ -34,9 +34,6 @@ var (
 	}
 )
 
-// Note: We don't use buffer pools here because we return the buffer to the caller
-// The caller owns the buffer and may modify it. Using pools would require copying
-
 // SyncOpsCodec handles serialization/deserialization of SyncOperation slices
 type SyncOpsCodec struct{}
 
