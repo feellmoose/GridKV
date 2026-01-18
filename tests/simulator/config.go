@@ -25,9 +25,9 @@ var (
 	BasicClusterTest = TestSuiteConfig{
 		Name:         "Basic Cluster",
 		Target:       TargetConsistency,
-		NodeCount:    7, // 7 nodes for cluster validation
-		ReplicaCount: 3, // 3 replicas for redundancy
-		WorkerCount:  10, // 10 concurrent workers
+		NodeCount:    7,                // 7 nodes for cluster validation
+		ReplicaCount: 3,                // 3 replicas for redundancy
+		WorkerCount:  10,               // 10 concurrent workers
 		Duration:     12 * time.Second, // 12 seconds test duration
 		WriteRatio:   0.8,
 		KeySpaceSize: 1000, // 1000 keys for testing
@@ -42,7 +42,7 @@ var (
 		ReplicaCount: 3,
 		WorkerCount:  15, // 15 concurrent workers
 		Duration:     15 * time.Second,
-		WriteRatio:   1.0, // 100% writes for replication testing
+		WriteRatio:   1.0,  // 100% writes for replication testing
 		KeySpaceSize: 2000, // 2000 keys for replication validation
 		ValueSize:    256,
 	}
@@ -51,8 +51,8 @@ var (
 	PerformanceTest = TestSuiteConfig{
 		Name:         "Performance",
 		Target:       TargetPerformance,
-		NodeCount:    7, // 7 nodes for performance testing
-		ReplicaCount: 3, // 3 replicas
+		NodeCount:    7,  // 7 nodes for performance testing
+		ReplicaCount: 3,  // 3 replicas
 		WorkerCount:  30, // 30 concurrent workers for load testing
 		Duration:     15 * time.Second,
 		WriteRatio:   0.7,

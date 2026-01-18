@@ -102,6 +102,11 @@ func (we *WorkloadExecutor) ExecuteWorkload() error {
 		// Duration expired
 	case <-we.ctx.Done():
 		// Context already cancelled
+	case <-done:
+		// All workers finished early - this shouldn't happen normally
+		// but handle it gracefully
+		timer.Stop()
+		return nil
 	}
 
 	// Cancel context to stop any remaining workers
@@ -109,12 +114,12 @@ func (we *WorkloadExecutor) ExecuteWorkload() error {
 
 	// Wait for all workers to finish with adaptive timeout
 	// For large workloads, workers may need more time to clean up
-	shutdownTimeout := 10 * time.Second
+	shutdownTimeout := 15 * time.Second
 	if we.config.WorkerCount > 50 {
-		shutdownTimeout = 20 * time.Second
+		shutdownTimeout = 25 * time.Second
 	}
 	if we.config.WorkerCount > 100 {
-		shutdownTimeout = 30 * time.Second
+		shutdownTimeout = 35 * time.Second
 	}
 
 	// Use timer for better timeout handling
@@ -127,9 +132,14 @@ func (we *WorkloadExecutor) ExecuteWorkload() error {
 		if !shutdownTimer.Stop() {
 			<-shutdownTimer.C
 		}
+		// Give a delay for any pending operations and goroutines to complete
+		// Longer wait helps prevent resource leaks between tests
+		time.Sleep(300 * time.Millisecond)
 	case <-shutdownTimer.C:
 		// Workers didn't finish in time, but continue anyway
 		// This prevents the test from hanging indefinitely
+		// Still wait a bit for cleanup even on timeout
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	return nil

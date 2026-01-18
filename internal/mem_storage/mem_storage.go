@@ -778,7 +778,7 @@ func (s *MemStorage) cleanExpired() {
 			}
 		}
 	}
-	
+
 	// Periodic GC hint for long-running processes when many items expired
 	if totalExpired > 1000 {
 		runtime.GC()

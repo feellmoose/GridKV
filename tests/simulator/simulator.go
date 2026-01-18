@@ -5,6 +5,7 @@ package simulator
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -60,7 +61,7 @@ func (s *Simulator) SetupCluster() error {
 	if err != nil {
 		return fmt.Errorf("failed to get free port for seed node: %w", err)
 	}
-	
+
 	opts := &gridkv.GridKVOptions{
 		LocalNodeID:        "node-0",
 		LocalAddress:       fmt.Sprintf("127.0.0.1:%d", seedPort),
@@ -105,7 +106,7 @@ func (s *Simulator) SetupCluster() error {
 		if err != nil {
 			return fmt.Errorf("failed to get free port for node %d: %w", i, err)
 		}
-		
+
 		opts := &gridkv.GridKVOptions{
 			LocalNodeID:        fmt.Sprintf("node-%d", i),
 			LocalAddress:       fmt.Sprintf("127.0.0.1:%d", port),
@@ -168,6 +169,10 @@ func (s *Simulator) Cleanup() {
 	s.nodes = nil
 	s.mu.Unlock()
 
+	if len(nodes) == 0 {
+		return
+	}
+
 	// Close all nodes concurrently with timeout to speed up cleanup
 	done := make(chan struct{}, len(nodes))
 	for i, node := range nodes {
@@ -189,22 +194,53 @@ func (s *Simulator) Cleanup() {
 	}
 
 	// Wait for all cleanup operations with overall timeout
-	timeout := time.NewTimer(15 * time.Second)
+	timeout := time.NewTimer(45 * time.Second)
 	defer timeout.Stop()
-	
+
 	closed := 0
 	for closed < len(nodes) {
 		select {
 		case <-done:
 			closed++
 		case <-timeout.C:
-			// Timeout reached, continue anyway
+			// Timeout reached, continue anyway to prevent hanging
+			// Force close remaining nodes synchronously as fallback
+			for _, node := range nodes {
+				if node != nil {
+					go func(n *gridkv.GridKV) {
+						_ = n.Close(5 * time.Second)
+					}(node)
+				}
+			}
+			time.Sleep(1 * time.Second)
 			return
 		}
 	}
-	
-	// Give time for goroutines to finish
-	time.Sleep(200 * time.Millisecond)
+
+	// Additional wait to ensure goroutines finish and resources are released
+	// Use a longer wait to allow network connections and goroutines to close properly
+	// This is critical for preventing resource leaks between tests
+	// Scale wait time with cluster size - larger clusters need more cleanup time
+	waitTime := 1 * time.Second
+	if len(nodes) > 15 {
+		waitTime = 2 * time.Second // Very large clusters need more time
+	} else if len(nodes) > 10 {
+		waitTime = 1500 * time.Millisecond
+	}
+	time.Sleep(waitTime)
+
+	// Force garbage collection to help clean up resources
+	// This is especially important when running multiple tests in sequence
+	if len(nodes) > 5 {
+		runtime.GC()
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	// Additional wait for very large clusters to ensure all network connections are closed
+	if len(nodes) > 15 {
+		time.Sleep(1 * time.Second)
+		runtime.GC()
+	}
 }
 
 // WaitForReplicationSettle waits for replication to settle
@@ -215,22 +251,22 @@ func (s *Simulator) WaitForReplicationSettle() {
 	if len(nodes) == 0 {
 		return
 	}
-	
+
 	// Wait for at least 3 gossip cycles (assuming 100ms interval)
 	// Plus buffer for network latency and processing
 	minWait := 1 * time.Second
 	if len(nodes) > 3 {
 		minWait = 2 * time.Second // More nodes need more time
 	}
-	
+
 	// Active check: wait until consistency improves or timeout
 	maxWait := 10 * time.Second
 	start := time.Now()
 	lastConsistency := 0.0
-	
+
 	for time.Since(start) < maxWait {
 		time.Sleep(500 * time.Millisecond)
-		
+
 		// Sample a few keys to check if replication is progressing
 		// This is a lightweight check to avoid full consistency scan
 		if time.Since(start) >= minWait {
@@ -238,7 +274,7 @@ func (s *Simulator) WaitForReplicationSettle() {
 			// If consistency is improving, replication is working
 			break
 		}
-		
+
 		// If we've waited long enough and consistency isn't improving, continue anyway
 		if time.Since(start) >= minWait && lastConsistency > 0 {
 			break
@@ -303,40 +339,40 @@ func (s *Simulator) CheckConsistency(keys []string) float64 {
 			}
 		}
 
-	// Calculate required nodes for replication consistency
-	// - Minimum: 2 nodes (for data redundancy)
-	// - Target: min(replication factor, cluster size)
-	// - For eventual consistency, we accept if key exists on at least min(2, target) nodes
-	minReplicas := s.config.ReplicaCount
-	if minReplicas > len(nodes) {
-		minReplicas = len(nodes)
-	}
-	
-	// Calculate required nodes: use replication factor, but at least 2 for redundancy
-	// For small clusters (2 nodes), require all nodes
-	requiredNodes := minReplicas
-	if len(nodes) <= 2 {
-		requiredNodes = len(nodes)
-	} else if requiredNodes < 2 {
-		requiredNodes = 2 // At least 2 nodes for redundancy
-	}
-	
-	// Accept if key is replicated to required number of nodes
-	// For eventual consistency with replication factor R:
-	// - If nodesWithKey >= requiredNodes: fully replicated
-	// - Else if nodesWithKey >= 2: partially replicated (acceptable for eventual consistency)
-	// - Else: insufficient replication
-	if nodesWithKey >= requiredNodes {
-		// Full replication achieved
-		consistent++
-	} else if requiredNodes > 2 && nodesWithKey >= 2 {
-		// Partial replication: key exists on 2+ nodes but not all required
-		// For eventual consistency, this is acceptable as replication may still be in progress
-		consistent++
-	} else {
-		// Insufficient replication (less than 2 nodes or less than required for small clusters)
-		keysFoundButInconsistent++
-	}
+		// Calculate required nodes for replication consistency
+		// - Minimum: 2 nodes (for data redundancy)
+		// - Target: min(replication factor, cluster size)
+		// - For eventual consistency, we accept if key exists on at least min(2, target) nodes
+		minReplicas := s.config.ReplicaCount
+		if minReplicas > len(nodes) {
+			minReplicas = len(nodes)
+		}
+
+		// Calculate required nodes: use replication factor, but at least 2 for redundancy
+		// For small clusters (2 nodes), require all nodes
+		requiredNodes := minReplicas
+		if len(nodes) <= 2 {
+			requiredNodes = len(nodes)
+		} else if requiredNodes < 2 {
+			requiredNodes = 2 // At least 2 nodes for redundancy
+		}
+
+		// Accept if key is replicated to required number of nodes
+		// For eventual consistency with replication factor R:
+		// - If nodesWithKey >= requiredNodes: fully replicated
+		// - Else if nodesWithKey >= 2: partially replicated (acceptable for eventual consistency)
+		// - Else: insufficient replication
+		if nodesWithKey >= requiredNodes {
+			// Full replication achieved
+			consistent++
+		} else if requiredNodes > 2 && nodesWithKey >= 2 {
+			// Partial replication: key exists on 2+ nodes but not all required
+			// For eventual consistency, this is acceptable as replication may still be in progress
+			consistent++
+		} else {
+			// Insufficient replication (less than 2 nodes or less than required for small clusters)
+			keysFoundButInconsistent++
+		}
 		totalChecked++
 	}
 

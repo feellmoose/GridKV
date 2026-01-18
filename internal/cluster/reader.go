@@ -192,11 +192,11 @@ func (r *reader) Get(ctx context.Context, key string) (*mem_storage.StoredItem, 
 				return
 			default:
 			}
-			
+
 			var localItem *mem_storage.StoredItem
 			var localErr error
 			localItem, localErr = r.getFunc(t, key)
-			
+
 			// Check context again after operation completes
 			select {
 			case <-readCtx.Done():
@@ -359,6 +359,7 @@ func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_st
 
 	// Wait for all responses to get the highest version
 	count := 0
+loop1:
 	for count < len(aliveTargets) {
 		select {
 		case res := <-results:
@@ -370,7 +371,7 @@ func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_st
 				}
 			}
 		case <-ctx.Done():
-			break
+			break loop1
 		}
 	}
 
@@ -506,6 +507,7 @@ func (r *reader) GetWithConsistency(ctx context.Context, key string, level Consi
 		}
 	}()
 	successCount := 0
+loop2:
 	for i := 0; i < len(aliveTargets) && successCount < requiredResponses; i++ {
 		select {
 		case res := <-results:
@@ -514,7 +516,7 @@ func (r *reader) GetWithConsistency(ctx context.Context, key string, level Consi
 				successCount++
 			}
 		case <-ctx.Done():
-			break
+			break loop2
 		}
 	}
 
@@ -562,12 +564,12 @@ func (r *reader) GetWithConsistency(ctx context.Context, key string, level Consi
 	if best == nil {
 		return nil, nil
 	}
-	
+
 	// Cache result (only for eventual consistency)
 	if level == ConsistencyLevelOne && r.cache != nil {
 		r.cache.Set(key, best, r.cacheTTL)
 	}
-	
+
 	// DeepCopy is necessary for safety: user can modify returned value
 	return best.DeepCopy(), nil
 }
@@ -619,12 +621,14 @@ func (rr *readRepair) Repair(key string, versions []*mem_storage.StoredItem) err
 		return nil
 	}
 
-	// Async repair
-	if err := rr.executor.Do(func() {
-		ctx := context.Background()
-		_ = rr.writer.Set(ctx, key, maxVersion)
-	}); err != nil {
-		return nil
+	// Async repair - only if writer is available
+	if rr.writer != nil {
+		if err := rr.executor.Do(func() {
+			ctx := context.Background()
+			_ = rr.writer.Set(ctx, key, maxVersion)
+		}); err != nil {
+			return nil
+		}
 	}
 
 	return nil

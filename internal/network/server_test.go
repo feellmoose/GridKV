@@ -314,7 +314,7 @@ func TestNetworkServer_HighConcurrency(t *testing.T) {
 	// Server counts both request and response messages, so it's 2x the client count
 	expectedServerMessages := uint64(totalMessages * 2)
 	if uint64(stats.Messages) != expectedServerMessages {
-		t.Errorf("Server message count mismatch: got %d, want %d (requests: %d, responses: %d)", 
+		t.Errorf("Server message count mismatch: got %d, want %d (requests: %d, responses: %d)",
 			stats.Messages, expectedServerMessages, totalMessages, totalMessages)
 	}
 }

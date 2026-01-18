@@ -409,7 +409,7 @@ func (c *Cache) startCleanup(interval time.Duration) {
 				return
 			case <-c.cleanupTick.C:
 				c.parallelCleanup()
-				
+
 				// Periodic GC hint for long-running processes
 				if time.Since(lastGC) > gcInterval {
 					runtime.GC()

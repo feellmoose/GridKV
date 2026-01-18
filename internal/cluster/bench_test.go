@@ -38,9 +38,9 @@ func BenchmarkWriter_Set(b *testing.B) {
 		batchWindow:    20 * time.Millisecond,
 		replicaCount:   3,
 		stopCh:         make(chan struct{}),
-		lastVersions:   make(map[string]int64, 1024), // Initialize map to prevent panic
+		lastVersions:   make(map[string]int64, 1024),               // Initialize map to prevent panic
 		pendingOps:     make([]*mem_storage.SyncOperation, 0, 100), // Initialize slice
-		flushTimer:     time.NewTimer(20 * time.Millisecond), // Initialize timer
+		flushTimer:     time.NewTimer(20 * time.Millisecond),       // Initialize timer
 	}
 
 	ctx := context.Background()
@@ -148,10 +148,10 @@ func BenchmarkGossip_ApplyOps(b *testing.B) {
 	defer executor.Stop(5 * time.Second)
 
 	g := &gossip{
-		nodeID:      "node-1",
-		store:       store,
-		ring:        ring,
-		executor:    executor,
+		nodeID:       "node-1",
+		store:        store,
+		ring:         ring,
+		executor:     executor,
 		replicaCount: 3,
 	}
 

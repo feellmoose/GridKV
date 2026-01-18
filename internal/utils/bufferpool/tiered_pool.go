@@ -167,7 +167,6 @@ func (p *TieredBufferPool) GetAndPut(size int, fn func([]byte) error) error {
 	return fn(buf)
 }
 
-
 // Stats returns pool statistics
 type PoolStats struct {
 	Tier1Hits uint64

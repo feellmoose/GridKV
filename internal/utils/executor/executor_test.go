@@ -568,7 +568,7 @@ func TestExec_ErrorHandling(t *testing.T) {
 
 	var taskErr atomic.Pointer[error]
 	taskErr.Store(nil)
-	
+
 	_ = exec.Do(func() {
 		err := errors.New("task error")
 		taskErr.Store(&err)

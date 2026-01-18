@@ -11,18 +11,18 @@ type PoolDebugStats struct {
 	GetTimeout       atomic.Uint64
 	GetContextCancel atomic.Uint64
 	GetDialError     atomic.Uint64
-	
-	PutAttempts      atomic.Uint64
-	PutSuccess       atomic.Uint64
-	PutClosed        atomic.Uint64
-	
-	WaitQueueLength  atomic.Uint64
-	MaxWaitQueueLen  atomic.Uint64
-	TotalWaitTime    atomic.Uint64
-	WaitSamples      atomic.Uint64
-	
-	ActiveConnPeak   atomic.Int64
-	IdleConnPeak     atomic.Int64
+
+	PutAttempts atomic.Uint64
+	PutSuccess  atomic.Uint64
+	PutClosed   atomic.Uint64
+
+	WaitQueueLength atomic.Uint64
+	MaxWaitQueueLen atomic.Uint64
+	TotalWaitTime   atomic.Uint64
+	WaitSamples     atomic.Uint64
+
+	ActiveConnPeak atomic.Int64
+	IdleConnPeak   atomic.Int64
 }
 
 func (p *connPool) DebugStats() PoolDebugStats {
@@ -34,7 +34,7 @@ func (p *connPool) updateDebugStats() {
 		return
 	}
 	stats := p.Stats()
-	
+
 	if stats.Active > p.debugStats.ActiveConnPeak.Load() {
 		p.debugStats.ActiveConnPeak.Store(stats.Active)
 	}

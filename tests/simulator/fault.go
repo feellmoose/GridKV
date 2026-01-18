@@ -12,8 +12,8 @@ import (
 
 // FaultInjector manages fault injection for testing
 type FaultInjector struct {
-	simulator *Simulator
-	mu        sync.Mutex
+	simulator   *Simulator
+	mu          sync.Mutex
 	failedNodes map[int]bool
 }
 

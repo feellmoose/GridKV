@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 	"time"
 
@@ -95,8 +96,11 @@ func TestGossip_HandlePullAppliesRemoteAndResponds(t *testing.T) {
 	}
 
 	var sent [][]byte
+	var sentMu sync.Mutex
 	g.sendFunc = func(address string, data []byte) error {
+		sentMu.Lock()
 		sent = append(sent, data)
+		sentMu.Unlock()
 		return nil
 	}
 
@@ -116,10 +120,15 @@ func TestGossip_HandlePullAppliesRemoteAndResponds(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Should respond with PUSH message
-	if len(sent) == 0 {
+	sentMu.Lock()
+	sentCopy := make([][]byte, len(sent))
+	copy(sentCopy, sent)
+	sentMu.Unlock()
+
+	if len(sentCopy) == 0 {
 		t.Fatalf("expected response push, got none")
 	}
-	if !bytes.HasPrefix(sent[0], []byte("PUSH:")) {
-		t.Fatalf("expected PUSH response, got %s", string(sent[0]))
+	if !bytes.HasPrefix(sentCopy[0], []byte("PUSH:")) {
+		t.Fatalf("expected PUSH response, got %s", string(sentCopy[0]))
 	}
 }

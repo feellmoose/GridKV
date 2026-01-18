@@ -203,7 +203,7 @@ func (ae *antiEntropy) entropyLoop() {
 				runtime.GC()
 				lastGC = time.Now()
 			}
-			
+
 			if err := ae.executor.Do(func() {
 				ae.doAntiEntropy()
 			}); err != nil {

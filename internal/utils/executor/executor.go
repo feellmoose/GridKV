@@ -275,8 +275,7 @@ func (e *Exec) Stop(timeout time.Duration) error {
 		return nil
 	}
 
-	// Close channels
-	close(e.stop)
+	// Close tasks channel first to prevent new tasks, but allow workers to drain queue
 	close(e.tasks)
 
 	done := make(chan struct{})
@@ -298,6 +297,12 @@ func (e *Exec) Stop(timeout time.Duration) error {
 
 	select {
 	case <-done:
+		// Close stop channel after all workers have finished
+		select {
+		case <-e.stop:
+		default:
+			close(e.stop)
+		}
 		running := e.running.Load()
 		if running != 0 {
 			e.running.Store(0)
@@ -307,6 +312,12 @@ func (e *Exec) Stop(timeout time.Duration) error {
 		remaining := e.running.Load()
 		logging.Warn("executor workers still running", "name", e.opts.Name, "workers", remaining)
 		e.running.Store(0)
+		// Close stop channel on timeout to allow workers to exit
+		select {
+		case <-e.stop:
+		default:
+			close(e.stop)
+		}
 		return fmt.Errorf("stop timeout: %d workers", remaining)
 	}
 }
@@ -377,17 +388,36 @@ func (e *Exec) startWorker() {
 				return
 			}
 
-			// Use select to allow checking stop channel
+			// Try to get task from queue
+			// Priority: process tasks first, then check for stop signal
 			select {
 			case task, ok := <-e.tasks:
 				if !ok {
+					// Tasks channel closed - no more tasks will arrive
+					// Exit gracefully after processing any remaining tasks in the buffer
 					return
 				}
 				if task != nil {
 					e.run(task)
 				}
 			case <-e.stop:
-				return
+				// Stop signal received - drain remaining tasks from queue then exit
+				// This ensures tasks already in queue are processed before exit
+				for {
+					select {
+					case task, ok := <-e.tasks:
+						if !ok {
+							// Channel closed, no more tasks
+							return
+						}
+						if task != nil {
+							e.run(task)
+						}
+					default:
+						// Queue is empty, can exit now
+						return
+					}
+				}
 			}
 		}
 	}()

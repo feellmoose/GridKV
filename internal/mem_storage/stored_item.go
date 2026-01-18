@@ -78,9 +78,9 @@ func (item *StoredItem) ResolveConflict(other *StoredItem) bool {
 
 	// Conflict resolution thresholds
 	const (
-		closeTimeWindow   = 100 * time.Millisecond // Very close timestamps
-		mediumTimeWindow  = 500 * time.Millisecond // Medium time difference
-		minVersionGap     = int64(1000)            // Minimum version gap for real update
+		closeTimeWindow  = 100 * time.Millisecond // Very close timestamps
+		mediumTimeWindow = 500 * time.Millisecond // Medium time difference
+		minVersionGap    = int64(1000)            // Minimum version gap for real update
 	)
 
 	// If timestamps are very close (within 100ms for high-concurrency scenarios),
