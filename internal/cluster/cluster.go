@@ -363,13 +363,13 @@ func New(cfg Config) (*Cluster, error) {
 
 	// Register network message handlers if network is provided
 	if net != nil {
-		logging.Info("Setting up network handlers", "node", cfg.NodeID)
+		logging.Debug("setting up network handlers", "node", cfg.NodeID)
 		if err := setupNetworkHandlers(net, member, gossip, cfg.Store); err != nil {
 			return nil, fmt.Errorf("failed to setup network handlers: %w", err)
 		}
-		logging.Info("Network handlers setup complete", "node", cfg.NodeID)
+		logging.Debug("network handlers setup complete", "node", cfg.NodeID)
 	} else {
-		logging.Info("No network provided, skipping handler setup", "node", cfg.NodeID)
+		logging.Debug("no network provided, skipping handler setup", "node", cfg.NodeID)
 	}
 
 	return cluster, nil
@@ -492,7 +492,7 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 			return nil, nil
 		}
 		if err := member.HandleMessage(decoded); err != nil {
-			logging.Debug("failed to handle CONNECT message", "remote", remoteAddr, "error", err)
+			// Removed frequent debug log "failed to handle CONNECT message" - too verbose
 		}
 		return nil, nil
 	}); err != nil {
@@ -504,7 +504,7 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 		if decoded != nil {
 			// Handle message (error ignored as this is async message handling)
 			if err := member.HandleMessage(decoded); err != nil {
-				logging.Debug("Failed to handle leave message", "remote", remoteAddr, "error", err)
+				// Removed frequent debug log "Failed to handle leave message" - too verbose
 			}
 		}
 		return nil, nil
@@ -518,7 +518,7 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 	if err := net.RegisterMessageHandler(network.MessageTypeGossipPush, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		// Handle gossip message (error ignored as this is async message handling)
 		if err := gossip.HandleMessage(data); err != nil {
-			logging.Debug("Failed to handle gossip push message", "remote", remoteAddr, "error", err, "dataLen", len(data))
+			// Removed frequent debug log "Failed to handle gossip push message" - too verbose
 		}
 		return nil, nil
 	}); err != nil {
@@ -528,7 +528,7 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 	if err := net.RegisterMessageHandler(network.MessageTypeGossipPull, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		// Handle gossip message (error ignored as this is async message handling)
 		if err := gossip.HandleMessage(data); err != nil {
-			logging.Debug("Failed to handle gossip pull message", "remote", remoteAddr, "error", err, "dataLen", len(data))
+			// Removed frequent debug log "Failed to handle gossip pull message" - too verbose
 		}
 		return nil, nil
 	}); err != nil {

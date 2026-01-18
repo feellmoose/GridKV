@@ -212,11 +212,8 @@ func (m *memberMgr) doPing() {
 				}
 
 				if err := m.sendFunc(info.Address, pingMsg); err != nil {
-					logging.Debug("ping failed",
-						"from", m.nodeID,
-						"to", nodeID,
-						"address", info.Address,
-						"error", err)
+					// Removed frequent debug log "ping failed" - too verbose for production
+					// Ping failures are normal during network issues and don't need debug logging
 				} else {
 					// Update LastActive on successful ping to prevent false failure detection
 					m.updateLastActive(nodeID)
@@ -599,11 +596,8 @@ func (m *memberMgr) updateNode(nodeID string, address string, incarnation int64,
 			return
 		}
 
-		oldState := info.State
 		stateChanged = (info.State != state)
-		if address != info.Address && info.Address != "" {
-			logging.Debug("node address updated", "nodeID", nodeID, "oldAddress", info.Address, "newAddress", address, "local", m.nodeID)
-		}
+		// Removed frequent debug log "node address updated" - too verbose
 		newInfo := &NodeInfo{
 			NodeID:      nodeID,
 			Address:     address,
@@ -612,9 +606,7 @@ func (m *memberMgr) updateNode(nodeID string, address string, incarnation int64,
 			LastActive:  time.Now(),
 		}
 		m.members.Store(nodeID, newInfo)
-		if stateChanged {
-			logging.Debug("node state changed", "nodeID", nodeID, "oldState", oldState, "newState", state, "local", m.nodeID)
-		}
+		// Removed frequent debug log "node state changed" - too verbose for production
 	}
 
 	if (wasNew || stateChanged) && m.onMembershipChange != nil {
@@ -628,7 +620,7 @@ func (m *memberMgr) Join(seed []string) error {
 	}
 
 	if m.sendFunc == nil {
-		logging.Error(errors.New("sendFunc not initialized"), "Join failed", "nodeID", m.nodeID)
+		logging.Error(errors.New("sendFunc not initialized"), "join failed: sendFunc not initialized", "node_id", m.nodeID)
 		return errors.New("sendFunc not initialized")
 	}
 
@@ -654,7 +646,7 @@ func (m *memberMgr) Join(seed []string) error {
 	}
 
 	if successCount == 0 && lastErr != nil {
-		logging.Error(lastErr, "Join failed: all seed nodes unreachable", "nodeID", m.nodeID, "seeds", seed)
+		logging.Error(lastErr, "join failed: all seed nodes unreachable", "node_id", m.nodeID, "seeds", seed)
 		return fmt.Errorf("failed to join any seed node: %w", lastErr)
 	}
 	if successCount > 0 {

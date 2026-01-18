@@ -42,7 +42,7 @@ func TestFaultTolerance(t *testing.T) {
 	})
 
 	if err := sim.SetupCluster(); err != nil {
-		t.Fatalf("Failed to setup cluster: %v", err)
+		t.Fatalf("failed to setup cluster: %v", err)
 	}
 	defer sim.Cleanup()
 
@@ -57,7 +57,7 @@ func TestFaultTolerance(t *testing.T) {
 	}, sim)
 
 	if err := executor.ExecuteWorkload(); err != nil {
-		t.Fatalf("Workload execution failed: %v", err)
+		t.Fatalf("workload execution failed: %v", err)
 	}
 
 	// Inject failures and test resilience
@@ -81,7 +81,7 @@ func TestReplicationValidation(t *testing.T) {
 	})
 
 	if err := sim.SetupCluster(); err != nil {
-		t.Fatalf("Failed to setup cluster: %v", err)
+		t.Fatalf("failed to setup cluster: %v", err)
 	}
 	defer sim.Cleanup()
 
@@ -96,7 +96,7 @@ func TestReplicationValidation(t *testing.T) {
 	for i, key := range testKeys {
 		nodeIdx := i % len(nodes)
 		if err := nodes[nodeIdx].Set(ctx, key, testValues[i]); err != nil {
-			t.Fatalf("Failed to set key %s: %v", key, err)
+			t.Fatalf("failed to set key %s: %v", key, err)
 		}
 	}
 
@@ -127,7 +127,7 @@ func TestReplicationValidation(t *testing.T) {
 				keysWithMinReplicas++
 			}
 			if attempt == 0 {
-				t.Logf("Key %s found on %d/%d nodes (min required: %d)", key, nodesWithKey, len(nodes), minNodesPerKey)
+				t.Logf("key %s found on %d/%d nodes (min required: %d)", key, nodesWithKey, len(nodes), minNodesPerKey)
 			}
 		}
 
@@ -156,10 +156,10 @@ func TestReplicationValidation(t *testing.T) {
 	// (full replication may take longer than test timeout)
 	minAcceptableRate := 0.5
 	if bestReplicationRate < minAcceptableRate {
-		t.Errorf("❌ Replication rate %.1f%% < minimum acceptable %.1f%%",
+		t.Errorf("error: replication rate %.1f%% < minimum acceptable %.1f%%",
 			bestReplicationRate*100, minAcceptableRate*100)
 	} else {
-		t.Logf("✅ Replication rate: %.1f%% (minimum acceptable: %.1f%%, ideal: %.1f%%)",
+		t.Logf("replication rate: %.1f%% (minimum acceptable: %.1f%%, ideal: %.1f%%)",
 			bestReplicationRate*100, minAcceptableRate*100, criteria.MinReplicationRate*100)
 	}
 }
@@ -181,7 +181,7 @@ func TestConsistencyBasic(t *testing.T) {
 	})
 
 	if err := sim.SetupCluster(); err != nil {
-		t.Fatalf("Failed to setup cluster: %v", err)
+		t.Fatalf("failed to setup cluster: %v", err)
 	}
 	defer sim.Cleanup()
 
@@ -196,7 +196,7 @@ func TestConsistencyBasic(t *testing.T) {
 	}, sim)
 
 	if err := executor.ExecuteWorkload(); err != nil {
-		t.Fatalf("Workload execution failed: %v", err)
+		t.Fatalf("workload execution failed: %v", err)
 	}
 
 	// Check consistency
@@ -206,10 +206,10 @@ func TestConsistencyBasic(t *testing.T) {
 
 	criteria := simulator.GetCriteria(simulator.TargetConsistency)
 	if consistencyRate < criteria.MinConsistencyRate*100 {
-		t.Errorf("❌ Consistency rate %.1f%% < required %.1f%%",
+		t.Errorf("error: consistency rate %.1f%% < required %.1f%%",
 			consistencyRate, criteria.MinConsistencyRate*100)
 	} else {
-		t.Logf("✅ Consistency rate: %.1f%% (required: %.1f%%)",
+		t.Logf("consistency rate: %.1f%% (required: %.1f%%)",
 			consistencyRate, criteria.MinConsistencyRate*100)
 	}
 }

@@ -125,13 +125,8 @@ func (c *networkClient) Request(ctx context.Context, address string, request []b
 	for attempt := 0; attempt < 2; attempt++ {
 		conn, err := c.cfg.Pool.Get(ctx, address)
 		if err != nil {
-			if attempt == 0 {
-				logging.Warn("Request: pool.Get failed - possible network connectivity issue",
-					"address", address, "attempt", attempt+1, "error", err)
-			} else {
-				logging.Warn("Request: pool.Get failed on retry",
-					"address", address, "attempt", attempt+1, "error", err)
-			}
+			// Removed frequent warn logs for pool.Get failures - will retry automatically
+			// Only log at debug level for troubleshooting
 			return nil, fmt.Errorf("connection pool error for %s: %w", address, err)
 		}
 

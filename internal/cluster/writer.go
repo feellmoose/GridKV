@@ -215,7 +215,7 @@ func (w *writer) Set(ctx context.Context, key string, item *mem_storage.StoredIt
 	w.lastVersionsMu.Lock()
 	lastVersion, exists := w.lastVersions[key]
 	if exists && version <= lastVersion {
-		logging.Warn("Version non-monotonic detected", "node", w.nodeID, "key", key,
+		logging.Warn("version non-monotonic detected", "node", w.nodeID, "key", key,
 			"current_version", version, "last_version", lastVersion)
 		// Force monotonicity: use lastVersion + 1 if current is not greater
 		version = lastVersion + 1
@@ -242,8 +242,6 @@ func (w *writer) Set(ctx context.Context, key string, item *mem_storage.StoredIt
 	}
 	w.lastVersionsMu.Unlock()
 
-	logging.Debug("Writer Set operation", "node", w.nodeID, "key", key, "version", version)
-
 	newItem := &mem_storage.StoredItem{
 		Version:  version,
 		ExpireAt: item.ExpireAt,
@@ -255,7 +253,6 @@ func (w *writer) Set(ctx context.Context, key string, item *mem_storage.StoredIt
 		return err
 	}
 
-	logging.Debug("Writer batch triggered", "node", w.nodeID, "key", key)
 	w.triggerBatch()
 	return nil
 }
@@ -303,7 +300,7 @@ func (w *writer) BatchSet(ctx context.Context, items map[string]*mem_storage.Sto
 		if w.isLocalReplica(targets) {
 			// Store locally (error ignored as this is async replication path)
 			if err := w.store.Set(key, newItem); err != nil {
-				logging.Warn("Failed to store locally during flush", "node", w.nodeID, "key", key, "error", err)
+				logging.Warn("failed to store locally during flush", "node", w.nodeID, "key", key, "error", err)
 			}
 			if w.cache != nil {
 				w.cache.Delete(key)
@@ -406,7 +403,7 @@ func (w *writer) flushAsync() {
 		w.flush()
 	}); err != nil {
 		// Executor error - retry with exponential backoff
-		logging.Warn("Flush executor error, will retry", "node", w.nodeID, "error", err)
+		logging.Debug("flush executor error, will retry", "node", w.nodeID, "error", err)
 		// Retry in a goroutine with backoff to avoid blocking
 		// Use executor to prevent goroutine leak
 		_ = w.executor.Do(func() {
@@ -518,7 +515,7 @@ func (w *writer) flushInternal() {
 		pendingOps = pendingOps[dropped:]
 		// Only log occasionally to reduce overhead
 		if dropped > w.batchThreshold {
-			logging.Warn("Pending ops limit reached, dropping oldest", "node", w.nodeID, "dropped", dropped, "remaining", maxPendingOps, "threshold", w.batchThreshold)
+			logging.Warn("pending ops limit reached, dropping oldest", "node", w.nodeID, "dropped", dropped, "remaining", maxPendingOps, "threshold", w.batchThreshold)
 		}
 	}
 	w.pendingOps = nil // Clear pending ops
@@ -618,7 +615,7 @@ func (w *writer) flushInternal() {
 			// Push to all targets to ensure complete replication
 			err := gg.Push(targetOps, targetAddrs)
 			if err != nil {
-				logging.Warn("Gossip push failed", "node", w.nodeID, "target", targetNodeID, "ops_count", len(targetOps), "error", err)
+				logging.Debug("gossip push failed", "node", w.nodeID, "target", targetNodeID, "ops_count", len(targetOps), "error", err)
 			}
 		}
 	}

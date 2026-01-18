@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/utils/bufferpool"
-	"github.com/feellmoose/gridkv/internal/utils/logging"
 )
 
 // Network provides unified network interface for cluster operations
@@ -177,12 +176,12 @@ func (n *networkImpl) Name() string { return "network" }
 func (n *networkImpl) Start(ctx context.Context) error {
 	return n.server.StartRequestResponse(ctx, n.cfg.LocalAddress, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		if len(data) < 22 {
-			logging.Debug("message too short", "remote", remoteAddr, "dataLen", len(data))
+			// Removed frequent debug log "message too short" - too verbose for production
 			return nil, nil
 		}
 		msg, err := decodeMessage(data)
 		if err != nil {
-			logging.Debug("failed to decode network message", "error", err, "remote", remoteAddr, "dataLen", len(data))
+			// Removed frequent debug log "failed to decode network message" - too verbose for production
 			return nil, nil
 		}
 		resp, err := n.router.Route(ctx, remoteAddr, msg)

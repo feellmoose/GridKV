@@ -130,8 +130,9 @@ func applyDefaults(opts *GridKVOptions) {
 	// Defaults for logging
 	if opts.Log == nil {
 		opts.Log = LoggerOptions{
-			Level:  logging.LevelInfo,
-			Format: logging.FormatText,
+			Level:    logging.LevelInfo,
+			Format:   logging.FormatText,
+			NoCaller: true, // Default to not printing source paths for production safety
 		}
 	}
 

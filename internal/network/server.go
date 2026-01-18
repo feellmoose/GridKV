@@ -241,7 +241,7 @@ func (s *networkServer) handleConn(conn Conn) {
 		// Validate message size
 		if len(data) > maxMessageSize {
 			s.stats.Errors.Add(1)
-			logging.Warn("Message too large, closing connection",
+			logging.Warn("message too large, closing connection",
 				"remoteAddr", conn.RemoteAddr(),
 				"size", len(data),
 				"maxSize", maxMessageSize)
@@ -269,11 +269,11 @@ func (s *networkServer) handleConn(conn Conn) {
 					"dataLen", len(data),
 					"error", err)
 			} else {
-				logging.Warn("Message handler error", "remoteAddr", conn.RemoteAddr(), "error", err)
+				logging.Debug("message handler error", "remoteAddr", conn.RemoteAddr(), "error", err)
 			}
 			handlerErrorCount++
 			if handlerErrorCount >= maxHandlerErrors {
-				logging.Warn("Too many handler errors, closing connection", "remoteAddr", conn.RemoteAddr(), "errorCount", handlerErrorCount)
+				logging.Warn("too many handler errors, closing connection", "remoteAddr", conn.RemoteAddr(), "errorCount", handlerErrorCount)
 				return
 			}
 			continue

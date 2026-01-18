@@ -33,8 +33,9 @@ var (
 
 func init() {
 	SetDefault(New(Opts{
-		Level:  LevelInfo,
-		Format: FormatText,
+		Level:    LevelInfo,
+		Format:   FormatText,
+		NoCaller: true, // Default to not printing source paths for production safety
 	}))
 }
 
@@ -87,9 +88,9 @@ func New(opts Opts) *Logger {
 		Level: level,
 	}
 
-	if !opts.NoCaller {
-		optsHandler.AddSource = true
-	}
+	// Only add source information if NoCaller is false (explicitly requested)
+	// Default behavior: NoCaller=true means don't print source paths (safer for production)
+	optsHandler.AddSource = !opts.NoCaller
 
 	switch opts.Format {
 	case FormatJSON:

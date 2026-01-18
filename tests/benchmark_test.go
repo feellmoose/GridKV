@@ -26,13 +26,13 @@ func BenchmarkBasicOps(b *testing.B) {
 	})
 
 	if err := sim.SetupCluster(); err != nil {
-		b.Fatalf("Failed to setup cluster: %v", err)
+		b.Fatalf("failed to setup cluster: %v", err)
 	}
 	defer sim.Cleanup()
 
 	nodes := sim.GetNodes()
 	if len(nodes) == 0 {
-		b.Fatal("No nodes available")
+		b.Fatal("no nodes available")
 	}
 
 	ctx := context.Background()
@@ -54,7 +54,7 @@ func BenchmarkBasicOps(b *testing.B) {
 			}
 			node := nodes[i%len(nodes)]
 			if err := node.Set(ctx, key, value); err != nil {
-				b.Errorf("Write failed: %v", err)
+				b.Errorf("write failed: %v", err)
 			}
 		}
 	})
@@ -77,7 +77,7 @@ func BenchmarkBasicOps(b *testing.B) {
 			node := nodes[i%len(nodes)]
 			_, err := node.Get(ctx, key)
 			if err != nil {
-				b.Errorf("Read failed: %v", err)
+				b.Errorf("read failed: %v", err)
 			}
 		}
 	})
@@ -98,7 +98,7 @@ func BenchmarkSimulatorWorkload(b *testing.B) {
 	})
 
 	if err := sim.SetupCluster(); err != nil {
-		b.Fatalf("Failed to setup cluster: %v", err)
+		b.Fatalf("failed to setup cluster: %v", err)
 	}
 	defer sim.Cleanup()
 
@@ -123,7 +123,7 @@ func BenchmarkSimulatorWorkload(b *testing.B) {
 
 	b.StartTimer()
 	if err := executor.ExecuteWorkload(); err != nil {
-		b.Fatalf("Workload execution failed: %v", err)
+		b.Fatalf("workload execution failed: %v", err)
 	}
 	b.StopTimer()
 

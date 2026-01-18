@@ -7,8 +7,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/feellmoose/gridkv/internal/utils/logging"
 )
 
 type ConnPool interface {
@@ -536,7 +534,7 @@ func (p *connPool) Remove(conn Conn) {
 	ap.mu.Unlock()
 	atomic.AddInt64(&p.stats.Total, -1)
 	atomic.AddUint64(&p.stats.Closed, 1)
-	logging.Debug("connPool: removed connection", "remote", addr)
+	// Removed frequent debug log "connPool: removed connection" - too verbose for production
 	_ = conn.Close()
 }
 

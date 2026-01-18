@@ -310,7 +310,7 @@ func (e *Exec) Stop(timeout time.Duration) error {
 		return nil
 	case <-time.After(timeout):
 		remaining := e.running.Load()
-		logging.Warn("executor workers still running", "name", e.opts.Name, "workers", remaining)
+		logging.Debug("executor workers still running", "name", e.opts.Name, "workers", remaining)
 		e.running.Store(0)
 		// Close stop channel on timeout to allow workers to exit
 		select {

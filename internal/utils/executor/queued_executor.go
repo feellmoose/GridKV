@@ -386,7 +386,7 @@ func (e *QueuedExec) Stop(timeout time.Duration) error {
 		return nil
 	case <-time.After(timeout):
 		remaining := e.running.Load()
-		logging.Warn("queued_executor workers still running", "name", e.opts.Name, "workers", remaining)
+		logging.Debug("queued_executor workers still running", "name", e.opts.Name, "workers", remaining)
 		e.running.Store(0)
 		return fmt.Errorf("stop timeout: %d workers", remaining)
 	}
