@@ -22,24 +22,21 @@ import (
 )
 
 // Version represents the current version of GridKV
-const Version = "v0.3.5"
+const Version = "v0.3.6"
 
 // Error constants exported for application error handling
 var (
 	// ErrShuttingDown indicates the node has begun graceful shutdown
 	ErrShuttingDown = errors.New("gridkv shutting down")
 
-	// ErrItemNotFound indicates the requested key was not found
-	ErrItemNotFound = mem_storage.ErrNotFound
-
-	// ErrItemExpired indicates the requested item has expired
-	ErrItemExpired = mem_storage.ErrExpired
-
 	// ErrVersionMismatch indicates a version conflict
 	ErrVersionMismatch = errors.New("version mismatch")
 
 	// ErrMemoryLimitExceeded indicates memory limit reached
 	ErrMemoryLimitExceeded = errors.New("memory limit exceeded")
+
+	// ErrEmptyKey indicates an empty key was provided
+	ErrEmptyKey = mem_storage.ErrEmptyKey
 )
 
 // GridKV is the distributed key-value cache instance.
@@ -284,7 +281,7 @@ func (g *GridKV) Set(ctx context.Context, key string, value []byte, ttl ...time.
 		return ErrShuttingDown
 	}
 	if key == "" {
-		return errors.New("key cannot be empty")
+		return ErrEmptyKey
 	}
 
 	// Determine TTL
@@ -321,7 +318,12 @@ func (g *GridKV) Set(ctx context.Context, key string, value []byte, ttl ...time.
 //
 // Reads locally if available, otherwise forwards to coordinator with retries.
 // Returns freshest value, triggers read-repair on version mismatch.
-// Returns deep copy. Panic-safe, thread-safe.
+// Returns deep copy.
+//
+// If the key is not found, returns (nil, nil). Only returns an error for
+// real failures (network errors, timeouts, etc.).
+//
+// Panic-safe, thread-safe.
 func (g *GridKV) Get(ctx context.Context, key string) (value []byte, err error) {
 	// SAFETY: Recover from panics
 	defer func() {
@@ -336,7 +338,7 @@ func (g *GridKV) Get(ctx context.Context, key string) (value []byte, err error) 
 		return nil, errors.New("GridKV not initialized")
 	}
 	if key == "" {
-		return nil, errors.New("key cannot be empty")
+		return nil, ErrEmptyKey
 	}
 	if g.isShuttingDown() {
 		return nil, ErrShuttingDown
@@ -347,30 +349,23 @@ func (g *GridKV) Get(ctx context.Context, key string) (value []byte, err error) 
 
 	item, err := reader.Get(ctx, key)
 	if err != nil {
-		// mem_storage may return ErrNotFound or ErrExpired
-		if err == mem_storage.ErrNotFound || err == mem_storage.ErrExpired {
-			return nil, ErrItemNotFound
-		}
 		return nil, err
 	}
+
 	if item == nil {
-		return nil, ErrItemNotFound
+		return nil, nil
 	}
 
-	// Check if tombstone FIRST (before expiration check)
-	// Tombstone has Version > 0 but empty Value
 	if item.IsTombstone() {
-		return nil, ErrItemNotFound
+		return nil, nil
 	}
 
-	// Check expiration
 	if item.IsExpired() {
-		return nil, ErrItemExpired
+		return nil, nil
 	}
 
-	// Return deep copy - ensure Value is not empty
 	if len(item.Value) == 0 {
-		return nil, ErrItemNotFound
+		return nil, nil
 	}
 
 	value = make([]byte, len(item.Value))
@@ -395,7 +390,7 @@ func (g *GridKV) Delete(ctx context.Context, key string) (err error) {
 		return errors.New("GridKV not initialized")
 	}
 	if key == "" {
-		return errors.New("key cannot be empty")
+		return ErrEmptyKey
 	}
 	if g.isShuttingDown() {
 		return ErrShuttingDown
@@ -406,6 +401,10 @@ func (g *GridKV) Delete(ctx context.Context, key string) (err error) {
 	version := int64(0)
 	if err == nil && item != nil {
 		version = item.Version
+	} else if err != nil && err != mem_storage.ErrNotFound && err != mem_storage.ErrExpired {
+		// If store.Get returns a real error (not "not found"), return it
+		// This shouldn't happen since we check empty key above, but be safe
+		return err
 	}
 
 	// Use Writer to delete

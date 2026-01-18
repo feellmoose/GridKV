@@ -657,17 +657,12 @@ func TestCluster_EmptyOperations(t *testing.T) {
 	}
 	defer func() { _ = cluster.Stop(ctx) }()
 
-	// Get non-existent key - should return error
-	// Note: reader.Get may return nil error for non-existent keys in some cases
-	// So we check if both error and value are nil
 	got, err := cluster.Get(ctx, "non-existent")
-	if err != nil && err.Error() != "item not found" {
-		// If there's an error, it should be about item not found
-		t.Logf("Get() error = %v (expected 'item not found' or nil)", err)
+	if err != nil {
+		t.Errorf("Get(non-existent) error = %v, want nil", err)
 	}
-	// If error is nil, the value should also be nil for non-existent keys
-	if err == nil && got != nil {
-		t.Errorf("Get(non-existent) = %v, want nil when error is nil", got)
+	if got != nil {
+		t.Errorf("Get(non-existent) = %v, want nil", got)
 	}
 
 	// Delete non-existent key (should not error)

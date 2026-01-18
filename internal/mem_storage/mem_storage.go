@@ -255,7 +255,7 @@ func (s *MemStorage) getShard(key string) *storageShard {
 // Concurrent writes are resolved atomically per shard.
 func (s *MemStorage) Set(key string, item *StoredItem) error {
 	if key == "" {
-		return errEmptyKey
+		return ErrEmptyKey
 	}
 	if item == nil {
 		return errNilItem
@@ -425,7 +425,7 @@ func (s *MemStorage) updateStatsForExistingKey(shard *storageShard, oldItem, new
 // Returns deep copy, safe for modification.
 func (s *MemStorage) Get(key string) (*StoredItem, error) {
 	if key == "" {
-		return nil, errEmptyKey
+		return nil, ErrEmptyKey
 	}
 
 	s.getCount.Add(1)
@@ -481,7 +481,7 @@ func (s *MemStorage) Get(key string) (*StoredItem, error) {
 // Delete removes key with optimistic locking.
 func (s *MemStorage) Delete(key string, version int64) error {
 	if key == "" {
-		return errEmptyKey
+		return ErrEmptyKey
 	}
 
 	shard := s.getShard(key)
@@ -920,7 +920,7 @@ var _ lifecycle.Component = (*MemStorage)(nil)
 // WARNING: Returned item shares memory. Do not modify.
 func (s *MemStorage) GetNoCopy(key string) (*StoredItem, error) {
 	if key == "" {
-		return nil, errEmptyKey
+		return nil, ErrEmptyKey
 	}
 
 	s.getCount.Add(1)
@@ -1260,7 +1260,7 @@ var (
 	ErrExpired         = errors.New("item expired")
 	ErrVersionMismatch = errors.New("version mismatch")
 	ErrMemoryLimit     = errors.New("memory limit exceeded")
-	errEmptyKey        = errors.New("empty key")
+	ErrEmptyKey        = errors.New("empty key")
 	errNilItem         = errors.New("nil item")
 	errRetry           = errors.New("retry operation")
 )

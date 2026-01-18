@@ -132,11 +132,16 @@ func (r *reader) Get(ctx context.Context, key string) (*mem_storage.StoredItem, 
 		return item, nil
 	}
 
+	// If error is not "not found" (e.g., empty key), return it immediately
+	if err != nil && err != mem_storage.ErrNotFound && err != mem_storage.ErrExpired {
+		return nil, err
+	}
+
 	// Local read failed, try distributed read: preferred replica first, then fallback to next replicas on failure
 	// According to README: "Hash ring locates preferred replica; fast fallback to next replica when suspect/unreachable"
 	targets := r.ring.GetN(key, r.replicaCount)
 	if len(targets) == 0 {
-		return nil, fmt.Errorf("no target node found for key %s", key)
+		return nil, nil
 	}
 
 	// Filter alive nodes (skip local node as we already tried it)
@@ -161,12 +166,11 @@ func (r *reader) Get(ctx context.Context, key string) (*mem_storage.StoredItem, 
 	}
 
 	if len(aliveTargets) == 0 {
-		return nil, fmt.Errorf("key %s not found", key)
+		return nil, nil
 	}
 
-	// Try targets sequentially: preferred replica first, then fallback to next on failure
 	if r.getFunc == nil {
-		return nil, fmt.Errorf("no remote read function available for key %s", key)
+		return nil, nil
 	}
 
 	timeout := 5 * time.Second
@@ -216,19 +220,19 @@ func (r *reader) Get(ctx context.Context, key string) (*mem_storage.StoredItem, 
 				// Success, return immediately
 				goto success
 			}
-			// Failed, save error and try next replica
-			lastErr = err
-			if lastErr == nil {
-				lastErr = fmt.Errorf("key %s not found on node %s", key, target)
+			if err != nil && err != mem_storage.ErrNotFound && err != mem_storage.ErrExpired {
+				lastErr = err
 			}
 		case <-readCtx.Done():
-			// Timeout, try next replica
+			// Timeout is a real error, save it
 			lastErr = fmt.Errorf("remote read timeout for key %s on node %s", key, target)
 			continue
 		}
 	}
 
-	// All replicas failed
+	if lastErr == nil {
+		return nil, nil
+	}
 	return nil, fmt.Errorf("remote read failed for key %s after trying %d replicas: %w", key, len(aliveTargets), lastErr)
 
 success:
@@ -290,6 +294,15 @@ func (r *reader) BatchGet(ctx context.Context, keys []string) (map[string]*mem_s
 }
 
 func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_storage.StoredItem, error) {
+	if key == "" {
+		// Check store.Get to get the correct error for empty key
+		_, err := r.store.Get(key)
+		if err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
 	if n <= 0 {
 		n = 3
 	}
@@ -419,6 +432,15 @@ loop1:
 
 // GetWithConsistency reads with specified consistency level
 func (r *reader) GetWithConsistency(ctx context.Context, key string, level ConsistencyLevel) (*mem_storage.StoredItem, error) {
+	if key == "" {
+		// Check store.Get to get the correct error for empty key
+		_, err := r.store.Get(key)
+		if err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
 	// Check cache first (only for eventual consistency)
 	if level == ConsistencyLevelOne && r.cache != nil {
 		if val, ok := r.cache.Get(key); ok {

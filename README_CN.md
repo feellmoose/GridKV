@@ -28,6 +28,7 @@ go get github.com/feellmoose/gridkv
 package main
 
 import (
+    "context"
     "log"
     "time"
     "github.com/feellmoose/gridkv"
@@ -47,11 +48,17 @@ func main() {
     defer kv.Close()
 
     // 设置键值对
-    kv.Set("key", []byte("value"), time.Hour)
+    kv.Set(context.Background(), "key", []byte("value"), time.Hour)
 
     // 获取值
-    value, _ := kv.Get("key")
-    println(string(value))
+    // 如果key不存在，返回 (nil, nil)；仅在真实错误时返回error
+    value, err := kv.Get(context.Background(), "key")
+    if err != nil {
+        log.Fatal(err)
+    }
+    if value != nil {
+        println(string(value))
+    }
 }
 ```
 
