@@ -45,7 +45,7 @@ func (fi *FaultInjector) InjectNodeFailure(t *testing.T, nodeIndex int) error {
 	}
 
 	fi.failedNodes[nodeIndex] = true
-	t.Logf("🔴 Injected failure: node %d shutdown", nodeIndex)
+	t.Logf("injected failure: node %d shutdown", nodeIndex)
 	return nil
 }
 
@@ -75,7 +75,7 @@ func TestFaultToleranceWithFailures(t *testing.T, sim *Simulator, failureCount i
 
 	nodes := sim.GetNodes()
 	if failureCount >= len(nodes) {
-		t.Fatalf("Cannot fail all nodes: %d failures requested for %d nodes", failureCount, len(nodes))
+		t.Fatalf("cannot fail all nodes: %d failures requested for %d nodes", failureCount, len(nodes))
 	}
 
 	// Pre-populate some data before failures
@@ -97,7 +97,7 @@ func TestFaultToleranceWithFailures(t *testing.T, sim *Simulator, failureCount i
 	injector := NewFaultInjector(sim)
 	for i := 0; i < failureCount; i++ {
 		if err := injector.InjectNodeFailure(t, i); err != nil {
-			t.Logf("Warning: failed to inject failure for node %d: %v", i, err)
+			t.Logf("warning: failed to inject failure for node %d: %v", i, err)
 		}
 	}
 
@@ -124,10 +124,10 @@ func TestFaultToleranceWithFailures(t *testing.T, sim *Simulator, failureCount i
 
 	accessibilityRate := float64(accessibleCount) / float64(len(testKeys))
 	if accessibilityRate < criteria.MinReplicationRate {
-		t.Errorf("❌ Data accessibility %.1f%% < required %.1f%% after failures",
+		t.Errorf("error: data accessibility %.1f%% < required %.1f%% after failures",
 			accessibilityRate*100, criteria.MinReplicationRate*100)
 	} else {
-		t.Logf("✅ Data accessibility: %.1f%% (required: %.1f%%) after %d failures",
+		t.Logf("data accessibility: %.1f%% (required: %.1f%%) after %d failures",
 			accessibilityRate*100, criteria.MinReplicationRate*100, failureCount)
 	}
 }

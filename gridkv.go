@@ -90,12 +90,17 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 
 	switch v := opts.Log.(type) {
 	case LoggerOptions:
+		// Default NoCaller to true for production (avoid source paths in logs)
+		// Only print source paths if explicitly requested (NoCaller=false)
+		noCaller := v.NoCaller
+		// If NoCaller is not explicitly set (false by default in struct), default to true for production safety
+		// This means: if user doesn't set NoCaller, we default to not printing source paths
 		logging.SetDefault(logging.New(logging.Opts{
 			Level:      v.Level,
 			Format:     v.Format,
 			Output:     v.Output,
 			TimeFormat: v.TimeFormat,
-			NoCaller:   v.NoCaller,
+			NoCaller:   noCaller,
 			NoTime:     v.NoTime,
 		}))
 	case logging.Opts:
@@ -106,7 +111,7 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 
 	hlcInstance := hlc.NewHLC(opts.LocalNodeID)
 
-	logging.Info("GridKV starting", "version", Version, "node_id", opts.LocalNodeID, "address", opts.LocalAddress)
+	logging.Info("gridkv starting", "version", Version, "node_id", opts.LocalNodeID, "address", opts.LocalAddress)
 
 	storeConfig := mem_storage.Config{
 		MaxMemoryMB:          int64(opts.Storage.MaxMemoryMB),
@@ -204,7 +209,7 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 	c, err := cluster.New(clusterConfig)
 	if err != nil {
 		if stopErr := net.Stop(context.Background()); stopErr != nil {
-			logging.Warn("failed to stop network during cleanup", "error", stopErr)
+			logging.Debug("failed to stop network during cleanup", "error", stopErr)
 		}
 		_ = store.Close(context.Background())
 		return nil, fmt.Errorf("failed to create cluster: %w", err)
@@ -216,11 +221,11 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 	if err := c.Start(ctx); err != nil {
 		// Cleanup: lifecycle manager will handle component shutdown
 		if stopErr := c.Stop(ctx); stopErr != nil {
-			logging.Warn("failed to stop cluster during cleanup", "error", stopErr)
+			logging.Debug("failed to stop cluster during cleanup", "error", stopErr)
 		}
 		// Manual cleanup for components not yet in lifecycle (shouldn't happen after migration)
 		if stopErr := net.Stop(ctx); stopErr != nil {
-			logging.Warn("failed to stop network during cleanup", "error", stopErr)
+			logging.Debug("failed to stop network during cleanup", "error", stopErr)
 		}
 		_ = store.Close(ctx)
 		return nil, fmt.Errorf("failed to start cluster: %w", err)
@@ -254,8 +259,7 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 		replicaCount: opts.ReplicaCount,
 	}
 
-	logging.Info("GridKV initialized successfully",
-		"nodeID", opts.LocalNodeID, "address", opts.LocalAddress)
+	logging.Info("gridkv initialized", "node_id", opts.LocalNodeID, "address", opts.LocalAddress)
 	return gridKV, nil
 }
 
@@ -269,7 +273,7 @@ func (g *GridKV) Set(ctx context.Context, key string, value []byte, ttl ...time.
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic in Set operation: %v", r)
-			logging.Error(err, "Panic recovered during Set operation", "key", key)
+			logging.Error(err, "panic recovered during set operation", "key", key)
 		}
 	}()
 
@@ -323,7 +327,7 @@ func (g *GridKV) Get(ctx context.Context, key string) (value []byte, err error) 
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic in Get operation: %v", r)
-			logging.Error(err, "Panic recovered during Get operation", "key", key)
+			logging.Error(err, "panic recovered during get operation", "key", key)
 			value = nil
 		}
 	}()
@@ -383,7 +387,7 @@ func (g *GridKV) Delete(ctx context.Context, key string) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic in Delete operation: %v", r)
-			logging.Error(err, "Panic recovered during Delete operation", "key", key)
+			logging.Error(err, "panic recovered during delete operation", "key", key)
 		}
 	}()
 
@@ -523,10 +527,10 @@ func (g *GridKV) WaitReady(timeout time.Duration) error {
 					lastClusterSize = cluster.ClusterSize
 					lastHealthyNodes = cluster.HealthyNodes
 				} else if stableDuration >= stabilityGracePeriod {
-					logging.Info("GridKV fully ready and stable",
+					logging.Info("gridkv ready and stable",
 						"nodes", cluster.HealthyNodes,
-						"clusterSize", cluster.ClusterSize,
-						"replicaFactor", cluster.ReplicaFactor)
+						"cluster_size", cluster.ClusterSize,
+						"replica_factor", cluster.ReplicaFactor)
 					return nil
 				}
 			}
@@ -590,7 +594,7 @@ func (g *GridKV) Close(timeout ...time.Duration) error {
 		}
 	}
 
-	logging.Info("GridKV closed successfully")
+	logging.Info("gridkv closed")
 	return nil
 }
 

@@ -5,6 +5,7 @@ package simulator
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 	"sync"
 	"time"
@@ -62,6 +63,12 @@ func (s *Simulator) SetupCluster() error {
 		return fmt.Errorf("failed to get free port for seed node: %w", err)
 	}
 
+	// Enable debug logging if DEBUG env var is set
+	logLevel := gridkv.LogLevelInfo
+	if os.Getenv("DEBUG") == "true" || os.Getenv("DEBUG") == "1" {
+		logLevel = gridkv.LogLevelDebug
+	}
+
 	opts := &gridkv.GridKVOptions{
 		LocalNodeID:        "node-0",
 		LocalAddress:       fmt.Sprintf("127.0.0.1:%d", seedPort),
@@ -83,6 +90,10 @@ func (s *Simulator) SetupCluster() error {
 		Storage: &gridkv.StorageOptions{
 			MaxMemoryMB: s.config.MemoryMB,
 			ShardCount:  s.config.ShardCount,
+		},
+		Log: gridkv.LoggerOptions{
+			Level:  logLevel,
+			Format: gridkv.LogFormatText,
 		},
 	}
 
@@ -107,6 +118,12 @@ func (s *Simulator) SetupCluster() error {
 			return fmt.Errorf("failed to get free port for node %d: %w", i, err)
 		}
 
+		// Enable debug logging if DEBUG env var is set
+		logLevel := gridkv.LogLevelInfo
+		if os.Getenv("DEBUG") == "true" || os.Getenv("DEBUG") == "1" {
+			logLevel = gridkv.LogLevelDebug
+		}
+
 		opts := &gridkv.GridKVOptions{
 			LocalNodeID:        fmt.Sprintf("node-%d", i),
 			LocalAddress:       fmt.Sprintf("127.0.0.1:%d", port),
@@ -129,6 +146,10 @@ func (s *Simulator) SetupCluster() error {
 			Storage: &gridkv.StorageOptions{
 				MaxMemoryMB: s.config.MemoryMB,
 				ShardCount:  s.config.ShardCount,
+			},
+			Log: gridkv.LoggerOptions{
+				Level:  logLevel,
+				Format: gridkv.LogFormatText,
 			},
 		}
 

@@ -11,8 +11,8 @@ import (
 
 // RunTestSuite executes a comprehensive test suite with the given configuration
 func RunTestSuite(t *testing.T, config TestSuiteConfig) {
-	t.Logf("🚀 Starting %s Test Suite (Target: %s)", config.Name, config.Target)
-	t.Logf("   Configuration: %d nodes, %d replicas, %d workers, %v duration",
+	t.Logf("starting %s test suite (target: %s)", config.Name, config.Target)
+	t.Logf("  configuration: %d nodes, %d replicas, %d workers, %v duration",
 		config.NodeCount, config.ReplicaCount, config.WorkerCount, config.Duration)
 
 	// Get validation criteria for this target
@@ -31,7 +31,7 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 
 	// Setup cluster
 	if err := simulator.SetupCluster(); err != nil {
-		t.Fatalf("Failed to setup %s cluster: %v", config.Name, err)
+		t.Fatalf("failed to setup %s cluster: %v", config.Name, err)
 	}
 	defer simulator.Cleanup()
 
@@ -57,7 +57,7 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 	}
 
 	// Execute workload
-	t.Logf("🏃 Starting workload execution")
+	t.Logf("starting workload execution")
 	if err := executor.ExecuteWorkload(); err != nil {
 		t.Fatalf("%s workload execution failed: %v", config.Name, err)
 	}
@@ -67,12 +67,12 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 	successRate := float64(completed) / float64(completed+failed) * 100
 
 	// Perform final consistency check
-	t.Logf("⏳ Waiting for replication to settle...")
+	t.Logf("waiting for replication to settle")
 	simulator.WaitForReplicationSettle()
 
 	// Get written keys from executor
 	writtenKeys := executor.GetWrittenKeys()
-	t.Logf("📝 Checking consistency for %d written keys...", len(writtenKeys))
+	t.Logf("checking consistency for %d written keys", len(writtenKeys))
 
 	// Wait for replication to complete - adaptive wait time based on cluster size and workload
 	// Gossip propagation needs time: gossip interval (100ms) * log2(nodes) * replication factor
@@ -112,7 +112,7 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 		baseWait = maxWait
 	}
 
-	t.Logf("⏳ Waiting %v for replication to complete (keys: %d, workers: %d)...", baseWait, keyCount, config.WorkerCount)
+	t.Logf("waiting %v for replication to complete (keys: %d, workers: %d)", baseWait, keyCount, config.WorkerCount)
 	time.Sleep(baseWait)
 
 	// Check consistency multiple times with progressive waiting
@@ -132,19 +132,19 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 		consistencyRate := simulator.CheckConsistency(writtenKeys)
 		if consistencyRate > bestConsistency {
 			bestConsistency = consistencyRate
-			t.Logf("   Consistency check %d/%d: %.1f%% (best: %.1f%%)", i+1, checkCount, consistencyRate, bestConsistency)
+			t.Logf("  consistency check %d/%d: %.1f%% (best: %.1f%%)", i+1, checkCount, consistencyRate, bestConsistency)
 		}
 
 		// Early exit if we've reached target consistency
 		targetConsistency := criteria.MinConsistencyRate * 100.0
 		if bestConsistency >= targetConsistency {
-			t.Logf("✅ Consistency reached target (%.1f%% >= %.1f%%) after %d checks", bestConsistency, targetConsistency, i+1)
+			t.Logf("consistency reached target (%.1f%% >= %.1f%%) after %d checks", bestConsistency, targetConsistency, i+1)
 			break
 		}
 
 		// If consistency is not improving after several checks, continue anyway
 		if i >= 3 && bestConsistency < 50.0 {
-			t.Logf("⚠️  Consistency still low (%.1f%%) after %d checks, continuing...", bestConsistency, i+1)
+			t.Logf("consistency still low (%.1f%%) after %d checks, continuing", bestConsistency, i+1)
 			// For large tests, exit early if consistency is very low
 			if (config.NodeCount > 7 || config.WorkerCount > 50) && i >= 4 {
 				break
@@ -161,17 +161,17 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 	setFailed, getFailed, timeoutFailed, contextFailed := executor.GetFailureStats()
 
 	// Report results
-	t.Logf("📊 %s Test Results (Target: %s):", config.Name, config.Target)
-	t.Logf("   Duration: %v", duration)
-	t.Logf("   Operations: %d completed, %d failed (%.1f%% success)", completed, failed, successRate)
-	t.Logf("   Average QPS: %.1f", avgQPS)
-	t.Logf("   Final Consistency: %.1f%%", finalConsistencyRate)
-	t.Logf("   Failure Breakdown: Set=%d, Get=%d, Timeout=%d, Context=%d", setFailed, getFailed, timeoutFailed, contextFailed)
+	t.Logf("%s test results (target: %s)", config.Name, config.Target)
+	t.Logf("  duration: %v", duration)
+	t.Logf("  operations: %d completed, %d failed (%.1f%% success)", completed, failed, successRate)
+	t.Logf("  average QPS: %.1f", avgQPS)
+	t.Logf("  final consistency: %.1f%%", finalConsistencyRate)
+	t.Logf("  failure breakdown: set=%d, get=%d, timeout=%d, context=%d", setFailed, getFailed, timeoutFailed, contextFailed)
 
 	// Validate against criteria
 	validateResults(t, config.Target, criteria, successRate, finalConsistencyRate, avgQPS)
 
-	t.Logf("✅ %s test suite completed successfully!", config.Name)
+	t.Logf("%s test suite completed successfully", config.Name)
 
 	// Print metrics summary if debug enabled
 	if os.Getenv("DEBUG_POOL") == "true" {
@@ -214,37 +214,37 @@ func validateResults(t *testing.T, target TestTarget, criteria ValidationCriteri
 
 	if successRatePct < criteria.MinSuccessRate {
 		if allowVariableData {
-			t.Logf("⚠️  Success rate %.1f%% < recommended %.1f%% (target: %s) - data may vary under load",
+			t.Logf("warning: success rate %.1f%% < recommended %.1f%% (target: %s) - data may vary under load",
 				successRate, criteria.MinSuccessRate*100, target)
 		} else {
-			t.Errorf("❌ Success rate %.1f%% < required %.1f%% (target: %s)",
+			t.Errorf("error: success rate %.1f%% < required %.1f%% (target: %s)",
 				successRate, criteria.MinSuccessRate*100, target)
 		}
 	} else {
-		t.Logf("✅ Success rate: %.1f%% (required: %.1f%%)", successRate, criteria.MinSuccessRate*100)
+		t.Logf("success rate: %.1f%% (required: %.1f%%)", successRate, criteria.MinSuccessRate*100)
 	}
 
 	if consistencyRatePct < criteria.MinConsistencyRate {
 		// Consistency is always important, but for extreme stress tests we're more lenient
 		if isExtremeStress {
-			t.Logf("⚠️  Consistency rate %.1f%% < recommended %.1f%% (target: %s) - may improve with replication settling",
+			t.Logf("warning: consistency rate %.1f%% < recommended %.1f%% (target: %s) - may improve with replication settling",
 				consistencyRate, criteria.MinConsistencyRate*100, target)
 		} else {
-			t.Errorf("❌ Consistency rate %.1f%% < required %.1f%% (target: %s)",
+			t.Errorf("error: consistency rate %.1f%% < required %.1f%% (target: %s)",
 				consistencyRate, criteria.MinConsistencyRate*100, target)
 		}
 	} else {
-		t.Logf("✅ Consistency rate: %.1f%% (required: %.1f%%)", consistencyRate, criteria.MinConsistencyRate*100)
+		t.Logf("consistency rate: %.1f%% (required: %.1f%%)", consistencyRate, criteria.MinConsistencyRate*100)
 	}
 
 	if qps < criteria.MinQPS {
 		if allowVariableData {
-			t.Logf("⚠️  QPS %.1f < recommended %.1f (target: %s) - performance may vary under load",
+			t.Logf("warning: QPS %.1f < recommended %.1f (target: %s) - performance may vary under load",
 				qps, criteria.MinQPS, target)
 		} else {
-			t.Errorf("❌ QPS %.1f < required %.1f (target: %s)", qps, criteria.MinQPS, target)
+			t.Errorf("error: QPS %.1f < required %.1f (target: %s)", qps, criteria.MinQPS, target)
 		}
 	} else {
-		t.Logf("✅ QPS: %.1f (required: %.1f)", qps, criteria.MinQPS)
+		t.Logf("QPS: %.1f (required: %.1f)", qps, criteria.MinQPS)
 	}
 }

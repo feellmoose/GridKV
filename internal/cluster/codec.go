@@ -492,27 +492,27 @@ func (c *MemberMsgCodec) decodeConnectMsg(data []byte) *connectMsg {
 	offset := 0
 	msg.NodeID, offset = c.decodeString(data, offset)
 	if offset == 0 {
-		logging.Warn("Failed to decode NodeID from connect message", "dataLen", len(data))
+		logging.Warn("failed to decode nodeid from connect message", "data_len", len(data))
 		return nil
 	}
 	if len(msg.NodeID) == 0 {
-		logging.Warn("Empty NodeID decoded from connect message", "offset", offset, "dataLen", len(data))
+		logging.Warn("empty nodeid decoded from connect message", "offset", offset, "data_len", len(data))
 		return nil
 	}
 	expectedOffset := 2 + len(msg.NodeID)
 	if offset != expectedOffset {
-		logging.Warn("NodeID offset mismatch in connect message", "nodeID", msg.NodeID, "expectedOffset", expectedOffset, "actualOffset", offset)
+		logging.Warn("nodeid offset mismatch in connect message", "node_id", msg.NodeID, "expected_offset", expectedOffset, "actual_offset", offset)
 		return nil
 	}
 	addressOffset := offset
 	msg.Address, offset = c.decodeString(data, offset)
 	if offset == 0 {
-		logging.Warn("Failed to decode address from connect message", "nodeID", msg.NodeID, "addressOffset", addressOffset)
+		logging.Warn("failed to decode address from connect message", "node_id", msg.NodeID, "address_offset", addressOffset)
 		return nil
 	}
 	if len(msg.Address) < 3 || msg.Address[0] == 0 {
 		// Avoid fmt.Sprintf for performance - just log address length
-		logging.Warn("Invalid address in connect message", "nodeID", msg.NodeID, "addressLen", len(msg.Address))
+		logging.Warn("invalid address in connect message", "node_id", msg.NodeID, "address_len", len(msg.Address))
 		return nil
 	}
 	if offset+8 > len(data) {
@@ -636,14 +636,14 @@ func (c *MemberMsgCodec) decodeNodeInfo(data []byte, offset int) (*NodeInfo, int
 	}
 	info.Address, offset = c.decodeString(data, offset)
 	if offset == 0 {
-		logging.Warn("Failed to decode address from node info", "nodeID", info.NodeID)
+		logging.Warn("failed to decode address from node info", "node_id", info.NodeID)
 		return nil, offset
 	}
 	if info.Address == "" {
-		logging.Warn("Empty address decoded from node info", "nodeID", info.NodeID)
+		logging.Warn("empty address decoded from node info", "node_id", info.NodeID)
 	} else if len(info.Address) < 3 || info.Address[0] == 0 {
 		// Avoid fmt.Sprintf for performance - just log address length
-		logging.Warn("Invalid address decoded from node info", "nodeID", info.NodeID, "addressLen", len(info.Address))
+		logging.Warn("invalid address decoded from node info", "node_id", info.NodeID, "address_len", len(info.Address))
 	}
 	if offset+4 > len(data) {
 		return nil, offset
@@ -690,29 +690,29 @@ func (c *MemberMsgCodec) decodeClusterSyncMsg(data []byte) *clusterSyncMsg {
 	offset := 0
 	msg.From, offset = c.decodeString(data, offset)
 	if offset == 0 {
-		logging.Warn("Failed to decode sender from cluster sync message")
+		logging.Warn("failed to decode sender from cluster sync message")
 		return nil
 	}
 	if offset+4 > len(data) {
-		logging.Warn("Insufficient data for member count in cluster sync message", "offset", offset, "dataLen", len(data))
+		logging.Warn("insufficient data for member count in cluster sync message", "offset", offset, "data_len", len(data))
 		return nil
 	}
 	memberCount := int(binary.LittleEndian.Uint32(data[offset:]))
 	offset += 4
 	if memberCount < 0 || memberCount > 1000 {
-		logging.Warn("Invalid member count in cluster sync message", "count", memberCount)
+		logging.Warn("invalid member count in cluster sync message", "count", memberCount)
 		return nil
 	}
 	msg.Members = make([]NodeInfo, 0, memberCount)
 	for i := 0; i < memberCount; i++ {
 		info, newOffset := c.decodeNodeInfo(data, offset)
 		if info == nil {
-			logging.Warn("Failed to decode member in cluster sync message", "index", i)
+			logging.Warn("failed to decode member in cluster sync message", "index", i)
 			return nil
 		}
 		if info.Address == "" || len(info.Address) < 3 || info.Address[0] == 0 {
 			// Avoid fmt.Sprintf for performance - just log address length
-			logging.Warn("Member has invalid address in cluster sync message", "index", i, "nodeID", info.NodeID, "addressLen", len(info.Address))
+			logging.Warn("member has invalid address in cluster sync message", "index", i, "node_id", info.NodeID, "address_len", len(info.Address))
 			return nil
 		}
 		msg.Members = append(msg.Members, *info)
