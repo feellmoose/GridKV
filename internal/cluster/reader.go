@@ -132,6 +132,11 @@ func (r *reader) Get(ctx context.Context, key string) (*mem_storage.StoredItem, 
 		return item, nil
 	}
 
+	// If error is not "not found" (e.g., empty key), return it immediately
+	if err != nil && err != mem_storage.ErrNotFound && err != mem_storage.ErrExpired {
+		return nil, err
+	}
+
 	// Local read failed, try distributed read: preferred replica first, then fallback to next replicas on failure
 	// According to README: "Hash ring locates preferred replica; fast fallback to next replica when suspect/unreachable"
 	targets := r.ring.GetN(key, r.replicaCount)
@@ -289,6 +294,15 @@ func (r *reader) BatchGet(ctx context.Context, keys []string) (map[string]*mem_s
 }
 
 func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_storage.StoredItem, error) {
+	if key == "" {
+		// Check store.Get to get the correct error for empty key
+		_, err := r.store.Get(key)
+		if err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
 	if n <= 0 {
 		n = 3
 	}
@@ -418,6 +432,15 @@ loop1:
 
 // GetWithConsistency reads with specified consistency level
 func (r *reader) GetWithConsistency(ctx context.Context, key string, level ConsistencyLevel) (*mem_storage.StoredItem, error) {
+	if key == "" {
+		// Check store.Get to get the correct error for empty key
+		_, err := r.store.Get(key)
+		if err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
 	// Check cache first (only for eventual consistency)
 	if level == ConsistencyLevelOne && r.cache != nil {
 		if val, ok := r.cache.Get(key); ok {

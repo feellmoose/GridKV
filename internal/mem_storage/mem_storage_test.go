@@ -849,13 +849,13 @@ func TestMemStorage_EmptyKey(t *testing.T) {
 	}
 
 	err := s.Set("", item)
-	if err != errEmptyKey {
-		t.Errorf("Set() with empty key error = %v, want errEmptyKey", err)
+	if err != ErrEmptyKey {
+		t.Errorf("Set() with empty key error = %v, want ErrEmptyKey", err)
 	}
 
 	_, err = s.Get("")
-	if err != errEmptyKey {
-		t.Errorf("Get() with empty key error = %v, want errEmptyKey", err)
+	if err != ErrEmptyKey {
+		t.Errorf("Get() with empty key error = %v, want ErrEmptyKey", err)
 	}
 }
 

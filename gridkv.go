@@ -34,6 +34,9 @@ var (
 
 	// ErrMemoryLimitExceeded indicates memory limit reached
 	ErrMemoryLimitExceeded = errors.New("memory limit exceeded")
+
+	// ErrEmptyKey indicates an empty key was provided
+	ErrEmptyKey = mem_storage.ErrEmptyKey
 )
 
 // GridKV is the distributed key-value cache instance.
@@ -278,7 +281,7 @@ func (g *GridKV) Set(ctx context.Context, key string, value []byte, ttl ...time.
 		return ErrShuttingDown
 	}
 	if key == "" {
-		return errors.New("key cannot be empty")
+		return ErrEmptyKey
 	}
 
 	// Determine TTL
@@ -335,7 +338,7 @@ func (g *GridKV) Get(ctx context.Context, key string) (value []byte, err error) 
 		return nil, errors.New("GridKV not initialized")
 	}
 	if key == "" {
-		return nil, errors.New("key cannot be empty")
+		return nil, ErrEmptyKey
 	}
 	if g.isShuttingDown() {
 		return nil, ErrShuttingDown
@@ -387,7 +390,7 @@ func (g *GridKV) Delete(ctx context.Context, key string) (err error) {
 		return errors.New("GridKV not initialized")
 	}
 	if key == "" {
-		return errors.New("key cannot be empty")
+		return ErrEmptyKey
 	}
 	if g.isShuttingDown() {
 		return ErrShuttingDown
@@ -398,6 +401,10 @@ func (g *GridKV) Delete(ctx context.Context, key string) (err error) {
 	version := int64(0)
 	if err == nil && item != nil {
 		version = item.Version
+	} else if err != nil && err != mem_storage.ErrNotFound && err != mem_storage.ErrExpired {
+		// If store.Get returns a real error (not "not found"), return it
+		// This shouldn't happen since we check empty key above, but be safe
+		return err
 	}
 
 	// Use Writer to delete
