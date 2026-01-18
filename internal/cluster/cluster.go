@@ -562,7 +562,7 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 		// Use zerocopy to avoid allocation
 		key := zerocopy.BytesToString(data)
 		item, _ := store.Get(key)
-		if item == nil {
+		if item == nil || item.IsTombstone() || len(item.Value) == 0 {
 			return nil, nil
 		}
 		return item.Value, nil
@@ -579,7 +579,7 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 		// Use zerocopy to avoid allocation
 		key := zerocopy.BytesToString(data)
 		item, _ := store.Get(key)
-		if item == nil {
+		if item == nil || item.IsTombstone() || len(item.Value) == 0 {
 			return nil, nil
 		}
 		// Serialize complete StoredItem (including version) using codec format

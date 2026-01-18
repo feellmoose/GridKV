@@ -218,10 +218,14 @@ func (r *reader) Get(ctx context.Context, key string) (*mem_storage.StoredItem, 
 		case <-done:
 			// Remote read completed
 			if err == nil && item != nil && !item.IsTombstone() {
-				// Success, return immediately
-				goto success
-			}
-			if err == nil || err == mem_storage.ErrNotFound || err == mem_storage.ErrExpired {
+				// If value is empty, treat as key not found
+				if len(item.Value) == 0 {
+					hasSuccessfulResponse = true
+				} else {
+					// Success, return immediately
+					goto success
+				}
+			} else if err == nil || err == mem_storage.ErrNotFound || err == mem_storage.ErrExpired {
 				hasSuccessfulResponse = true
 			} else {
 				if lastNetworkErr == nil {
@@ -383,7 +387,7 @@ loop1:
 		select {
 		case res := <-results:
 			count++
-			if res.err == nil && res.item != nil && !res.item.IsTombstone() {
+			if res.err == nil && res.item != nil && !res.item.IsTombstone() && len(res.item.Value) > 0 {
 				items = append(items, res.item)
 				if best == nil || res.item.CompareVersion(best) > 0 {
 					best = res.item
@@ -539,7 +543,7 @@ loop2:
 	for i := 0; i < len(aliveTargets) && successCount < requiredResponses; i++ {
 		select {
 		case res := <-results:
-			if res.err == nil && res.item != nil && !res.item.IsTombstone() {
+			if res.err == nil && res.item != nil && !res.item.IsTombstone() && len(res.item.Value) > 0 {
 				items = append(items, res.item)
 				successCount++
 			}
