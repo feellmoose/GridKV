@@ -302,17 +302,22 @@ func (p *connPool) Get(ctx context.Context, address string) (Conn, error) {
 		ap = &addrPool{}
 		shard.pools[address] = ap
 	}
+	shard.mu.Unlock()
 
-		if n := len(ap.idle); n > 0 {
-			ic := ap.idle[n-1]
-			ap.idle = ap.idle[:n-1]
-			p.activateConn(shard, ap, ic.conn)
-			shard.mu.Unlock()
-			if p.debugEnabled.Load() {
-				p.debugStats.GetSuccess.Add(1)
-			}
-			return ic.conn, nil
+	ap.mu.Lock()
+
+	if n := len(ap.idle); n > 0 {
+		ic := ap.idle[n-1]
+		ap.idle = ap.idle[:n-1]
+		ap.mu.Unlock()
+		shard.mu.Lock()
+		p.activateConn(shard, ap, ic.conn)
+		shard.mu.Unlock()
+		if p.debugEnabled.Load() {
+			p.debugStats.GetSuccess.Add(1)
 		}
+		return ic.conn, nil
+	}
 
 	if p.cfg.MaxActive > 0 && ap.active >= p.cfg.MaxActive {
 		if p.cfg.WaitTimeout > 0 {
@@ -320,7 +325,7 @@ func (p *connPool) Get(ctx context.Context, address string) (Conn, error) {
 			ap.waiters = append(ap.waiters, waiter)
 			waitersCount := len(ap.waiters)
 			atomic.AddInt64(&p.stats.Waiters, 1)
-			shard.mu.Unlock()
+			ap.mu.Unlock()
 
 			waitTimeout := p.cfg.WaitTimeout
 			if waitersCount > 100 {
@@ -358,7 +363,7 @@ func (p *connPool) Get(ctx context.Context, address string) (Conn, error) {
 				return nil, ctx.Err()
 			}
 		} else {
-			shard.mu.Unlock()
+			ap.mu.Unlock()
 			if p.debugEnabled.Load() {
 				p.debugStats.GetExhausted.Add(1)
 			}
@@ -368,15 +373,15 @@ func (p *connPool) Get(ctx context.Context, address string) (Conn, error) {
 	ap.active++
 	atomic.AddInt64(&p.stats.Active, 1)
 	atomic.AddUint64(&p.stats.Created, 1)
-	shard.mu.Unlock()
+	ap.mu.Unlock()
 
 	conn, err := p.cfg.Transport.Dial(ctx, address)
 	if err != nil {
-		shard.mu.Lock()
+		ap.mu.Lock()
 		ap.active--
+		ap.mu.Unlock()
 		atomic.AddInt64(&p.stats.Active, -1)
 		atomic.AddUint64(&p.stats.Errors, 1)
-		shard.mu.Unlock()
 		if p.debugEnabled.Load() {
 			p.debugStats.GetDialError.Add(1)
 		}
@@ -394,15 +399,17 @@ func (p *connPool) Get(ctx context.Context, address string) (Conn, error) {
 }
 
 func (p *connPool) activateConn(shard *poolShard, ap *addrPool, conn Conn) {
+	ap.mu.Lock()
 	ap.active++
+	ap.mu.Unlock()
 	atomic.AddInt64(&p.stats.Active, 1)
 	atomic.AddInt64(&p.stats.Idle, -1)
 	shard.active[conn] = struct{}{}
 }
 
 func (p *connPool) removeWaiter(shard *poolShard, ap *addrPool, waiter chan struct{}) {
-	shard.mu.Lock()
-	defer shard.mu.Unlock()
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
 	
 	for i, w := range ap.waiters {
 		if w == waiter {
@@ -440,7 +447,9 @@ func (p *connPool) Put(conn Conn) {
 		ap = &addrPool{}
 		shard.pools[addr] = ap
 	}
+	shard.mu.Unlock()
 
+	ap.mu.Lock()
 	ap.active--
 	atomic.AddInt64(&p.stats.Active, -1)
 	
@@ -448,7 +457,7 @@ func (p *connPool) Put(conn Conn) {
 		if !p.isConnectionHealthy(conn) {
 			atomic.AddUint64(&p.stats.Closed, 1)
 			atomic.AddInt64(&p.stats.Total, -1)
-			shard.mu.Unlock()
+			ap.mu.Unlock()
 			_ = conn.Close()
 			return
 		}
@@ -470,7 +479,7 @@ func (p *connPool) Put(conn Conn) {
 			waiters := ap.waiters[:batchSize]
 			ap.waiters = ap.waiters[batchSize:]
 			atomic.AddInt64(&p.stats.Waiters, -int64(batchSize))
-			shard.mu.Unlock()
+			ap.mu.Unlock()
 			for _, waiter := range waiters {
 				select {
 				case waiter <- struct{}{}:
@@ -479,13 +488,13 @@ func (p *connPool) Put(conn Conn) {
 			}
 			return
 		}
-		shard.mu.Unlock()
+		ap.mu.Unlock()
 		return
 	}
 	
+	ap.mu.Unlock()
 	atomic.AddUint64(&p.stats.Closed, 1)
 	atomic.AddInt64(&p.stats.Total, -1)
-	shard.mu.Unlock()
 	_ = conn.Close()
 	if p.debugEnabled.Load() {
 		p.debugStats.PutClosed.Add(1)
@@ -509,7 +518,9 @@ func (p *connPool) Remove(conn Conn) {
 		_ = conn.Close()
 		return
 	}
+	shard.mu.Unlock()
 
+	ap.mu.Lock()
 	if ap.active > 0 {
 		ap.active--
 		atomic.AddInt64(&p.stats.Active, -1)
@@ -522,9 +533,9 @@ func (p *connPool) Remove(conn Conn) {
 			}
 		}
 	}
+	ap.mu.Unlock()
 	atomic.AddInt64(&p.stats.Total, -1)
 	atomic.AddUint64(&p.stats.Closed, 1)
-	shard.mu.Unlock()
 	logging.Debug("connPool: removed connection", "remote", addr)
 	_ = conn.Close()
 }

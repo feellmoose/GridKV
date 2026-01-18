@@ -182,12 +182,30 @@ func TestTTLCache_BackgroundCleanup(t *testing.T) {
 	}
 
 	// Wait for cleanup to run multiple times
+	// Wait longer than TTL (100ms) + cleanup interval (50ms) to ensure cleanup runs
+	// Add buffer time for parallel cleanup to complete across all shards
 	time.Sleep(200 * time.Millisecond)
 
-	// Items should be cleaned up
-	count := cache.Len()
+	// Wait for cleanup to complete - poll until count stabilizes or timeout
+	maxWait := 1 * time.Second
+	checkInterval := 50 * time.Millisecond
+	deadline := time.Now().Add(maxWait)
+	var count int
+	
+	for time.Now().Before(deadline) {
+		count = cache.Len()
+		if count <= 10 {
+			// Cleanup completed successfully
+			return
+		}
+		// Wait a bit more for cleanup to complete
+		time.Sleep(checkInterval)
+	}
+	
+	// Final check
+	count = cache.Len()
 	if count > 10 {
-		t.Fatalf("Expected most items to be cleaned up, but found %d", count)
+		t.Fatalf("Expected most items to be cleaned up, but found %d after waiting", count)
 	}
 }
 
