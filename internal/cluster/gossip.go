@@ -50,8 +50,9 @@ type gossip struct {
 	stopOnce     sync.Once
 	wg           sync.WaitGroup
 
-	sendFunc func(address string, data []byte) error
-	recvFunc func() ([]byte, error)
+	sendFunc     func(address string, data []byte) error
+	pullSendFunc func(address string, data []byte) error
+	recvFunc     func() ([]byte, error)
 
 	member MemberMgr // For selecting random targets
 }
@@ -65,6 +66,7 @@ type gossipConfig struct {
 	Interval     time.Duration
 	HLC          *hlc.HLC
 	SendFunc     func(address string, data []byte) error
+	PullSendFunc func(address string, data []byte) error
 	RecvFunc     func() ([]byte, error)
 	Member       MemberMgr
 }
@@ -87,8 +89,13 @@ func newGossip(cfg gossipConfig) (*gossip, error) {
 		interval:     cfg.Interval,
 		stopCh:       make(chan struct{}),
 		sendFunc:     cfg.SendFunc,
+		pullSendFunc: cfg.PullSendFunc,
 		recvFunc:     cfg.RecvFunc,
 		member:       cfg.Member,
+	}
+	// Use sendFunc as fallback for pullSendFunc if not provided
+	if g.pullSendFunc == nil {
+		g.pullSendFunc = g.sendFunc
 	}
 
 	return g, nil
@@ -137,7 +144,6 @@ func (g *gossip) gossipLoop() {
 				g.doGossip()
 			}); err != nil {
 				consecutiveFailures++
-				// On executor failures, increase frequency temporarily for high concurrency
 				if consecutiveFailures >= 3 && g.interval > 50*time.Millisecond {
 					g.interval = g.interval / 2
 					if g.interval < 50*time.Millisecond {
@@ -300,7 +306,6 @@ func (g *gossip) Push(ops []*mem_storage.SyncOperation, targets []string) error 
 
 func (g *gossip) pushToTarget(target string, data []byte, maxRetries int) {
 	if g.sendFunc == nil {
-		// Removed debug log "Gossip pushToTarget: no sendFunc" - too verbose
 		return
 	}
 
@@ -362,7 +367,6 @@ func (g *gossip) pushToTarget(target string, data []byte, maxRetries int) {
 			time.Sleep(backoff)
 		}
 	}
-	// Removed debug log "Gossip pushToTarget exhausted retries" - too verbose
 }
 
 func isConnectionRefused(err error) bool {
@@ -375,7 +379,7 @@ func isConnectionRefused(err error) bool {
 }
 
 func (g *gossip) Pull(target string) ([]*mem_storage.SyncOperation, error) {
-	if g.sendFunc == nil {
+	if g.pullSendFunc == nil {
 		return nil, nil
 	}
 
@@ -401,7 +405,7 @@ func (g *gossip) Pull(target string) ([]*mem_storage.SyncOperation, error) {
 	pullReq := make([]byte, len(pullPrefix)+len(data))
 	copy(pullReq, pullPrefix)
 	copy(pullReq[len(pullPrefix):], data)
-	if err := g.sendFunc(target, pullReq); err != nil {
+	if err := g.pullSendFunc(target, pullReq); err != nil {
 		return nil, err
 	}
 
@@ -412,7 +416,6 @@ func (g *gossip) applyOps(ops []*mem_storage.SyncOperation) error {
 	if len(ops) == 0 {
 		return nil
 	}
-	// Removed frequent debug log "Gossip applyOps large batch" - too verbose for production
 
 	// Cache replica checks to reduce ring lookups
 	keyReplicaCache := make(map[string]bool, len(ops))
@@ -463,7 +466,6 @@ func (g *gossip) applyOps(ops []*mem_storage.SyncOperation) error {
 		appliedCount++
 	}
 
-	// Removed frequent debug log "Gossip applyOps completed" - too verbose for production
 	return nil
 }
 
@@ -473,7 +475,6 @@ func (g *gossip) applyOps(ops []*mem_storage.SyncOperation) error {
 //   - Pull: "PULL:nodeID:" + serializedOps
 func (g *gossip) HandleMessage(data []byte) error {
 	if len(data) < 5 {
-		// Removed frequent debug log "Gossip HandleMessage: message too short" - too verbose
 		return nil
 	}
 
@@ -483,7 +484,6 @@ func (g *gossip) HandleMessage(data []byte) error {
 	isPull := len(data) >= 5 && data[0] == 'P' && data[1] == 'U' && data[2] == 'L' && data[3] == 'L' && data[4] == ':'
 
 	if !isPush && !isPull {
-		// Removed frequent debug log "Gossip HandleMessage: unknown message format" - too verbose
 		return nil
 	}
 
@@ -510,7 +510,6 @@ func (g *gossip) HandleMessage(data []byte) error {
 			if err == nil && len(remoteOps) > 0 {
 				// Apply remote operations (error ignored as this is async gossip path)
 				if err := g.applyOps(remoteOps); err != nil {
-					// Removed debug log "Failed to apply remote ops in gossip pull" - too verbose
 				}
 			}
 		}
@@ -550,7 +549,6 @@ func (g *gossip) HandleMessage(data []byte) error {
 				copy(responseMsg[len(pushPrefix):], serializedData)
 				// Send response (error ignored as this is async gossip path)
 				if err := g.sendFunc(targetAddr, responseMsg); err != nil {
-					// Removed debug log "Failed to send gossip pull response" - too verbose
 				}
 			})
 		}

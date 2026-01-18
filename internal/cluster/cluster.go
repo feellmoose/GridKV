@@ -209,11 +209,28 @@ func New(cfg Config) (*Cluster, error) {
 	updateRing()
 
 	// Create gossip (after member is created)
+	// Need separate send functions for Push and Pull to use correct message types
 	var gossipSendFunc func(address string, data []byte) error
+	var gossipPullSendFunc func(address string, data []byte) error
 	if net != nil {
 		gossipSendFunc = func(address string, data []byte) error {
 			netMsg := &network.Message{
 				Type:      network.ClusterMessageTypes.GossipPush,
+				ID:        uint64(time.Now().UnixNano()),
+				Data:      data,
+				Timestamp: time.Now().UnixNano(),
+			}
+			encoded, err := network.EncodeMessage(netMsg)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return net.Send(ctx, address, encoded)
+		}
+		gossipPullSendFunc = func(address string, data []byte) error {
+			netMsg := &network.Message{
+				Type:      network.ClusterMessageTypes.GossipPull,
 				ID:        uint64(time.Now().UnixNano()),
 				Data:      data,
 				Timestamp: time.Now().UnixNano(),
@@ -236,6 +253,7 @@ func New(cfg Config) (*Cluster, error) {
 			}
 			return rawSendFunc(address, data)
 		}
+		gossipPullSendFunc = gossipSendFunc // Fallback to same function when network is nil
 	}
 
 	gossip, err := newGossip(gossipConfig{
@@ -248,6 +266,7 @@ func New(cfg Config) (*Cluster, error) {
 		Interval:     cfg.GossipInterval,
 		Member:       member,
 		SendFunc:     gossipSendFunc,
+		PullSendFunc: gossipPullSendFunc,
 	})
 	if err != nil {
 		return nil, err
@@ -396,13 +415,20 @@ func createGetFunc(net network.Network, member *memberMgr, store *mem_storage.Me
 		ctx, cancel := context.WithTimeout(context.Background(), 3000*time.Millisecond)
 		defer cancel()
 
-		respData, err := net.Request(ctx, address, []byte(key), 2*time.Second)
+		reqMsg := &network.Message{
+			Type:      network.MessageTypeReadRequest,
+			ID:        uint64(time.Now().UnixNano()),
+			Data:      []byte(key),
+			Timestamp: time.Now().UnixNano(),
+		}
+		respMsg, err := net.RequestMessage(ctx, address, reqMsg, 2*time.Second)
 		if err != nil {
-			return nil, fmt.Errorf("remote read failed for key %s on node %s: %w", key, nodeID, err)
+			return nil, err
 		}
-		if len(respData) == 0 {
-			return nil, nil // Key not found
+		if respMsg == nil || len(respMsg.Data) == 0 {
+			return nil, nil
 		}
+		respData := respMsg.Data
 
 		// Deserialize StoredItem from response (includes version from remote node)
 		// Format: keyLen(2) + key + version(8) + opType(1) + expireAt(8) + valueLen(4) + value
@@ -492,7 +518,6 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 			return nil, nil
 		}
 		if err := member.HandleMessage(decoded); err != nil {
-			// Removed frequent debug log "failed to handle CONNECT message" - too verbose
 		}
 		return nil, nil
 	}); err != nil {
@@ -504,7 +529,6 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 		if decoded != nil {
 			// Handle message (error ignored as this is async message handling)
 			if err := member.HandleMessage(decoded); err != nil {
-				// Removed frequent debug log "Failed to handle leave message" - too verbose
 			}
 		}
 		return nil, nil
@@ -513,12 +537,8 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 	}
 
 	// Gossip message handlers
-	// Note: Gossip messages use prefix format ("PUSH:" or "PULL:nodeID:")
-	// The network layer passes Message.Data directly to handlers
 	if err := net.RegisterMessageHandler(network.MessageTypeGossipPush, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
-		// Handle gossip message (error ignored as this is async message handling)
 		if err := gossip.HandleMessage(data); err != nil {
-			// Removed frequent debug log "Failed to handle gossip push message" - too verbose
 		}
 		return nil, nil
 	}); err != nil {
@@ -528,7 +548,6 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 	if err := net.RegisterMessageHandler(network.MessageTypeGossipPull, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		// Handle gossip message (error ignored as this is async message handling)
 		if err := gossip.HandleMessage(data); err != nil {
-			// Removed frequent debug log "Failed to handle gossip pull message" - too verbose
 		}
 		return nil, nil
 	}); err != nil {
