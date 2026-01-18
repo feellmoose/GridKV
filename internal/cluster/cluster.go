@@ -727,9 +727,6 @@ func (c *Cluster) Set(ctx context.Context, key string, value []byte) error {
 func (c *Cluster) Get(ctx context.Context, key string) ([]byte, error) {
 	item, err := c.reader.Get(ctx, key)
 	if err != nil {
-		if errors.Is(err, mem_storage.ErrNotFound) {
-			return nil, nil
-		}
 		return nil, err
 	}
 	if item == nil {

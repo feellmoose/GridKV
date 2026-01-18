@@ -10,8 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	gridkv "github.com/feellmoose/gridkv"
 )
 
 // WorkloadConfig defines configuration for workload execution
@@ -260,15 +258,14 @@ func (we *WorkloadExecutor) executeOperation(workerID int, rng *rand.Rand) {
 		} else {
 			_, err = node.Get(we.ctx, key)
 			if err == nil {
+				// err == nil means operation succeeded (whether key was found or not)
+				// Return nil, nil for not found is treated as success (not an error)
 				atomic.AddInt64(&we.opsCompleted, 1)
 				return
 			}
+			// err != nil means real error (network, timeout, etc.)
 			lastErr = err
-			if err != gridkv.ErrItemNotFound {
-				atomic.AddInt64(&we.getFailed, 1)
-			} else {
-				atomic.AddInt64(&we.opsCompleted, 1)
-			}
+			atomic.AddInt64(&we.getFailed, 1)
 			break
 		}
 
@@ -285,8 +282,6 @@ func (we *WorkloadExecutor) executeOperation(workerID int, rng *rand.Rand) {
 		if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline") {
 			atomic.AddInt64(&we.timeoutFailed, 1)
 		}
-	}
-	if lastErr != gridkv.ErrItemNotFound {
 		atomic.AddInt64(&we.opsFailed, 1)
 	}
 }

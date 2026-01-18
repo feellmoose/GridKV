@@ -29,12 +29,6 @@ var (
 	// ErrShuttingDown indicates the node has begun graceful shutdown
 	ErrShuttingDown = errors.New("gridkv shutting down")
 
-	// ErrItemNotFound indicates the requested key was not found
-	ErrItemNotFound = mem_storage.ErrNotFound
-
-	// ErrItemExpired indicates the requested item has expired
-	ErrItemExpired = mem_storage.ErrExpired
-
 	// ErrVersionMismatch indicates a version conflict
 	ErrVersionMismatch = errors.New("version mismatch")
 
@@ -321,7 +315,12 @@ func (g *GridKV) Set(ctx context.Context, key string, value []byte, ttl ...time.
 //
 // Reads locally if available, otherwise forwards to coordinator with retries.
 // Returns freshest value, triggers read-repair on version mismatch.
-// Returns deep copy. Panic-safe, thread-safe.
+// Returns deep copy.
+//
+// If the key is not found, returns (nil, nil). Only returns an error for
+// real failures (network errors, timeouts, etc.).
+//
+// Panic-safe, thread-safe.
 func (g *GridKV) Get(ctx context.Context, key string) (value []byte, err error) {
 	// SAFETY: Recover from panics
 	defer func() {
@@ -347,30 +346,23 @@ func (g *GridKV) Get(ctx context.Context, key string) (value []byte, err error) 
 
 	item, err := reader.Get(ctx, key)
 	if err != nil {
-		// mem_storage may return ErrNotFound or ErrExpired
-		if err == mem_storage.ErrNotFound || err == mem_storage.ErrExpired {
-			return nil, ErrItemNotFound
-		}
 		return nil, err
 	}
+
 	if item == nil {
-		return nil, ErrItemNotFound
+		return nil, nil
 	}
 
-	// Check if tombstone FIRST (before expiration check)
-	// Tombstone has Version > 0 but empty Value
 	if item.IsTombstone() {
-		return nil, ErrItemNotFound
+		return nil, nil
 	}
 
-	// Check expiration
 	if item.IsExpired() {
-		return nil, ErrItemExpired
+		return nil, nil
 	}
 
-	// Return deep copy - ensure Value is not empty
 	if len(item.Value) == 0 {
-		return nil, ErrItemNotFound
+		return nil, nil
 	}
 
 	value = make([]byte, len(item.Value))

@@ -511,10 +511,9 @@ func TestReader_BoundaryConditions(t *testing.T) {
 		t.Error("Expected error with empty key, got nil")
 	}
 
-	// Test non-existent key
 	_, err = reader.Get(ctx, "non-existent-key")
-	if err == nil {
-		t.Error("Expected error with non-existent key, got nil")
+	if err != nil {
+		t.Errorf("Get(non-existent-key) error = %v, want nil", err)
 	}
 
 	// Test very long key
