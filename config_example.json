@@ -1,0 +1,37 @@
+{
+  "local_node_id": "node-1",
+  "local_address": "localhost:8080",
+  "seed_addrs": ["localhost:8081", "localhost:8082"],
+  "ttl": "1h",
+  "hot_read_cache_ttl": "5m",
+  "virtual_nodes": 128,
+  "replica_count": 3,
+  "read_repair_rate_limit_per_sec": 1000,
+  "failure_timeout": "5s",
+  "suspect_timeout": "2.5s",
+  "gossip_interval": "200ms",
+  "replication_timeout": "2s",
+  "read_timeout": "5s",
+  "startup_grace_period": "1s",
+  "disable_auth": false,
+  "batch_threshold": 10,
+  "batch_window": "10ms",
+  "network": {
+    "type": "tcp",
+    "bind_addr": "localhost:8080",
+    "max_idle": 32,
+    "max_conns": 128,
+    "timeout": "10s",
+    "read_timeout": "5s",
+    "write_timeout": "5s"
+  },
+  "storage": {
+    "max_memory_mb": 1024,
+    "shard_count": 16
+  },
+  "log": {
+    "level": "info",
+    "format": "text",
+    "no_caller": true
+  }
+}

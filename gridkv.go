@@ -22,7 +22,7 @@ import (
 )
 
 // Version represents the current version of GridKV
-const Version = "v0.3.6"
+const Version = "v0.3.8"
 
 // Error constants exported for application error handling
 var (
@@ -54,27 +54,46 @@ type GridKV struct {
 	shuttingDown atomic.Bool
 }
 
-func (g *GridKV) GetNetwork() network.Network {
-	return g.network
-}
-
 // NewGridKV initializes a GridKV instance with the provided options.
-//
-// Required fields: LocalNodeID, LocalAddress
-// Optional fields: Use Profile for automatic configuration
 //
 // Example:
 //
-//	opts := &gridkv.GridKVOptions{
-//	    LocalNodeID:  "node-1",
-//	    LocalAddress: "localhost:8080",
-//	    SeedAddrs:    []string{"localhost:8081"},
-//	}
-//	kv, err := gridkv.NewGridKV(opts)
-func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
-	if opts == nil {
-		return nil, errors.New("GridKVOptions cannot be nil")
+//	kv, err := gridkv.NewGridKV(
+//		gridkv.WithLocalNodeID("node-1"),
+//		gridkv.WithLocalAddress("localhost:8080"),
+//		gridkv.WithSeedAddrs("localhost:8081"),
+//	)
+//
+// Required fields: LocalNodeID, LocalAddress
+func NewGridKV(options ...interface{}) (*GridKV, error) {
+	var opts *Options
+
+	if len(options) == 0 {
+		return nil, errors.New("options required")
 	}
+
+	switch v := options[0].(type) {
+	case *Options:
+		if len(options) > 1 {
+			return nil, errors.New("cannot mix Options struct with functional options")
+		}
+		opts = v
+	default:
+		opts = &Options{}
+		for _, opt := range options {
+			if fn, ok := opt.(Option); ok {
+				fn(opts)
+			} else {
+				return nil, fmt.Errorf("invalid option type: %T, expected *Options or Option function", opt)
+			}
+		}
+	}
+
+	if opts == nil {
+		return nil, errors.New("options cannot be nil")
+	}
+
+	applyDefaults(opts)
 
 	if opts.LocalNodeID == "" {
 		return nil, errors.New("LocalNodeID is required")
@@ -82,8 +101,6 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 	if opts.LocalAddress == "" {
 		return nil, errors.New("LocalAddress is required")
 	}
-
-	applyDefaults(opts)
 
 	switch v := opts.Log.(type) {
 	case LoggerOptions:
@@ -124,7 +141,6 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 	}
 	// Note: store.Close() is now managed by lifecycle, but we keep CloseNoContext() for backward compatibility
 
-	// Use BindAddr if provided, otherwise use LocalAddress
 	bindAddr := opts.LocalAddress
 	if opts.Network != nil && opts.Network.BindAddr != "" {
 		bindAddr = opts.Network.BindAddr
@@ -169,7 +185,6 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 		return nil, fmt.Errorf("failed to create network: %w", err)
 	}
 
-	// Use bindAddr for cluster config to ensure consistency
 	clusterConfig := cluster.Config{
 		NodeID:  opts.LocalNodeID,
 		Address: bindAddr,
@@ -177,29 +192,22 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 		HLC:     hlcInstance,
 		Network: net,
 
-		// Membership
 		PingInterval:   opts.FailureTimeout / 3,
 		FailureTimeout: opts.FailureTimeout,
 		SuspectTimeout: opts.SuspectTimeout,
 
-		// Hash ring
 		VirtualNodes: opts.VirtualNodes,
 		ReplicaCount: opts.ReplicaCount,
 
-		// Writer
 		BatchThreshold: opts.BatchThreshold,
 		BatchWindow:    opts.BatchWindow,
 
-		// Gossip
 		GossipInterval: opts.GossipInterval,
 
-		// Reader
 		CacheTTL: opts.HotReadCacheTTL,
 
-		// Anti-entropy
 		EntropyInterval: 5 * time.Minute,
 
-		// Read repair
 		ReadRepairRateLimitPerSec: opts.ReadRepairRateLimitPerSec,
 	}
 
@@ -228,8 +236,6 @@ func NewGridKV(opts *GridKVOptions) (*GridKV, error) {
 		return nil, fmt.Errorf("failed to start cluster: %w", err)
 	}
 
-	// Start Join asynchronously if seed addresses provided
-	// No delay needed - network.Start() is synchronous and server is ready immediately
 	if len(opts.SeedAddrs) > 0 {
 		go func() {
 			maxRetries := 5
@@ -478,20 +484,6 @@ func (g *GridKV) Stats() Stats {
 		Version: Version,
 	}
 }
-
-// ClusterStats returns only cluster statistics (backward compatibility).
-// Thread-safe.
-func (g *GridKV) ClusterStats() ClusterStats {
-	return g.Stats().Cluster
-}
-
-// Status is deprecated, use Stats instead.
-func (g *GridKV) Status() Stats {
-	return g.Stats()
-}
-
-// ReplicaStatus is deprecated, use ClusterStats instead.
-type ReplicaStatus = ClusterStats
 
 // WaitReady blocks until cluster is ready or timeout.
 func (g *GridKV) WaitReady(timeout time.Duration) error {

@@ -111,19 +111,19 @@ func collectSnapshot(sim *Simulator) PoolMetricsSnapshot {
 
 		poolDebugStats := pool.DebugStats()
 		debugStats = PoolDebugStatsSummary{
-			GetAttempts:      poolDebugStats.GetAttempts.Load(),
-			GetSuccess:       poolDebugStats.GetSuccess.Load(),
-			GetExhausted:     poolDebugStats.GetExhausted.Load(),
-			GetTimeout:       poolDebugStats.GetTimeout.Load(),
-			GetContextCancel: poolDebugStats.GetContextCancel.Load(),
-			GetDialError:     poolDebugStats.GetDialError.Load(),
-			PutAttempts:      poolDebugStats.PutAttempts.Load(),
-			PutSuccess:       poolDebugStats.PutSuccess.Load(),
-			PutClosed:        poolDebugStats.PutClosed.Load(),
-			WaitQueueLength:  poolDebugStats.WaitQueueLength.Load(),
-			MaxWaitQueueLen:  poolDebugStats.MaxWaitQueueLen.Load(),
-			ActiveConnPeak:   poolDebugStats.ActiveConnPeak.Load(),
-			IdleConnPeak:     poolDebugStats.IdleConnPeak.Load(),
+			GetAttempts:      poolDebugStats.GetAttempts,
+			GetSuccess:       poolDebugStats.GetSuccess,
+			GetExhausted:     poolDebugStats.GetExhausted,
+			GetTimeout:       poolDebugStats.GetTimeout,
+			GetContextCancel: poolDebugStats.GetContextCancel,
+			GetDialError:     poolDebugStats.GetDialError,
+			PutAttempts:      poolDebugStats.PutAttempts,
+			PutSuccess:       poolDebugStats.PutSuccess,
+			PutClosed:        poolDebugStats.PutClosed,
+			WaitQueueLength:  poolDebugStats.WaitQueueLength,
+			MaxWaitQueueLen:  poolDebugStats.MaxWaitQueueLen,
+			ActiveConnPeak:   poolDebugStats.ActiveConnPeak,
+			IdleConnPeak:     poolDebugStats.IdleConnPeak,
 		}
 	}
 

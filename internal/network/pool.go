@@ -15,7 +15,7 @@ type ConnPool interface {
 	Remove(conn Conn)
 	Close() error
 	Stats() PoolStats
-	DebugStats() PoolDebugStats
+	DebugStats() PoolDebugStatsSnapshot
 }
 
 type PoolStats struct {
