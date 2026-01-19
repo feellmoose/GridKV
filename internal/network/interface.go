@@ -210,17 +210,18 @@ func (n *networkImpl) Close(ctx context.Context) error {
 		}
 	}
 
-	// Close client and connection pool
-	if n.client != nil {
-		if err := n.client.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("client close failed: %w", err))
-		}
-	}
-
-	// Close connection pool explicitly
+	// Close connection pool (client.Close() calls pool.Close(), but we want explicit control)
+	// Using sync.Once in pool ensures idempotency even if called multiple times
 	if n.pool != nil {
 		if err := n.pool.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("pool close failed: %w", err))
+		}
+	}
+
+	// Close client (may call pool.Close() again, but sync.Once protects it)
+	if n.client != nil {
+		if err := n.client.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("client close failed: %w", err))
 		}
 	}
 

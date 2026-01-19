@@ -67,6 +67,7 @@ type connPool struct {
 	stats       PoolStats
 	closed      int32
 	cleanupDone chan struct{}
+	closeOnce   sync.Once // Protect Close from being called multiple times
 
 	waitTimeEMA    atomic.Uint64
 	waitTimeCount  atomic.Uint64
@@ -538,77 +539,84 @@ func (p *connPool) Remove(conn Conn) {
 }
 
 func (p *connPool) Close() error {
-	atomic.StoreInt32(&p.closed, 1)
-
-	if p.cleanupDone != nil {
-		select {
-		case p.cleanupDone <- struct{}{}:
-		default:
-		}
-	}
-
 	var firstErr error
-	var wg sync.WaitGroup
+	var firstErrOnce sync.Once
 
-	for _, shard := range p.shards {
-		shard.mu.Lock()
-		var allConns []Conn
-		for _, ap := range shard.pools {
-			for _, ic := range ap.idle {
-				allConns = append(allConns, ic.conn)
+	p.closeOnce.Do(func() {
+		atomic.StoreInt32(&p.closed, 1)
+
+		if p.cleanupDone != nil {
+			select {
+			case p.cleanupDone <- struct{}{}:
+			default:
 			}
 		}
-		for conn := range shard.active {
-			allConns = append(allConns, conn)
-		}
-		shard.pools = make(map[string]*addrPool)
-		shard.active = make(map[Conn]struct{})
-		shard.mu.Unlock()
 
-		if len(allConns) > 0 {
-			const maxWorkers = 50
-			connCh := make(chan Conn, len(allConns))
-			for _, c := range allConns {
-				connCh <- c
+		var wg sync.WaitGroup
+
+		for _, shard := range p.shards {
+			shard.mu.Lock()
+			var allConns []Conn
+			for _, ap := range shard.pools {
+				for _, ic := range ap.idle {
+					allConns = append(allConns, ic.conn)
+				}
 			}
-			close(connCh)
-
-			workerCount := len(allConns)
-			if workerCount > maxWorkers {
-				workerCount = maxWorkers
+			for conn := range shard.active {
+				allConns = append(allConns, conn)
 			}
+			shard.pools = make(map[string]*addrPool)
+			shard.active = make(map[Conn]struct{})
+			shard.mu.Unlock()
 
-			for i := 0; i < workerCount; i++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for conn := range connCh {
-						if err := conn.Close(); err != nil && firstErr == nil {
-							firstErr = err
+			if len(allConns) > 0 {
+				const maxWorkers = 50
+				connCh := make(chan Conn, len(allConns))
+				for _, c := range allConns {
+					connCh <- c
+				}
+				close(connCh)
+
+				workerCount := len(allConns)
+				if workerCount > maxWorkers {
+					workerCount = maxWorkers
+				}
+
+				for i := 0; i < workerCount; i++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						for conn := range connCh {
+							if err := conn.Close(); err != nil {
+								// Thread-safe error capture using sync.Once
+								firstErrOnce.Do(func() {
+									firstErr = err
+								})
+							}
 						}
-					}
-				}()
+					}()
+				}
 			}
 		}
-	}
 
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-	}
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+		}
 
-	atomic.StoreInt64(&p.stats.Total, 0)
-	atomic.StoreInt64(&p.stats.Active, 0)
-	atomic.StoreInt64(&p.stats.Idle, 0)
-	atomic.StoreInt64(&p.stats.Waiters, 0)
-	atomic.StoreUint64(&p.stats.Created, 0)
-	atomic.StoreUint64(&p.stats.Closed, 0)
-	atomic.StoreUint64(&p.stats.Errors, 0)
+		atomic.StoreInt64(&p.stats.Total, 0)
+		atomic.StoreInt64(&p.stats.Active, 0)
+		atomic.StoreInt64(&p.stats.Idle, 0)
+		atomic.StoreInt64(&p.stats.Waiters, 0)
+		atomic.StoreUint64(&p.stats.Created, 0)
+		atomic.StoreUint64(&p.stats.Closed, 0)
+		atomic.StoreUint64(&p.stats.Errors, 0)
+	})
 	return firstErr
 }
 

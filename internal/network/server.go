@@ -97,6 +97,7 @@ type networkServer struct {
 		ActiveConns atomic.Int64
 	}
 	stopOnce    sync.Once
+	connChOnce  sync.Once // Protect connCh close from multiple calls
 	stopCh      chan struct{}
 	wg          sync.WaitGroup
 	activeConns sync.Map  // map[Conn]struct{} - track active connections
@@ -154,13 +155,6 @@ func (s *networkServer) acceptLoop() {
 	for {
 		select {
 		case <-s.stopCh:
-			// Close connCh to signal workers to stop (only once)
-			select {
-			case <-s.connCh:
-				// Channel already closed or being closed
-			default:
-				close(s.connCh)
-			}
 			return
 		default:
 		}
@@ -302,12 +296,28 @@ func (s *networkServer) Stop(ctx context.Context) error {
 			err = s.listener.Close()
 		}
 
-		// Wait a brief moment for acceptLoop to exit and any in-flight Accept() calls to complete
-		// This prevents new connections from being added after we start collecting connections
-		time.Sleep(10 * time.Millisecond)
+		// Close connCh to signal workers to stop (must be done here to ensure it's closed)
+		s.connChOnce.Do(func() {
+			close(s.connCh)
+		})
 
-		// Force close all active connections to unblock Receive() calls
-		// First, collect all connections to avoid race conditions with concurrent deletions
+		// Wait for acceptLoop to exit
+		acceptDone := make(chan struct{})
+		go func() {
+			s.wg.Wait()
+			close(acceptDone)
+		}()
+
+		// Wait for accept loop with timeout, but don't block indefinitely
+		select {
+		case <-acceptDone:
+		case <-ctx.Done():
+		case <-time.After(100 * time.Millisecond):
+			// Timeout waiting for accept loop, proceed anyway
+		}
+
+		// Force close all active connections to unblock Receive() calls in handleConn
+		// This ensures workers can exit even if blocked in Receive()
 		deadline := time.Now().Add(-1 * time.Second) // Past time to force immediate timeout
 		var conns []Conn
 		s.activeConns.Range(func(key, value interface{}) bool {
@@ -317,21 +327,20 @@ func (s *networkServer) Stop(ctx context.Context) error {
 			return true
 		})
 
-		// Close all collected connections synchronously
+		// Close all collected connections to unblock Receive() calls
 		for _, conn := range conns {
 			// Set read deadline to force immediate timeout on blocked Receive() calls
 			_ = conn.SetReadDeadline(deadline)
-			// Close connection synchronously for immediate effect
+			// Close connection to unblock any blocked operations
 			conn.Close()
 		}
 
-		// Wait for all goroutines with timeout
+		// Wait for all worker goroutines to exit after connections are closed
 		// Use context timeout or extended timeout, whichever is shorter
-		done := make(chan struct{})
+		workerDone := make(chan struct{})
 		go func() {
-			s.wg.Wait()       // Wait for accept loop
-			s.workerWg.Wait() // Wait for worker pool
-			close(done)
+			s.workerWg.Wait()
+			close(workerDone)
 		}()
 
 		// Calculate timeout based on context
@@ -344,8 +353,8 @@ func (s *networkServer) Stop(ctx context.Context) error {
 		}
 
 		select {
-		case <-done:
-			// All goroutines exited
+		case <-workerDone:
+			// All worker goroutines exited
 		case <-ctx.Done():
 			// Context timeout, return anyway
 		case <-time.After(waitTimeout):
