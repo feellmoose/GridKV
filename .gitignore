@@ -1,8 +1,61 @@
-.vscode
-.cursor
-.idea
-.env
-.venv
-target
+# IDE and Editor Files
+.vscode/
+.cursor/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
 
+# Environment and Configuration Files
+.env
+.env.local
+.env.*.local
+.venv/
+venv/
+
+# Build Artifacts and Temporary Files
+target/
+tmp/
+temp/
+*.tmp
+
+# cgo build artifacts
+# Shared libraries (.so on Linux, .dylib on macOS, .dll on Windows)
+**/*.so
+**/*.dylib
+**/*.dll
+**/*.a
+
+# CGO specific files
+**/libgridkv_cgo.so
+**/libgridkv_cgo.h
+**/_cgo_wrapper/
+
+# Compiled C test programs
+**/test_c
+**/*.o
+
+# binary artifacts
+# Executables
+*.exe
+*.exe~
+*.out
+*.test
+
+# Test coverage
+*.cover
+coverage.html
+coverage.out
+
+# Go workspace files
+go.work
+go.work.sum
+
+# project specific files
+# Checkpoint files (runtime state)
 **/*/checkpoint.dat
+
+# Test output files
+test-output.txt
+*.log
