@@ -30,7 +30,7 @@ func main() {}
 EOF
 
 # Build shared library
-BUILD_OUTPUT=$(go build -tags cgo -buildmode=c-shared -o "$CGO_DIR/libgridkv_cgo.so" "$WRAPPER_DIR" 2>&1)
+BUILD_OUTPUT=$(go build -tags cgo -buildmode=c-shared -o "$CGO_DIR/libgkv.so" "$WRAPPER_DIR" 2>&1)
 BUILD_STATUS=$?
 
 if [ $BUILD_STATUS -ne 0 ]; then
@@ -45,9 +45,15 @@ echo "$BUILD_OUTPUT" | grep -v "warning" || true
 cd "$CGO_DIR/tests"
 
 echo "Building C test program..."
-gcc -o test_c test_c.c -L.. -lgridkv_cgo -I.. -std=c99 -Wall
+if ! gcc -o test_c test_c.c -L.. -lgkv -I.. -std=c99 -Wall -Wextra -Werror 2>&1; then
+    echo "Error: Failed to compile C test program"
+    exit 1
+fi
 
 echo "Running C tests..."
-LD_LIBRARY_PATH=.. ./test_c
+if ! LD_LIBRARY_PATH=.. ./test_c; then
+    echo "Error: C tests failed"
+    exit 1
+fi
 
 echo "All C tests passed!"

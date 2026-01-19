@@ -42,12 +42,12 @@ func main() {}
 EOF
 
 # Build shared library
-go build -tags cgo -buildmode=c-shared -o libgridkv_cgo.so _wrapper
+go build -tags cgo -buildmode=c-shared -o libgkv.so _wrapper
 ```
 
 2. Compile C test:
 ```bash
-gcc -o test_c test_c.c -L. -lgridkv_cgo -I. -std=c99 -Wall
+gcc -o test_c test_c.c -L. -lgkv -I. -std=c99 -Wall
 ```
 
 3. Run test:
@@ -62,15 +62,43 @@ cd cgo
 go test -tags cgo -v .
 ```
 
+## API Overview
+
+### Core Operations
+- `gkv_new()` - Create new GridKV instance
+- `gkv_set()` - Set key-value pair
+- `gkv_get()` - Get value by key
+- `gkv_delete()` - Delete key
+- `gkv_close()` - Close instance
+
+### Statistics and Monitoring
+- `gkv_stats()` - Get comprehensive statistics (cluster, network, storage)
+- `gkv_health_check()` - Health check
+- `gkv_wait_ready()` - Wait for cluster ready
+- `gkv_version()` - Get library version
+
+### Helper Functions
+- `gkv_result_has_error()` - Check if result has error (convenience function)
+- `gkv_get_result_has_error()` - Check if get result has error (convenience function)
+
+### Memory Management
+- `gkv_free_result()` - Free result from gkv_new()
+- `gkv_free_get_result()` - Free result from gkv_get()
+- `gkv_free_stats()` - Free stats from gkv_stats()
+- `gkv_free_string()` - Free error strings
+
 ## Files
 
 - `cgo.go` - CGO interface implementation
-- `gridkv_cgo.h` - C header file
+- `gkv.h` - C header file with complete API documentation
 - `cgo_test.go` - Go test wrapper for C tests
 - `Makefile` - Build automation
 - `tests/` - C language test directory
-  - `test_c.c` - Pure C language test program (227 lines)
+  - `test_c.c` - Pure C language test program with comprehensive tests
   - `test_runner.sh` - Test runner script that builds shared library and runs C tests
+- `bindings_example.py` - Python binding example using ctypes
+- `bindings_example.java` - Java binding example using Panama FFI
+- `BINDINGS_EVALUATION.md` - Multi-language binding evaluation report
 
 ## Why C Language Tests?
 

@@ -6,7 +6,7 @@ build-cgo:
 
 # Build C test program
 build-c-test: build-cgo
-	gcc -o test_c test_c.c -L. -lgridkv_cgo -I. -std=c99 -Wall
+	gcc -o test_c test_c.c -L. -lgkv -I. -std=c99 -Wall
 
 # Run C test
 run-c-test: build-c-test
@@ -22,7 +22,7 @@ test:
 
 # Clean build artifacts
 clean:
-	rm -f test_c libgridkv_cgo.so libgridkv_cgo.h *.o
+	rm -f test_c libgkv.so libgkv.h *.o
 
 # All tests
 all: test test-c

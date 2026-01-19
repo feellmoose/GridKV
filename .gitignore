@@ -28,8 +28,10 @@ temp/
 **/*.a
 
 # CGO specific files
-**/libgridkv_cgo.so
-**/libgridkv_cgo.h
+**/libgkv.so
+**/libgkv.h
+**/libgkv.dylib
+**/libgkv.dll
 **/_cgo_wrapper/
 
 # Compiled C test programs
