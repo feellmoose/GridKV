@@ -43,12 +43,18 @@ func TestMessage_EncodeDecode(t *testing.T) {
 }
 
 func TestMessage_Compressed(t *testing.T) {
+	// Create large data that will be compressed (above 256 byte threshold)
+	largeData := make([]byte, 512)
+	for i := range largeData {
+		largeData[i] = byte(i % 256)
+	}
+
 	msg := &Message{
 		Type:       MessageTypeResponse,
 		ID:         67890,
-		Data:       []byte("compressed data"),
+		Data:       largeData,
 		Timestamp:  time.Now().UnixNano(),
-		Compressed: true,
+		Compressed: false, // Will be compressed by encoder
 	}
 
 	encoded, err := EncodeMessage(msg)
@@ -61,8 +67,17 @@ func TestMessage_Compressed(t *testing.T) {
 		t.Fatalf("DecodeMessage() error = %v", err)
 	}
 
-	if !decoded.Compressed {
-		t.Error("Decode().Compressed = false, want true")
+	// Verify data is correct
+	if len(decoded.Data) != len(largeData) {
+		t.Errorf("Decode().Data length = %d, want %d", len(decoded.Data), len(largeData))
+	}
+
+	// Verify data integrity
+	for i := range largeData {
+		if decoded.Data[i] != largeData[i] {
+			t.Errorf("Decode().Data[%d] = %d, want %d", i, decoded.Data[i], largeData[i])
+			break
+		}
 	}
 }
 

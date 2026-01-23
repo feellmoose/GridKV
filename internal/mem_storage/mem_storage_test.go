@@ -1,6 +1,7 @@
 package mem_storage
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"testing"
@@ -431,6 +432,91 @@ func TestMemStorage_BatchSet(t *testing.T) {
 		if err != nil {
 			t.Errorf("Get() after BatchSet() error for %s: %v", key, err)
 		}
+	}
+}
+
+func TestMemStorage_ReadPathNoDoubleCopy(t *testing.T) {
+	config := DefaultConfig()
+	config.CompressionEnabled = true
+	config.CompressionThreshold = 64
+
+	s, _ := New(config)
+	defer func() { _ = s.Close(context.Background()) }()
+
+	// Create compressible data
+	pattern := []byte("key123value456data789")
+	largeValue := make([]byte, 1024)
+	for i := range largeValue {
+		largeValue[i] = pattern[i%len(pattern)]
+	}
+
+	item := &StoredItem{
+		Version: time.Now().UnixNano(),
+		Value:   largeValue,
+	}
+
+	// Set with compression
+	err := s.Set("test_key", item)
+	if err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+
+	// Get and verify
+	result, err := s.Get("test_key")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if result == nil {
+		t.Fatal("Get() returned nil")
+	}
+
+	if !bytes.Equal(result.Value, largeValue) {
+		t.Error("Get() returned incorrect value")
+	}
+
+	// Modify returned value to verify it's a copy
+	result.Value[0] = 0xFF
+	result2, err := s.Get("test_key")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	// Original should be unchanged
+	if result2.Value[0] == 0xFF {
+		t.Error("Modified result affected stored value (memory sharing detected)")
+	}
+
+	// Verify uncompressed path still works
+	smallValue := make([]byte, 32)
+	item2 := &StoredItem{
+		Version: time.Now().UnixNano(),
+		Value:   smallValue,
+	}
+
+	err = s.Set("test_key2", item2)
+	if err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+
+	result3, err := s.Get("test_key2")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if !bytes.Equal(result3.Value, smallValue) {
+		t.Error("Get() returned incorrect value for uncompressed data")
+	}
+
+	// Modify to verify it's a copy
+	result3.Value[0] = 0xFF
+	result4, err := s.Get("test_key2")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if result4.Value[0] == 0xFF {
+		t.Error("Modified result affected stored value for uncompressed data")
 	}
 }
 

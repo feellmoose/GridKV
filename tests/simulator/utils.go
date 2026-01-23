@@ -39,6 +39,14 @@ func GetEnvDuration(key string, defaultValue time.Duration) time.Duration {
 	return defaultValue
 }
 
+// GetEnvString returns string environment variable with default fallback
+func GetEnvString(key string, defaultValue string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultValue
+}
+
 // GetFreePort returns a free port on localhost
 func GetFreePort() (int, error) {
 	addr, err := net.Listen("tcp", "127.0.0.1:0")

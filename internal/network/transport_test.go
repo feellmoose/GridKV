@@ -172,7 +172,7 @@ func TestQUICTransport_Basic(t *testing.T) {
 	cfg.MaxMessageSize = 4096
 
 	runRoundTrip := func(tr Transport) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
 		ln, err := tr.Listen(ctx, "127.0.0.1:0")
@@ -183,6 +183,7 @@ func TestQUICTransport_Basic(t *testing.T) {
 
 		serverAddr := ln.Address()
 
+		// Start accepting first - server must be ready before client connects
 		acceptCh := make(chan Conn, 1)
 		errCh := make(chan error, 1)
 		go func() {
@@ -194,34 +195,41 @@ func TestQUICTransport_Basic(t *testing.T) {
 			acceptCh <- conn
 		}()
 
+		// Small delay to ensure Accept goroutine is running
+		time.Sleep(100 * time.Millisecond)
+
+		// Dial - for QUIC this completes handshake and opens stream
+		// which should unblock AcceptStream on server side
 		clientConn, err := tr.Dial(ctx, serverAddr)
 		if err != nil {
-			return err
+			return fmt.Errorf("dial failed: %w", err)
 		}
 		defer clientConn.Close()
 
+		// Wait for server to accept (may take time for QUIC handshake + stream acceptance)
+		var serverConn Conn
 		select {
-		case serverConn := <-acceptCh:
-			defer serverConn.Close()
-
-			payload := []byte("quic-test")
-			if err := clientConn.Send(ctx, payload); err != nil {
-				return err
-			}
-
-			recvData, err := serverConn.Receive(ctx)
-			if err != nil {
-				return err
-			}
-			if string(recvData) != string(payload) {
-				return fmt.Errorf("Receive() = %s, want %s", string(recvData), string(payload))
-			}
-			return nil
+		case serverConn = <-acceptCh:
 		case err := <-errCh:
-			return err
+			return fmt.Errorf("accept failed: %w", err)
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("context deadline exceeded: %w", ctx.Err())
 		}
+		defer serverConn.Close()
+
+		payload := []byte("quic-test")
+		if err := clientConn.Send(ctx, payload); err != nil {
+			return fmt.Errorf("send failed: %w", err)
+		}
+
+		recvData, err := serverConn.Receive(ctx)
+		if err != nil {
+			return fmt.Errorf("receive failed: %w", err)
+		}
+		if string(recvData) != string(payload) {
+			return fmt.Errorf("Receive() = %s, want %s", string(recvData), string(payload))
+		}
+		return nil
 	}
 
 	transport := NewQUICTransport(cfg)

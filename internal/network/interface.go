@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/feellmoose/gridkv/internal/utils/bufferpool"
+	"github.com/feellmoose/gridkv/internal/utils/compress"
 )
 
 // Network provides unified network interface for cluster operations
@@ -89,7 +90,6 @@ type NetworkConfig struct {
 }
 
 // DefaultNetworkConfig returns default network config
-// Note: Transport and Pool must be created separately and set in config
 func DefaultNetworkConfig(localAddress string) NetworkConfig {
 	transportConfig := DefaultTransportConfig()
 	transportConfig.Type = TransportTCP
@@ -302,21 +302,17 @@ func (n *networkImpl) RegisterHandler(msgType MessageType, handler Handler) erro
 // Cluster adapter methods
 func (n *networkImpl) SendFunc() func(address string, msg interface{}) error {
 	return func(address string, msg interface{}) error {
-		// Use timeout context to avoid hanging
 		ctx, cancel := context.WithTimeout(context.Background(), n.cfg.ClientConfig.DefaultTimeout)
 		defer cancel()
-		// If already []byte, use directly
 		if b, ok := msg.([]byte); ok {
 			return n.Send(ctx, address, b)
 		}
-		// For struct messages, serialize to []byte
 		return ErrInvalidMessage
 	}
 }
 
 func (n *networkImpl) SendBytesFunc() func(address string, data []byte) error {
 	return func(address string, data []byte) error {
-		// Use timeout context to avoid hanging
 		ctx, cancel := context.WithTimeout(context.Background(), n.cfg.ClientConfig.DefaultTimeout)
 		defer cancel()
 		return n.Send(ctx, address, data)
@@ -355,34 +351,76 @@ func (n *networkImpl) RegisterMessageHandler(msgType MessageType, handler Handle
 // flags: bit0 compressed
 const msgFlagCompressed = 1 << 0
 
-// Tiered buffer pool for optimized memory allocation
-// Strategy: Multiple tiers (256B/1KB/4KB/16KB/64KB) for different message sizes
 var messagePool = bufferpool.NewTieredBufferPool()
 
 func encodeMessage(msg *Message) ([]byte, error) {
 	payload := msg.Data
 	flags := byte(0)
+
+	// Compress payload if needed (directly into target buffer if possible)
+	const networkCompressThreshold = 256 // Compress messages >256 bytes
+	var finalPayload []byte
+
+	if !msg.Compressed && len(payload) > networkCompressThreshold {
+		boundSize := compress.CompressBound(len(payload))
+		total := 22 + boundSize
+
+		poolBuf := messagePool.Get(total)
+		var buf []byte
+		var fromPool bool
+
+		if cap(poolBuf) >= total && total > 256 {
+			buf = poolBuf[:total]
+			fromPool = true
+		} else {
+			buf = make([]byte, total)
+			if cap(poolBuf) > 0 {
+				messagePool.Put(poolBuf)
+			}
+		}
+
+		compressed, n, ok := compress.CompressTo(payload, buf[22:], networkCompressThreshold)
+		if ok && n < len(payload)*90/100 {
+			finalPayload = compressed
+			flags |= msgFlagCompressed
+			total = 22 + n
+		} else {
+			finalPayload = payload
+			copy(buf[22:], payload)
+		}
+
+		buf[0] = byte(msg.Type)
+		buf[1] = flags
+		binary.BigEndian.PutUint64(buf[2:], msg.ID)
+		binary.BigEndian.PutUint64(buf[10:], uint64(msg.Timestamp))
+		binary.BigEndian.PutUint32(buf[18:], uint32(len(finalPayload)))
+
+		if fromPool {
+			result := make([]byte, total)
+			copy(result, buf[:total])
+			messagePool.Put(poolBuf)
+			return result, nil
+		}
+		return buf[:total], nil
+	}
+
 	if msg.Compressed {
 		flags |= msgFlagCompressed
 	}
-	total := 22 + len(payload)
+	finalPayload = payload
+	total := 22 + len(finalPayload)
 
-	// Get buffer from tiered pool
-	// Tiered pool handles size-based selection automatically
 	poolBuf := messagePool.Get(total)
 	var buf []byte
 	var fromPool bool
 
-	// Check if buffer came from pool (capacity >= requested size)
-	// For tiered pool, buffers <256B are direct allocations
 	if cap(poolBuf) >= total && total > 256 {
-		buf = poolBuf[:total] // Set length to total
+		buf = poolBuf[:total]
 		fromPool = true
 	} else {
-		// Pool buffer too small or total <= 256, allocate directly
 		buf = make([]byte, total)
 		if cap(poolBuf) > 0 {
-			messagePool.Put(poolBuf) // Return unused pool buffer
+			messagePool.Put(poolBuf)
 		}
 	}
 
@@ -390,19 +428,16 @@ func encodeMessage(msg *Message) ([]byte, error) {
 	buf[1] = flags
 	binary.BigEndian.PutUint64(buf[2:], msg.ID)
 	binary.BigEndian.PutUint64(buf[10:], uint64(msg.Timestamp))
-	binary.BigEndian.PutUint32(buf[18:], uint32(len(payload)))
-	copy(buf[22:], payload)
+	binary.BigEndian.PutUint32(buf[18:], uint32(len(finalPayload)))
+	copy(buf[22:], finalPayload)
 
-	// For pool buffers, copy to result and return pool buffer
-	// For directly allocated buffers, return directly
 	if fromPool {
 		result := make([]byte, total)
-		copy(result, buf)
-		messagePool.Put(buf)
+		copy(result, buf[:total])
+		messagePool.Put(poolBuf)
 		return result, nil
 	}
-
-	return buf, nil
+	return buf[:total], nil
 }
 
 // decodeMessage decodes bytes to message (inline codec)
@@ -415,18 +450,27 @@ func decodeMessage(data []byte) (*Message, error) {
 		return nil, ErrInvalidMessage
 	}
 	flags := data[1]
+	isCompressed := flags&msgFlagCompressed != 0
 
-	// Copy payload: always allocate new buffer for safety
-	// Caller owns the payload, so we can't reuse pool buffers here
-	// The copy is necessary to avoid reference issues with underlying buffers
-	payload := make([]byte, length)
-	copy(payload, data[22:22+length])
+	var payload []byte
+	if isCompressed {
+		// Use DecompressTo with nil dst to let it handle buffer allocation efficiently
+		decompressed, _, err := compress.DecompressTo(data[22:22+length], nil, length*4)
+		if err != nil {
+			return nil, fmt.Errorf("network decompress failed: %w", err)
+		}
+		payload = decompressed
+	} else {
+		// Use zero-copy where safe: create new slice for payload
+		payload = make([]byte, length)
+		copy(payload, data[22:22+length])
+	}
 
 	msg := &Message{
 		Type:       MessageType(data[0]),
 		ID:         binary.BigEndian.Uint64(data[2:10]),
 		Timestamp:  int64(binary.BigEndian.Uint64(data[10:18])),
-		Compressed: flags&msgFlagCompressed != 0,
+		Compressed: isCompressed,
 		Data:       payload,
 	}
 	return msg, nil
@@ -443,7 +487,6 @@ func DecodeMessage(data []byte) (*Message, error) {
 }
 
 // ClusterMessageTypes defines message types used by cluster
-// Note: These reference the unified constants defined in message.go
 var ClusterMessageTypes = struct {
 	Ping           MessageType
 	Connect        MessageType

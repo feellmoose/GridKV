@@ -16,7 +16,8 @@ import (
 var (
 	aliveTargetsPool = sync.Pool{
 		New: func() interface{} {
-			return make([]string, 0, 16)
+			buf := make([]string, 0, 16)
+			return &buf
 		},
 	}
 
@@ -28,7 +29,8 @@ var (
 
 	storedItemSlicePool = sync.Pool{
 		New: func() interface{} {
-			return make([]*mem_storage.StoredItem, 0, 8)
+			buf := make([]*mem_storage.StoredItem, 0, 8)
+			return &buf
 		},
 	}
 )
@@ -115,79 +117,69 @@ func newReader(cfg readerConfig) (*reader, error) {
 }
 
 func (r *reader) Get(ctx context.Context, key string) (*mem_storage.StoredItem, error) {
-	// Check cache first
 	if r.cache != nil {
 		if val, ok := r.cache.Get(key); ok {
 			if item, ok := val.(*mem_storage.StoredItem); ok {
-				// Single DeepCopy: only when returning to user
 				return item.DeepCopy(), nil
 			}
 		}
 	}
 
-	// Eventual consistency read: try local first, then distributed
-	// Local read first (fast path for high concurrency)
 	item, err := r.store.Get(key)
 	if err == nil && item != nil {
 		return item, nil
 	}
 
-	// If error is not "not found" (e.g., empty key), return it immediately
 	if err != nil && err != mem_storage.ErrNotFound && err != mem_storage.ErrExpired {
 		return nil, err
 	}
 
-	// Local read failed, try distributed read: preferred replica first, then fallback to next replicas on failure
-	// According to README: "Hash ring locates preferred replica; fast fallback to next replica when suspect/unreachable"
 	targets := r.ring.GetN(key, r.replicaCount)
 	if len(targets) == 0 {
 		return nil, nil
 	}
 
-	// Filter alive nodes (skip local node as we already tried it)
-	aliveTargets := aliveTargetsPool.Get().([]string)[:0]
+	aliveTargetsPtr := aliveTargetsPool.Get().(*[]string)
+	aliveTargets := (*aliveTargetsPtr)[:0]
 	defer func() {
 		if cap(aliveTargets) <= 32 {
-			aliveTargetsPool.Put(aliveTargets[:0])
+			*aliveTargetsPtr = (*aliveTargetsPtr)[:0]
+			aliveTargetsPool.Put(aliveTargetsPtr)
 		}
 	}()
 
 	for _, target := range targets {
 		if target == r.nodeID {
-			// Already tried local, skip
 			continue
 		}
 		if r.member != nil && r.member.State(target) == NodeStateAlive {
-			aliveTargets = append(aliveTargets, target)
+			*aliveTargetsPtr = append(*aliveTargetsPtr, target)
 		} else if r.member == nil {
-			// If no member manager, assume all targets are alive
-			aliveTargets = append(aliveTargets, target)
+			*aliveTargetsPtr = append(*aliveTargetsPtr, target)
 		}
 	}
 
-	if len(aliveTargets) == 0 {
-		return nil, nil
-	}
-
-	if r.getFunc == nil {
+	if len(*aliveTargetsPtr) == 0 || r.getFunc == nil {
 		return nil, nil
 	}
 
 	timeout := 5 * time.Second
+	// For a multi-replica read batch, create at most one timeout context and
+	// reuse it across all replica attempts to avoid per-target timers.
+	readCtx := ctx
+	var cancel context.CancelFunc
+	if ctx == nil || ctx == context.Background() {
+		readCtx, cancel = context.WithTimeout(context.Background(), timeout)
+	} else if ctxDeadline, hasDeadline := ctx.Deadline(); !hasDeadline || time.Until(ctxDeadline) > timeout {
+		readCtx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	if cancel != nil {
+		defer cancel()
+	}
+
 	hasSuccessfulResponse := false
 	var lastNetworkErr error
-	for _, target := range aliveTargets {
-		// Only create new context if current context doesn't have timeout or deadline is longer
-		var cancel context.CancelFunc
-		readCtx := ctx
-		if ctx == nil || ctx == context.Background() {
-			readCtx, cancel = context.WithTimeout(context.Background(), timeout)
-			defer cancel()
-		} else if ctxDeadline, hasDeadline := ctx.Deadline(); !hasDeadline || time.Until(ctxDeadline) > timeout {
-			readCtx, cancel = context.WithTimeout(ctx, timeout)
-			defer cancel()
-		}
-
+	for _, target := range *aliveTargetsPtr {
 		done := make(chan struct{})
 		go func(t string) {
 			defer close(done)
@@ -246,13 +238,9 @@ func (r *reader) Get(ctx context.Context, key string) (*mem_storage.StoredItem, 
 	return nil, nil
 
 success:
-	// Success path - item is already set and validated
-	// Cache the original item (zero-copy)
 	if r.cache != nil {
 		r.cache.Set(key, item, r.cacheTTL)
 	}
-
-	// Single DeepCopy for user safety
 	return item.DeepCopy(), nil
 }
 
@@ -263,7 +251,6 @@ func (r *reader) BatchGet(ctx context.Context, keys []string) (map[string]*mem_s
 
 	// Pre-allocate result map with known size
 	result := make(map[string]*mem_storage.StoredItem, len(keys))
-	// Use buffered channel to avoid blocking
 	resultCh := make(chan struct {
 		key  string
 		item *mem_storage.StoredItem
@@ -271,7 +258,6 @@ func (r *reader) BatchGet(ctx context.Context, keys []string) (map[string]*mem_s
 
 	var wg sync.WaitGroup
 
-	// Process keys in parallel
 	for _, key := range keys {
 		key := key
 		wg.Add(1)
@@ -289,13 +275,11 @@ func (r *reader) BatchGet(ctx context.Context, keys []string) (map[string]*mem_s
 		}
 	}
 
-	// Close channel when all goroutines done
 	go func() {
 		wg.Wait()
 		close(resultCh)
 	}()
 
-	// Collect results
 	for res := range resultCh {
 		result[res.key] = res.item
 	}
@@ -305,12 +289,8 @@ func (r *reader) BatchGet(ctx context.Context, keys []string) (map[string]*mem_s
 
 func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_storage.StoredItem, error) {
 	if key == "" {
-		// Check store.Get to get the correct error for empty key
 		_, err := r.store.Get(key)
-		if err != nil {
-			return nil, err
-		}
-		return nil, nil
+		return nil, err
 	}
 
 	if n <= 0 {
@@ -323,20 +303,22 @@ func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_st
 	}
 
 	// Filter alive nodes
-	aliveTargets := aliveTargetsPool.Get().([]string)[:0]
+	aliveTargetsPtr := aliveTargetsPool.Get().(*[]string)
+	aliveTargets := (*aliveTargetsPtr)[:0]
 	defer func() {
 		if cap(aliveTargets) <= 32 {
-			aliveTargetsPool.Put(aliveTargets[:0])
+			*aliveTargetsPtr = (*aliveTargetsPtr)[:0]
+			aliveTargetsPool.Put(aliveTargetsPtr)
 		}
 	}()
 
 	for _, target := range targets {
 		if r.member.State(target) == NodeStateAlive || target == r.nodeID {
-			aliveTargets = append(aliveTargets, target)
+			*aliveTargetsPtr = append(*aliveTargetsPtr, target)
 		}
 	}
 
-	if len(aliveTargets) == 0 {
+	if len(*aliveTargetsPtr) == 0 {
 		return nil, nil
 	}
 
@@ -346,10 +328,9 @@ func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_st
 	results := make(chan struct {
 		item *mem_storage.StoredItem
 		err  error
-	}, len(aliveTargets))
+	}, len(*aliveTargetsPtr))
 
-	// Query all targets in parallel
-	for _, target := range aliveTargets {
+	for _, target := range *aliveTargetsPtr {
 		target := target
 		if err := r.executor.Do(func() {
 			var item *mem_storage.StoredItem
@@ -373,22 +354,24 @@ func (r *reader) GetSpeculative(ctx context.Context, key string, n int) (*mem_st
 	}
 
 	var best *mem_storage.StoredItem
-	items := storedItemSlicePool.Get().([]*mem_storage.StoredItem)[:0]
+	itemsPtr := storedItemSlicePool.Get().(*[]*mem_storage.StoredItem)
+	items := (*itemsPtr)[:0]
 	defer func() {
 		if cap(items) <= 32 {
-			storedItemSlicePool.Put(items[:0])
+			*itemsPtr = (*itemsPtr)[:0]
+			storedItemSlicePool.Put(itemsPtr)
 		}
 	}()
 
 	// Wait for all responses to get the highest version
 	count := 0
 loop1:
-	for count < len(aliveTargets) {
+	for count < len(*aliveTargetsPtr) {
 		select {
 		case res := <-results:
 			count++
 			if res.err == nil && res.item != nil && !res.item.IsTombstone() && len(res.item.Value) > 0 {
-				items = append(items, res.item)
+				*itemsPtr = append(*itemsPtr, res.item)
 				if best == nil || res.item.CompareVersion(best) > 0 {
 					best = res.item
 				}
@@ -398,8 +381,7 @@ loop1:
 		}
 	}
 
-	// Check for version conflicts and trigger repair
-	if len(items) > 1 && r.repair != nil {
+	if len(*itemsPtr) > 1 && r.repair != nil {
 		versions := versionMapPool.Get().(map[int64]*mem_storage.StoredItem)
 		for k := range versions {
 			delete(versions, k)
@@ -409,49 +391,42 @@ loop1:
 				versionMapPool.Put(versions)
 			}
 		}()
-		for _, item := range items {
+		for _, item := range *itemsPtr {
 			versions[item.Version] = item
 		}
 
 		if len(versions) > 1 {
-			// Use object pool for repair items
-			repairItems := storedItemSlicePool.Get().([]*mem_storage.StoredItem)
-			repairItems = repairItems[:0] // Reset length
-			if cap(repairItems) < len(items) {
-				repairItems = make([]*mem_storage.StoredItem, 0, len(items))
+			repairItemsPtr := storedItemSlicePool.Get().(*[]*mem_storage.StoredItem)
+			repairItems := (*repairItemsPtr)[:0]
+			usedPool := true
+			if cap(repairItems) < len(*itemsPtr) {
+				repairItems = make([]*mem_storage.StoredItem, 0, len(*itemsPtr))
+				usedPool = false
 			}
-			repairItems = append(repairItems, items...)
-			// Trigger read repair (error ignored as this is async repair path)
+			repairItems = append(repairItems, *itemsPtr...)
 			if err := r.repair.Repair(key, repairItems); err != nil {
 				logging.Debug("Read repair failed", "key", key, "error", err)
 			}
-			// Return to pool if capacity is reasonable
-			if cap(repairItems) <= 64 {
-				storedItemSlicePool.Put(repairItems[:0])
+			if usedPool && cap(repairItems) <= 64 {
+				*repairItemsPtr = (*repairItemsPtr)[:0]
+				storedItemSlicePool.Put(repairItemsPtr)
 			}
 		}
 	}
 
 	if best != nil {
-		// DeepCopy is necessary for safety: user can modify returned value
 		return best.DeepCopy(), nil
 	}
 
 	return nil, nil
 }
 
-// GetWithConsistency reads with specified consistency level
 func (r *reader) GetWithConsistency(ctx context.Context, key string, level ConsistencyLevel) (*mem_storage.StoredItem, error) {
 	if key == "" {
-		// Check store.Get to get the correct error for empty key
 		_, err := r.store.Get(key)
-		if err != nil {
-			return nil, err
-		}
-		return nil, nil
+		return nil, err
 	}
 
-	// Check cache first (only for eventual consistency)
 	if level == ConsistencyLevelOne && r.cache != nil {
 		if val, ok := r.cache.Get(key); ok {
 			if item, ok := val.(*mem_storage.StoredItem); ok {
@@ -467,20 +442,21 @@ func (r *reader) GetWithConsistency(ctx context.Context, key string, level Consi
 	}
 
 	// Filter alive nodes (use pool to reduce allocations)
-	aliveTargets := aliveTargetsPool.Get().([]string)
-	aliveTargets = aliveTargets[:0] // Reset length, keep capacity
+	aliveTargetsPtr := aliveTargetsPool.Get().(*[]string)
+	aliveTargets := (*aliveTargetsPtr)[:0]
 	defer func() {
 		if cap(aliveTargets) <= 64 {
-			aliveTargetsPool.Put(aliveTargets[:0])
+			*aliveTargetsPtr = (*aliveTargetsPtr)[:0]
+			aliveTargetsPool.Put(aliveTargetsPtr)
 		}
 	}()
 	for _, target := range targets {
 		if r.member.State(target) == NodeStateAlive || target == r.nodeID {
-			aliveTargets = append(aliveTargets, target)
+			*aliveTargetsPtr = append(*aliveTargetsPtr, target)
 		}
 	}
 
-	if len(aliveTargets) == 0 {
+	if len(*aliveTargetsPtr) == 0 {
 		return nil, nil
 	}
 
@@ -490,15 +466,15 @@ func (r *reader) GetWithConsistency(ctx context.Context, key string, level Consi
 	case ConsistencyLevelOne:
 		requiredResponses = 1
 	case ConsistencyLevelQuorum:
-		requiredResponses = (len(aliveTargets) / 2) + 1
+		requiredResponses = (len(*aliveTargetsPtr) / 2) + 1
 	case ConsistencyLevelAll:
 		requiredResponses = len(aliveTargets)
 	default:
 		requiredResponses = 1
 	}
 
-	if requiredResponses > len(aliveTargets) {
-		requiredResponses = len(aliveTargets)
+	if requiredResponses > len(*aliveTargetsPtr) {
+		requiredResponses = len(*aliveTargetsPtr)
 	}
 
 	// Parallel read from replicas
@@ -509,10 +485,9 @@ func (r *reader) GetWithConsistency(ctx context.Context, key string, level Consi
 		item *mem_storage.StoredItem
 		err  error
 	}
-	results := make(chan result, len(aliveTargets))
+	results := make(chan result, len(*aliveTargetsPtr))
 
-	// Query all replicas
-	for _, target := range aliveTargets {
+	for _, target := range *aliveTargetsPtr {
 		target := target
 		if err := r.executor.Do(func() {
 			var item *mem_storage.StoredItem
@@ -531,11 +506,12 @@ func (r *reader) GetWithConsistency(ctx context.Context, key string, level Consi
 		}
 	}
 
-	// Collect responses
-	items := storedItemSlicePool.Get().([]*mem_storage.StoredItem)[:0]
+	itemsPtr := storedItemSlicePool.Get().(*[]*mem_storage.StoredItem)
+	items := (*itemsPtr)[:0]
 	defer func() {
 		if cap(items) <= 32 {
-			storedItemSlicePool.Put(items[:0])
+			*itemsPtr = (*itemsPtr)[:0]
+			storedItemSlicePool.Put(itemsPtr)
 		}
 	}()
 	successCount := 0
@@ -565,8 +541,7 @@ loop2:
 		}
 	}
 
-	// Check for version conflicts and trigger repair
-	if len(items) > 1 && r.repair != nil {
+	if len(*itemsPtr) > 1 && r.repair != nil {
 		versions := versionMapPool.Get().(map[int64]*mem_storage.StoredItem)
 		for k := range versions {
 			delete(versions, k)
@@ -576,19 +551,28 @@ loop2:
 				versionMapPool.Put(versions)
 			}
 		}()
-		for _, item := range items {
+		for _, item := range *itemsPtr {
 			versions[item.Version] = item
 		}
 
 		if len(versions) > 1 {
-			repairItems := storedItemSlicePool.Get().([]*mem_storage.StoredItem)[:0]
-			if cap(repairItems) < len(items) {
-				repairItems = make([]*mem_storage.StoredItem, 0, len(items))
+			// Use object pool for repair items
+			repairItemsPtr := storedItemSlicePool.Get().(*[]*mem_storage.StoredItem)
+			repairItems := (*repairItemsPtr)[:0]
+			usedPool := true
+			// Only allocate new slice if pool buffer is too small
+			if cap(repairItems) < len(*itemsPtr) {
+				// Pool buffer too small, allocate new slice
+				repairItems = make([]*mem_storage.StoredItem, 0, len(*itemsPtr))
+				usedPool = false
 			}
-			repairItems = append(repairItems, items...)
+			repairItems = append(repairItems, *itemsPtr...)
+			// Trigger read repair (error ignored as this is async repair path)
 			_ = r.repair.Repair(key, repairItems)
-			if cap(repairItems) <= 64 {
-				storedItemSlicePool.Put(repairItems[:0])
+			// Return to pool only if we used the pool buffer and capacity is reasonable
+			if usedPool && cap(repairItems) <= 64 {
+				*repairItemsPtr = (*repairItemsPtr)[:0]
+				storedItemSlicePool.Put(repairItemsPtr)
 			}
 		}
 	}
@@ -597,12 +581,9 @@ loop2:
 		return nil, nil
 	}
 
-	// Cache result (only for eventual consistency)
 	if level == ConsistencyLevelOne && r.cache != nil {
 		r.cache.Set(key, best, r.cacheTTL)
 	}
-
-	// DeepCopy is necessary for safety: user can modify returned value
 	return best.DeepCopy(), nil
 }
 

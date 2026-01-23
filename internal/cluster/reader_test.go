@@ -422,7 +422,7 @@ func TestReader_ErrorHandling(t *testing.T) {
 	deps := setupReaderDeps(t)
 
 	// Test with nil store
-	reader, err := newReader(readerConfig{
+	_, err := newReader(readerConfig{
 		NodeID:   "node1",
 		Store:    nil, // Invalid store
 		Ring:     deps.ring,
@@ -436,7 +436,7 @@ func TestReader_ErrorHandling(t *testing.T) {
 	}
 
 	// Test with nil executor
-	reader, err = newReader(readerConfig{
+	_, err = newReader(readerConfig{
 		NodeID:   "node1",
 		Store:    deps.store,
 		Ring:     deps.ring,
@@ -451,8 +451,7 @@ func TestReader_ErrorHandling(t *testing.T) {
 
 	// Test Get with cancelled context - skip this test as it may cause panics
 	// due to async nature of operations
-	_ = ctx    // Avoid unused variable warning
-	_ = reader // Avoid unused variable warning
+	_ = ctx // Avoid unused variable warning
 	t.Log("Skipping cancelled context test due to potential async panics")
 }
 

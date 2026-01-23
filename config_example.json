@@ -6,6 +6,7 @@
   "hot_read_cache_ttl": "5m",
   "virtual_nodes": 128,
   "replica_count": 3,
+  "hot_cache_size": 10000,
   "read_repair_rate_limit_per_sec": 1000,
   "failure_timeout": "5s",
   "suspect_timeout": "2.5s",
@@ -26,8 +27,12 @@
     "write_timeout": "5s"
   },
   "storage": {
-    "max_memory_mb": 1024,
-    "shard_count": 16
+    "max_memory_mb": 256,
+    "shard_count": 16,
+    "evict_threshold": 85,
+    "evict_target": 70,
+    "evict_batch_size": 10,
+    "async_eviction": true
   },
   "log": {
     "level": "info",

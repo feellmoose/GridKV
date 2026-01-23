@@ -212,9 +212,8 @@ func TestNetworkServer_HighConcurrency(t *testing.T) {
 	defer transport.Close()
 
 	serverCfg := DefaultServerConfig(transport)
-	// Note: MaxConnections field removed from ServerConfig
 	server := NewServer(serverCfg)
-	defer server.Stop(context.Background())
+	defer func() { _ = server.Stop(context.Background()) }()
 
 	ctx := context.Background()
 	addr := "127.0.0.1:0"
@@ -337,7 +336,7 @@ func TestNetworkServer_ResourceEfficiency(t *testing.T) {
 
 	serverCfg := DefaultServerConfig(transport)
 	server := NewServer(serverCfg)
-	defer server.Stop(context.Background())
+	defer func() { _ = server.Stop(context.Background()) }()
 
 	ctx := context.Background()
 	addr := "127.0.0.1:0"
@@ -380,8 +379,8 @@ func TestNetworkServer_ResourceEfficiency(t *testing.T) {
 				}
 
 				testData := []byte(fmt.Sprintf("resource-test-%d-%d", workerID, time.Now().UnixNano()))
-				conn.Send(ctx, testData)
-				conn.Receive(ctx)
+				_ = conn.Send(ctx, testData)
+				_, _ = conn.Receive(ctx)
 				conn.Close()
 			}
 		}(i)
@@ -440,7 +439,7 @@ func BenchmarkNetworkServer_Throughput(b *testing.B) {
 
 	serverCfg := DefaultServerConfig(transport)
 	server := NewServer(serverCfg)
-	defer server.Stop(context.Background())
+	defer func() { _ = server.Stop(context.Background()) }()
 
 	ctx := context.Background()
 	addr := "127.0.0.1:0"

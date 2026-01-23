@@ -60,7 +60,8 @@ type Config struct {
 	GossipInterval time.Duration
 
 	// Reader
-	CacheTTL time.Duration
+	CacheTTL  time.Duration
+	CacheSize int
 
 	// Anti-entropy
 	EntropyInterval time.Duration
@@ -84,8 +85,6 @@ const (
 	requestsPerWorker         = 3000            // Queue size per worker
 	maxQueueSize              = 300000          // Maximum queue size to prevent memory issues
 	cacheShards               = 256             // Cache shard count
-	cacheSize                 = 10000           // Cache size
-	cacheCleanupInterval      = 1 * time.Second // Cache cleanup interval
 	sendTimeout               = 5 * time.Second // Network send timeout
 	defaultCheckpointInterval = 1 * time.Minute // Default checkpoint interval
 )
@@ -118,12 +117,15 @@ func New(cfg Config) (*Cluster, error) {
 		return nil, err
 	}
 
-	// Cache for hot reads
+	// Cache for hot reads: bounded size, TTL-enforced on read path.
+	// Capacity limit and TTL checks on read path are sufficient for memory safety.
+	cacheSize := cfg.CacheSize
+	if cacheSize <= 0 {
+		cacheSize = 10000 // Default cache size
+	}
 	hotCache := cache.New(cache.Opts{
-		Shards:        cacheShards,
-		Size:          cacheSize,
-		CleanupIntv:   cacheCleanupInterval,
-		EnableCleanup: true,
+		Shards: cacheShards,
+		Size:   cacheSize,
 	})
 
 	// Create lifecycle manager
@@ -166,7 +168,7 @@ func New(cfg Config) (*Cluster, error) {
 		getFunc = nil
 	} else {
 		if cfg.SendFunc == nil {
-			return nil, errors.New("Network is nil, SendFunc must be provided")
+			return nil, errors.New("network is nil, SendFunc must be provided")
 		}
 		sendFunc = cfg.SendFunc
 		getFunc = cfg.GetFunc
@@ -517,8 +519,7 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 		if decoded == nil {
 			return nil, nil
 		}
-		if err := member.HandleMessage(decoded); err != nil {
-		}
+		_ = member.HandleMessage(decoded)
 		return nil, nil
 	}); err != nil {
 		return err
@@ -527,9 +528,7 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 	if err := net.RegisterMessageHandler(network.MessageTypeLeave, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
 		decoded := decodeMemberMsg(data, network.MessageTypeLeave)
 		if decoded != nil {
-			// Handle message (error ignored as this is async message handling)
-			if err := member.HandleMessage(decoded); err != nil {
-			}
+			_ = member.HandleMessage(decoded)
 		}
 		return nil, nil
 	}); err != nil {
@@ -538,17 +537,14 @@ func setupNetworkHandlers(net network.Network, member *memberMgr, gossip *gossip
 
 	// Gossip message handlers
 	if err := net.RegisterMessageHandler(network.MessageTypeGossipPush, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
-		if err := gossip.HandleMessage(data); err != nil {
-		}
+		_ = gossip.HandleMessage(data)
 		return nil, nil
 	}); err != nil {
 		return err
 	}
 
 	if err := net.RegisterMessageHandler(network.MessageTypeGossipPull, func(ctx context.Context, remoteAddr string, data []byte) ([]byte, error) {
-		// Handle gossip message (error ignored as this is async message handling)
-		if err := gossip.HandleMessage(data); err != nil {
-		}
+		_ = gossip.HandleMessage(data)
 		return nil, nil
 	}); err != nil {
 		return err
