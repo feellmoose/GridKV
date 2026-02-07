@@ -1,17 +1,9 @@
 package cache
 
-// TTL cache
-// Features:
-//   - O(1) LRU eviction
-//   - Object pooling for reduced GC pressure
-//   - Parallel cleanup across shards
-//   - XXH3 hash for fast sharding
-//   - Leak prevention: all goroutines tracked and cleaned up
-//   - Lifecycle.Component integration
+// TTL cache with TinyLFU for smart eviction
 
 import (
 	"context"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,20 +13,16 @@ import (
 )
 
 const (
-	DefaultShards      = 256
-	DefaultCleanupIntv = 1 * time.Second
-	MinCleanupIntv     = 100 * time.Millisecond
+	DefaultShards = 256
+	DefaultSize   = 10000
 )
 
-// Cache is a sharded TTL cache
 type Cache struct {
-	shards      []*shard
-	shardMask   uint32
-	cleanupTick *time.Ticker
-	stopCleanup chan struct{}
-	cleanupDone chan struct{}
-	closed      atomic.Bool
-	cleanupWG   sync.WaitGroup
+	shards    []*shard
+	shardMask uint32
+	closed    atomic.Bool
+
+	tinyLFU *TinyLFU
 }
 
 type shard struct {
@@ -61,10 +49,8 @@ var entryPool = sync.Pool{
 
 // Opts configures cache behavior
 type Opts struct {
-	Shards        int
-	Size          int
-	CleanupIntv   time.Duration
-	EnableCleanup bool
+	Shards int
+	Size   int
 }
 
 // New creates a TTL cache
@@ -75,11 +61,10 @@ func New(opts Opts) *Cache {
 	if !isPow2(opts.Shards) {
 		opts.Shards = nextPow2(opts.Shards)
 	}
-	if opts.CleanupIntv <= 0 {
-		opts.CleanupIntv = DefaultCleanupIntv
-	}
-	if opts.CleanupIntv < MinCleanupIntv {
-		opts.CleanupIntv = MinCleanupIntv
+
+	if opts.Size <= 0 {
+		// Enforce a finite capacity to prevent unbounded growth when used as SDK cache.
+		opts.Size = DefaultSize
 	}
 
 	shardSize := opts.Size / opts.Shards
@@ -96,21 +81,14 @@ func New(opts Opts) *Cache {
 	}
 
 	c := &Cache{
-		shards:      shards,
-		shardMask:   uint32(opts.Shards - 1),
-		stopCleanup: make(chan struct{}),
-		cleanupDone: make(chan struct{}),
-	}
-
-	if opts.EnableCleanup {
-		c.startCleanup(opts.CleanupIntv)
+		shards:    shards,
+		shardMask: uint32(opts.Shards - 1),
+		tinyLFU:   NewTinyLFU(),
 	}
 
 	return c
 }
 
-// Get retrieves value
-//
 //go:inline
 func (c *Cache) Get(key string) (interface{}, bool) {
 	if c == nil {
@@ -132,36 +110,46 @@ func (c *Cache) Get(key string) (interface{}, bool) {
 	e, ok := s.items[key]
 	if !ok || e == nil {
 		s.mu.RUnlock()
+		if c.tinyLFU != nil {
+			c.tinyLFU.RecordAccess(key, false)
+		}
 		return nil, false
 	}
 
 	expireAt := e.expireAt
 	if expireAt > 0 {
-		// Fast path: use cached time if available (reduces time.Now() calls)
-		// Only call time.Now() if expiration check is needed
 		now := time.Now().UnixNano()
 		if now > expireAt {
 			s.mu.RUnlock()
-			// Async cleanup to avoid blocking read path
-			// Use non-blocking send to avoid goroutine leak if cleanupWG is full
-			select {
-			case <-c.stopCleanup:
-				// Cache is closing, skip async cleanup
-				return nil, false
-			default:
-				c.cleanupWG.Add(1)
-				go func() {
-					defer c.cleanupWG.Done()
-					c.deleteExpired(key, s)
-				}()
+			// Synchronous deletion: TTL check on read path is sufficient
+			s.mu.Lock()
+			if e2, ok := s.items[key]; ok && e2 == e {
+				delete(s.items, key)
+				s.removeEntry(e)
+				entryPool.Put(e)
 			}
+			s.mu.Unlock()
 			return nil, false
 		}
 	}
 
 	v := e.value
-	s.moveToFront(e)
+	needsMove := s.head != e
 	s.mu.RUnlock()
+
+	if needsMove {
+		s.mu.Lock()
+		if e2, ok := s.items[key]; ok && e2 == e && s.head != e {
+			s.removeEntry(e)
+			s.addToFront(e)
+		}
+		s.mu.Unlock()
+	}
+
+	if c.tinyLFU != nil {
+		c.tinyLFU.RecordAccess(key, true)
+	}
+
 	return v, true
 }
 
@@ -217,10 +205,31 @@ func (c *Cache) Set(key string, value interface{}, ttl time.Duration) {
 	}
 
 	if s.maxSize > 0 && len(s.items) >= s.maxSize {
-		if oldest := s.tail; oldest != nil {
-			delete(s.items, oldest.key)
-			s.removeEntry(oldest)
-			entryPool.Put(oldest)
+		oldest := s.tail
+		if oldest != nil {
+			victim := oldest
+			if c.tinyLFU != nil {
+				newFreq := c.tinyLFU.Estimate(key)
+				oldFreq := c.tinyLFU.Estimate(oldest.key)
+				if oldFreq > newFreq {
+					current := oldest
+					for current != nil {
+						freq := c.tinyLFU.Estimate(current.key)
+						if freq < newFreq {
+							victim = current
+							break
+						}
+						current = current.prev
+						if current == s.head {
+							break
+						}
+					}
+				}
+			}
+
+			delete(s.items, victim.key)
+			s.removeEntry(victim)
+			entryPool.Put(victim)
 		}
 	}
 
@@ -238,6 +247,10 @@ func (c *Cache) Set(key string, value interface{}, ttl time.Duration) {
 	s.items[key] = e
 	s.addToFront(e)
 	s.mu.Unlock()
+
+	if c.tinyLFU != nil {
+		c.tinyLFU.RecordAccess(key, true)
+	}
 }
 
 // Del removes key
@@ -313,7 +326,6 @@ func (c *Cache) Name() string {
 }
 
 func (c *Cache) Start(ctx context.Context) error {
-	// Cache starts cleanup in New() if enabled, no additional start needed
 	return nil
 }
 
@@ -324,64 +336,22 @@ func (c *Cache) Close(ctx context.Context) error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-
-	close(c.stopCleanup)
-	if c.cleanupTick != nil {
-		c.cleanupTick.Stop()
-		select {
-		case <-c.cleanupDone:
-		case <-time.After(5 * time.Second):
-		}
-	}
-
-	done := make(chan struct{})
-	go func() {
-		c.cleanupWG.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		return nil
-	case <-time.After(5 * time.Second):
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return nil
 }
 
-// CloseNoContext stops background cleanup (public method for backward compatibility).
-// Deprecated: Use Close(ctx) instead for lifecycle management.
 func (c *Cache) CloseNoContext() {
 	_ = c.Close(context.Background())
 }
 
-// Ensure Cache implements lifecycle.Component
 var _ lifecycle.Component = (*Cache)(nil)
-
-func (c *Cache) deleteExpired(key string, s *shard) {
-	if c == nil || s == nil || key == "" {
-		return
-	}
-
-	s.mu.Lock()
-	if e := s.items[key]; e != nil {
-		delete(s.items, key)
-		s.removeEntry(e)
-		entryPool.Put(e)
-	}
-	s.mu.Unlock()
-}
 
 //go:inline
 func (c *Cache) getShard(key string) *shard {
 	if c == nil || len(c.shards) == 0 {
 		return nil
 	}
-	// Use 128-bit hash with bit rotation for layered load balancing
-	// Different from MemStorage (.Lo) and HashRing (.Hi) but still from same hash function
 	fullHash := xxh3.HashString128(key)
-	hash := (fullHash.Lo << 1) ^ fullHash.Hi // Bit rotation combination for load balancing
+	hash := (fullHash.Lo << 1) ^ fullHash.Hi
 	idx := uint32(hash) & c.shardMask
 	if idx >= uint32(len(c.shards)) {
 		return nil
@@ -389,91 +359,6 @@ func (c *Cache) getShard(key string) *shard {
 	return c.shards[idx]
 }
 
-func (c *Cache) startCleanup(interval time.Duration) {
-	if c == nil {
-		return
-	}
-
-	c.cleanupTick = time.NewTicker(interval)
-	c.cleanupWG.Add(1)
-	go func() {
-		defer c.cleanupWG.Done()
-		defer close(c.cleanupDone)
-
-		lastGC := time.Now()
-		gcInterval := 5 * time.Minute // Periodic GC hint for long-running processes
-
-		for {
-			select {
-			case <-c.stopCleanup:
-				return
-			case <-c.cleanupTick.C:
-				c.parallelCleanup()
-
-				// Periodic GC hint for long-running processes
-				if time.Since(lastGC) > gcInterval {
-					runtime.GC()
-					lastGC = time.Now()
-				}
-			}
-		}
-	}()
-}
-
-func (c *Cache) parallelCleanup() {
-	if c == nil {
-		return
-	}
-
-	now := time.Now().UnixNano()
-	var wg sync.WaitGroup
-
-	batchSize := 32
-	shardCount := len(c.shards)
-	for i := 0; i < shardCount; i += batchSize {
-		end := i + batchSize
-		if end > shardCount {
-			end = shardCount
-		}
-
-		wg.Add(1)
-		go func(start, end int) {
-			defer wg.Done()
-			for j := start; j < end; j++ {
-				if j < len(c.shards) && c.shards[j] != nil {
-					c.cleanupShard(c.shards[j], now)
-				}
-			}
-		}(i, end)
-	}
-	wg.Wait()
-}
-
-func (c *Cache) cleanupShard(s *shard, now int64) {
-	if s == nil {
-		return
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var expired []*entry
-	for _, e := range s.items {
-		if e != nil && e.expireAt > 0 && now > e.expireAt {
-			expired = append(expired, e)
-		}
-	}
-
-	for _, e := range expired {
-		if e != nil {
-			delete(s.items, e.key)
-			s.removeEntry(e)
-			entryPool.Put(e)
-		}
-	}
-}
-
-//go:inline
 func (s *shard) addToFront(e *entry) {
 	if s == nil || e == nil {
 		return
@@ -489,7 +374,6 @@ func (s *shard) addToFront(e *entry) {
 	}
 }
 
-//go:inline
 func (s *shard) removeEntry(e *entry) {
 	if s == nil || e == nil {
 		return
@@ -506,7 +390,6 @@ func (s *shard) removeEntry(e *entry) {
 	}
 }
 
-//go:inline
 func (s *shard) moveToFront(e *entry) {
 	if s == nil || e == nil {
 		return

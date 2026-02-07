@@ -41,6 +41,7 @@ type Config struct {
 
 	TTL             string `json:"ttl,omitempty"` // Duration string (e.g., "5m")
 	HotReadCacheTTL string `json:"hot_read_cache_ttl,omitempty"`
+	HotCacheSize    int    `json:"hot_cache_size,omitempty"`
 	VirtualNodes    int    `json:"virtual_nodes,omitempty"`
 	ReplicaCount    int    `json:"replica_count,omitempty"`
 
@@ -96,6 +97,7 @@ type Options struct {
 
 	TTL             time.Duration
 	HotReadCacheTTL time.Duration
+	HotCacheSize    int
 	VirtualNodes    int
 	ReplicaCount    int
 
@@ -168,6 +170,7 @@ func ParseConfig(data []byte) (*Options, error) {
 		ReadRepairRateLimitPerSec: cfg.ReadRepairRateLimitPerSec,
 		DisableAuth:               cfg.DisableAuth,
 		BatchThreshold:            cfg.BatchThreshold,
+		HotCacheSize:              10000, // Default cache size
 	}
 
 	if cfg.TTL != "" {
@@ -183,6 +186,9 @@ func ParseConfig(data []byte) (*Options, error) {
 			return nil, fmt.Errorf("invalid hot_read_cache_ttl: %w", err)
 		}
 		options.HotReadCacheTTL = d
+	}
+	if cfg.HotCacheSize > 0 {
+		options.HotCacheSize = cfg.HotCacheSize
 	}
 	if cfg.FailureTimeout != "" {
 		d, err := time.ParseDuration(cfg.FailureTimeout)
@@ -403,6 +409,13 @@ func WithTTL(ttl time.Duration) Option {
 func WithHotReadCacheTTL(ttl time.Duration) Option {
 	return func(o *Options) {
 		o.HotReadCacheTTL = ttl
+	}
+}
+
+// WithHotCacheSize sets the hot read cache size.
+func WithHotCacheSize(size int) Option {
+	return func(o *Options) {
+		o.HotCacheSize = size
 	}
 }
 

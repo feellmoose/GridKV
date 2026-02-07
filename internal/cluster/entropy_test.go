@@ -213,7 +213,6 @@ func TestAntiEntropy_VersionVector(t *testing.T) {
 	_, vv2 := entropy2.Digest("version-key")
 
 	// Test sync detection - this tests the sync method
-	// Note: sync method may not exist or may have different signature
 	// This test focuses on verifying digest differences
 	if len(vv1) == 0 || len(vv2) == 0 {
 		t.Error("Version vectors should not be empty")

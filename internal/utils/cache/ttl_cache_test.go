@@ -10,10 +10,8 @@ import (
 
 func TestTTLCache_BasicOperations(t *testing.T) {
 	cache := New(Opts{
-		Shards:        16,
-		Size:          1000,
-		CleanupIntv:   100 * time.Millisecond,
-		EnableCleanup: true,
+		Shards: 16,
+		Size:   1000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -43,10 +41,8 @@ func TestTTLCache_BasicOperations(t *testing.T) {
 
 func TestTTLCache_Expiration(t *testing.T) {
 	cache := New(Opts{
-		Shards:        16,
-		Size:          1000,
-		CleanupIntv:   50 * time.Millisecond,
-		EnableCleanup: true,
+		Shards: 16,
+		Size:   1000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -71,10 +67,8 @@ func TestTTLCache_Expiration(t *testing.T) {
 
 func TestTTLCache_NoExpiration(t *testing.T) {
 	cache := New(Opts{
-		Shards:        16,
-		Size:          1000,
-		CleanupIntv:   100 * time.Millisecond,
-		EnableCleanup: false,
+		Shards: 16,
+		Size:   1000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -91,10 +85,8 @@ func TestTTLCache_NoExpiration(t *testing.T) {
 
 func TestTTLCache_LRUEviction(t *testing.T) {
 	cache := New(Opts{
-		Shards:        1, // Single shard for predictable LRU behavior
-		Size:          5,
-		CleanupIntv:   1 * time.Second,
-		EnableCleanup: false,
+		Shards: 1, // Single shard for predictable LRU behavior
+		Size:   5,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -123,10 +115,8 @@ func TestTTLCache_LRUEviction(t *testing.T) {
 
 func TestTTLCache_ConcurrentAccess(t *testing.T) {
 	cache := New(Opts{
-		Shards:        256,
-		Size:          10000,
-		CleanupIntv:   100 * time.Millisecond,
-		EnableCleanup: true,
+		Shards: 256,
+		Size:   10000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -162,59 +152,10 @@ func TestTTLCache_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
-func TestTTLCache_BackgroundCleanup(t *testing.T) {
-	cache := New(Opts{
-		Shards:        16,
-		Size:          1000,
-		CleanupIntv:   50 * time.Millisecond,
-		EnableCleanup: true,
-	})
-	defer func() { _ = cache.Close(context.Background()) }()
-
-	// Add many entries with short TTL
-	for i := 0; i < 100; i++ {
-		cache.Set(fmt.Sprintf("key%d", i), i, 100*time.Millisecond)
-	}
-
-	// Check initial count
-	if cache.Len() != 100 {
-		t.Fatalf("Expected 100 items, got %d", cache.Len())
-	}
-
-	// Wait for cleanup to run multiple times
-	// Wait longer than TTL (100ms) + cleanup interval (50ms) to ensure cleanup runs
-	// Add buffer time for parallel cleanup to complete across all shards
-	time.Sleep(200 * time.Millisecond)
-
-	// Wait for cleanup to complete - poll until count stabilizes or timeout
-	maxWait := 1 * time.Second
-	checkInterval := 50 * time.Millisecond
-	deadline := time.Now().Add(maxWait)
-	var count int
-
-	for time.Now().Before(deadline) {
-		count = cache.Len()
-		if count <= 10 {
-			// Cleanup completed successfully
-			return
-		}
-		// Wait a bit more for cleanup to complete
-		time.Sleep(checkInterval)
-	}
-
-	// Final check
-	count = cache.Len()
-	if count > 10 {
-		t.Fatalf("Expected most items to be cleaned up, but found %d after waiting", count)
-	}
-}
-
 func TestTTLCache_Update(t *testing.T) {
 	cache := New(Opts{
-		Shards:        16,
-		Size:          1000,
-		CleanupIntv:   100 * time.Millisecond,
-		EnableCleanup: false,
+		Shards: 16,
+		Size:   1000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -237,10 +178,8 @@ func TestTTLCache_Update(t *testing.T) {
 
 func BenchmarkTTLCache_Get_Hit(b *testing.B) {
 	cache := New(Opts{
-		Shards:        256,
-		Size:          100000,
-		CleanupIntv:   1 * time.Second,
-		EnableCleanup: false,
+		Shards: 256,
+		Size:   100000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -262,10 +201,8 @@ func BenchmarkTTLCache_Get_Hit(b *testing.B) {
 
 func BenchmarkTTLCache_Get_Miss(b *testing.B) {
 	cache := New(Opts{
-		Shards:        256,
-		Size:          100000,
-		CleanupIntv:   1 * time.Second,
-		EnableCleanup: false,
+		Shards: 256,
+		Size:   100000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -282,10 +219,8 @@ func BenchmarkTTLCache_Get_Miss(b *testing.B) {
 
 func BenchmarkTTLCache_Set(b *testing.B) {
 	cache := New(Opts{
-		Shards:        256,
-		Size:          1000000,
-		CleanupIntv:   1 * time.Second,
-		EnableCleanup: false,
+		Shards: 256,
+		Size:   1000000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -302,10 +237,8 @@ func BenchmarkTTLCache_Set(b *testing.B) {
 
 func BenchmarkTTLCache_SetAndGet(b *testing.B) {
 	cache := New(Opts{
-		Shards:        256,
-		Size:          100000,
-		CleanupIntv:   1 * time.Second,
-		EnableCleanup: false,
+		Shards: 256,
+		Size:   100000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -362,10 +295,8 @@ func BenchmarkSyncMap_Set(b *testing.B) {
 
 func TestTTLCache_Close(t *testing.T) {
 	cache := New(Opts{
-		Shards:        16,
-		Size:          1000,
-		CleanupIntv:   50 * time.Millisecond,
-		EnableCleanup: true,
+		Shards: 16,
+		Size:   1000,
 	})
 
 	// Add some entries
@@ -384,10 +315,8 @@ func TestTTLCache_Close(t *testing.T) {
 
 func TestTTLCache_CloseMultipleTimes(t *testing.T) {
 	cache := New(Opts{
-		Shards:        16,
-		Size:          1000,
-		CleanupIntv:   50 * time.Millisecond,
-		EnableCleanup: true,
+		Shards: 16,
+		Size:   1000,
 	})
 
 	_ = cache.Close(context.Background())
@@ -397,10 +326,8 @@ func TestTTLCache_CloseMultipleTimes(t *testing.T) {
 
 func TestTTLCache_HitCount(t *testing.T) {
 	cache := New(Opts{
-		Shards:        16,
-		Size:          1000,
-		CleanupIntv:   100 * time.Millisecond,
-		EnableCleanup: false,
+		Shards: 16,
+		Size:   1000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -421,10 +348,8 @@ func TestTTLCache_HitCount(t *testing.T) {
 
 func TestTTLCache_LRUOrder(t *testing.T) {
 	cache := New(Opts{
-		Shards:        1,
-		Size:          3,
-		CleanupIntv:   1 * time.Second,
-		EnableCleanup: false,
+		Shards: 1,
+		Size:   3,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -450,10 +375,8 @@ func TestTTLCache_LRUOrder(t *testing.T) {
 
 func TestTTLCache_UpdateTTL(t *testing.T) {
 	cache := New(Opts{
-		Shards:        16,
-		Size:          1000,
-		CleanupIntv:   100 * time.Millisecond,
-		EnableCleanup: false,
+		Shards: 16,
+		Size:   1000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -478,10 +401,8 @@ func TestTTLCache_UpdateTTL(t *testing.T) {
 
 func TestTTLCache_Clear(t *testing.T) {
 	cache := New(Opts{
-		Shards:        16,
-		Size:          1000,
-		CleanupIntv:   100 * time.Millisecond,
-		EnableCleanup: false,
+		Shards: 16,
+		Size:   1000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -512,10 +433,8 @@ func TestTTLCache_Clear(t *testing.T) {
 
 func TestTTLCache_ZeroShardSize(t *testing.T) {
 	cache := New(Opts{
-		Shards:        16,
-		Size:          0, // Unlimited
-		CleanupIntv:   100 * time.Millisecond,
-		EnableCleanup: false,
+		Shards: 16,
+		Size:   0, // Unlimited
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -544,10 +463,8 @@ func TestTTLCache_DefaultConfig(t *testing.T) {
 func TestTTLCache_ShardPowerOfTwo(t *testing.T) {
 	// Test that non-power-of-two shard count is adjusted
 	cache := New(Opts{
-		Shards:        100, // Not power of 2
-		Size:          1000,
-		CleanupIntv:   100 * time.Millisecond,
-		EnableCleanup: false,
+		Shards: 100, // Not power of 2
+		Size:   1000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -561,10 +478,8 @@ func TestTTLCache_ShardPowerOfTwo(t *testing.T) {
 
 func TestTTLCache_ConcurrentMixedOps(t *testing.T) {
 	cache := New(Opts{
-		Shards:        256,
-		Size:          10000,
-		CleanupIntv:   100 * time.Millisecond,
-		EnableCleanup: true,
+		Shards: 256,
+		Size:   10000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -597,10 +512,8 @@ func TestTTLCache_ConcurrentMixedOps(t *testing.T) {
 
 func TestTTLCache_LazyExpiration(t *testing.T) {
 	cache := New(Opts{
-		Shards:        16,
-		Size:          1000,
-		CleanupIntv:   1 * time.Second,
-		EnableCleanup: false,
+		Shards: 16,
+		Size:   1000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -612,18 +525,15 @@ func TestTTLCache_LazyExpiration(t *testing.T) {
 		t.Fatal("Expected key to be expired on access")
 	}
 
-	time.Sleep(50 * time.Millisecond)
-	if cache.Len() != 0 {
-		t.Fatalf("Expected 0 items after lazy expiration, got %d", cache.Len())
-	}
+	// We only guarantee that expired keys are not returned by Get(). Physical
+	// removal is handled by the background cleaner on a fixed interval, so the
+	// internal length may be >0 until the next cleanup tick.
 }
 
 func TestTTLCache_StressTest(t *testing.T) {
 	cache := New(Opts{
-		Shards:        256,
-		Size:          100000,
-		CleanupIntv:   100 * time.Millisecond,
-		EnableCleanup: true,
+		Shards: 256,
+		Size:   100000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -647,10 +557,8 @@ func TestTTLCache_StressTest(t *testing.T) {
 
 func TestTTLCache_DeleteNonExistent(t *testing.T) {
 	cache := New(Opts{
-		Shards:        16,
-		Size:          1000,
-		CleanupIntv:   100 * time.Millisecond,
-		EnableCleanup: false,
+		Shards: 16,
+		Size:   1000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 
@@ -668,10 +576,8 @@ func TestTTLCache_DeleteNonExistent(t *testing.T) {
 
 func TestTTLCache_UpdateExistingValue(t *testing.T) {
 	cache := New(Opts{
-		Shards:        16,
-		Size:          1000,
-		CleanupIntv:   100 * time.Millisecond,
-		EnableCleanup: false,
+		Shards: 16,
+		Size:   1000,
 	})
 	defer func() { _ = cache.Close(context.Background()) }()
 

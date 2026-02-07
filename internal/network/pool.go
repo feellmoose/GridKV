@@ -341,11 +341,16 @@ func (p *connPool) Get(ctx context.Context, address string) (Conn, error) {
 				}
 			}
 
+			// Use timer instead of time.After to avoid allocation per wait
+			timer := time.NewTimer(waitTimeout)
 			select {
 			case <-waiter:
+				if !timer.Stop() {
+					<-timer.C
+				}
 				atomic.AddInt64(&p.stats.Waiters, -1)
 				return p.Get(ctx, address)
-			case <-time.After(waitTimeout):
+			case <-timer.C:
 				atomic.AddInt64(&p.stats.Waiters, -1)
 				p.removeWaiter(shard, ap, waiter)
 				if p.debugEnabled.Load() {
@@ -354,6 +359,9 @@ func (p *connPool) Get(ctx context.Context, address string) (Conn, error) {
 				}
 				return nil, ErrPoolExhausted
 			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
 				atomic.AddInt64(&p.stats.Waiters, -1)
 				p.removeWaiter(shard, ap, waiter)
 				if p.debugEnabled.Load() {
@@ -604,9 +612,14 @@ func (p *connPool) Close() error {
 			wg.Wait()
 			close(done)
 		}()
+		// Use timer for close timeout instead of time.After
+		timer := time.NewTimer(3 * time.Second)
 		select {
 		case <-done:
-		case <-time.After(3 * time.Second):
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
 		}
 
 		atomic.StoreInt64(&p.stats.Total, 0)

@@ -61,14 +61,15 @@ func BenchmarkBasicOps(b *testing.B) {
 
 	// Benchmark read operations (need to prepopulate first)
 	b.Run("Read", func(b *testing.B) {
-		// Pre-populate some data
 		for i := 0; i < keyCount; i++ {
 			key := fmt.Sprintf("bench-read-%d", i)
 			value := make([]byte, 256)
 			for j := range value {
 				value[j] = byte(i % 256)
 			}
-			nodes[i%len(nodes)].Set(ctx, key, value)
+			if err := nodes[i%len(nodes)].Set(ctx, key, value); err != nil {
+				b.Fatalf("failed to prepopulate key %s: %v", key, err)
+			}
 		}
 
 		b.ResetTimer()

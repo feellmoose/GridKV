@@ -177,11 +177,36 @@ func (s *networkServer) acceptLoop() {
 		s.activeConns.Store(conn, struct{}{})
 
 		// Distribute connection to worker pool
+		// Use non-blocking check first to avoid race condition with connCh close
+		select {
+		case <-s.stopCh:
+			conn.Close()
+			return
+		default:
+		}
+
+		// Try to send with timeout to avoid blocking if connCh is being closed
 		select {
 		case s.connCh <- conn:
 		case <-s.stopCh:
 			conn.Close()
 			return
+		case <-time.After(10 * time.Millisecond):
+			// If we can't send quickly, connection might be closing
+			// Check stopCh again and close connection
+			select {
+			case <-s.stopCh:
+				conn.Close()
+				return
+			default:
+				// Still try to send, but if it fails, close connection
+				select {
+				case s.connCh <- conn:
+				default:
+					conn.Close()
+					return
+				}
+			}
 		}
 	}
 }
@@ -296,12 +321,7 @@ func (s *networkServer) Stop(ctx context.Context) error {
 			err = s.listener.Close()
 		}
 
-		// Close connCh to signal workers to stop (must be done here to ensure it's closed)
-		s.connChOnce.Do(func() {
-			close(s.connCh)
-		})
-
-		// Wait for acceptLoop to exit
+		// Wait for acceptLoop to exit before closing connCh to avoid race condition
 		acceptDone := make(chan struct{})
 		go func() {
 			s.wg.Wait()
@@ -334,6 +354,12 @@ func (s *networkServer) Stop(ctx context.Context) error {
 			// Close connection to unblock any blocked operations
 			conn.Close()
 		}
+
+		// Close connCh after acceptLoop has exited to avoid race condition
+		// This signals workerLoop to exit (for conn := range s.connCh will end)
+		s.connChOnce.Do(func() {
+			close(s.connCh)
+		})
 
 		// Wait for all worker goroutines to exit after connections are closed
 		// Use context timeout or extended timeout, whichever is shorter

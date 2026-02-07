@@ -90,7 +90,7 @@ func TestConnPool_GetPut(t *testing.T) {
 					if err != nil {
 						return
 					}
-					c.Send(ctx, data) // echo
+					_ = c.Send(ctx, data) // echo
 				}
 			}(conn)
 		}

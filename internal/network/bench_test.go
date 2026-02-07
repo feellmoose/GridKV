@@ -92,7 +92,7 @@ func BenchmarkServer_HandleMessage(b *testing.B) {
 	if err := server.Start(ctx, addr, handler); err != nil {
 		b.Fatalf("Start() error = %v", err)
 	}
-	defer server.Stop(ctx)
+	defer func() { _ = server.Stop(ctx) }()
 
 	serverAddr := server.Address()
 

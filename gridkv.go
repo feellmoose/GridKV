@@ -132,8 +132,8 @@ func NewGridKV(options ...interface{}) (*GridKV, error) {
 		ShardCount:           opts.Storage.ShardCount,
 		CompressionEnabled:   true,
 		CompressionThreshold: 64,
-		EvictThreshold:       90,
-		EvictTarget:          80,
+		// Eviction thresholds/targets use mem_storage defaults (currently 85/70)
+		// to provide a conservative soft limit suitable for SDK usage.
 	}
 	store, err := mem_storage.New(storeConfig)
 	if err != nil {
@@ -204,7 +204,8 @@ func NewGridKV(options ...interface{}) (*GridKV, error) {
 
 		GossipInterval: opts.GossipInterval,
 
-		CacheTTL: opts.HotReadCacheTTL,
+		CacheTTL:  opts.HotReadCacheTTL,
+		CacheSize: opts.HotCacheSize,
 
 		EntropyInterval: 5 * time.Minute,
 

@@ -15,7 +15,8 @@ var (
 	// String slice pool for GetN results
 	getNResultPool = sync.Pool{
 		New: func() interface{} {
-			return make([]string, 0, 8)
+			buf := make([]string, 0, 8)
+			return &buf
 		},
 	}
 
@@ -148,34 +149,35 @@ func (r *hashRing) GetN(key string, n int) []string {
 	}
 
 	// Use pool to reduce allocations
-	result := getNResultPool.Get().([]string)
-	result = result[:0] // Reset length, keep capacity
+	resultPtr := getNResultPool.Get().(*[]string)
+	result := (*resultPtr)[:0]
 	seen := getNSeenPool.Get().(map[string]bool)
 	for k := range seen {
 		delete(seen, k)
 	}
 	defer func() {
 		if cap(result) <= 32 {
-			getNResultPool.Put(result[:0])
+			*resultPtr = (*resultPtr)[:0]
+			getNResultPool.Put(resultPtr)
 		}
 		if len(seen) <= 32 {
 			getNSeenPool.Put(seen)
 		}
 	}()
 
-	for i := 0; i < len(data.nodes) && len(result) < n; i++ {
+	for i := 0; i < len(data.nodes) && len(*resultPtr) < n; i++ {
 		pos := (idx + i) % len(data.nodes)
 		nodeID := data.nodes[pos].nodeID
 
 		if !seen[nodeID] {
 			seen[nodeID] = true
-			result = append(result, nodeID)
+			*resultPtr = append(*resultPtr, nodeID)
 		}
 	}
 
 	// Return copy to avoid pool reuse issues
-	resultCopy := make([]string, len(result))
-	copy(resultCopy, result)
+	resultCopy := make([]string, len(*resultPtr))
+	copy(resultCopy, *resultPtr)
 	return resultCopy
 }
 

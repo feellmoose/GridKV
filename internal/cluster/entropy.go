@@ -44,8 +44,6 @@ type antiEntropyConfig struct {
 
 func newAntiEntropy(cfg antiEntropyConfig) *antiEntropy {
 	if cfg.Interval <= 0 {
-		// Reduced default interval for faster consistency convergence
-		// Original: 5 minutes, optimized: 30 seconds
 		cfg.Interval = 30 * time.Second
 	}
 
@@ -68,7 +66,6 @@ func (ae *antiEntropy) Digest(rangeKey string) ([]byte, map[string]int64) {
 	bloom := make([]byte, bloomSize/8)
 
 	// Version vector: map[nodeID]maxVersion
-	// Note: Since Version is compressed int64 (not HLC string), we use key-based tracking
 	vv := make(map[string]int64)
 
 	for _, key := range keys {
@@ -246,7 +243,6 @@ func (ae *antiEntropy) doAntiEntropy() {
 	// For now, we'll do a one-way sync: compare with what we know
 
 	// Compare digests and sync differences
-	// Note: Remote VV not available in simplified implementation, so we use empty map
 	// The bloom filter comparison will still detect missing keys
 	diffKeys, err := ae.Sync(localBloom, make(map[string]int64))
 	if err != nil || len(diffKeys) == 0 {

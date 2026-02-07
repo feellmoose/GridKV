@@ -29,6 +29,10 @@ type NodeInfo struct {
 	State       NodeState
 	Incarnation int64
 	LastActive  time.Time
+	// SuspectSince records when the node entered NodeStateSuspect.
+	// Used by the central suspect scanner to decide when to mark dead
+	// without per-node timers.
+	SuspectSince time.Time
 }
 
 // MemberMgr manages cluster membership using SWIM protocol
@@ -52,9 +56,10 @@ type memberMgr struct {
 	failureTimeout time.Duration
 	suspectTimeout time.Duration
 
-	executor *executor.Exec
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	executor  *executor.Exec
+	scheduler *executor.Scheduler
+	stopCh    chan struct{}
+	wg        sync.WaitGroup
 
 	// Network send function (placeholder, will be replaced by network layer)
 	sendFunc func(address string, msg interface{}) error
@@ -79,13 +84,15 @@ type memberConfig struct {
 
 func newMemberMgr(cfg memberConfig) (*memberMgr, error) {
 	if cfg.PingInterval <= 0 {
-		cfg.PingInterval = 200 * time.Millisecond
+		// Default ping interval is usually derived from FailureTimeout by higher layers.
+		// Keep a conservative safety fallback here.
+		cfg.PingInterval = 250 * time.Millisecond
 	}
 	if cfg.FailureTimeout <= 0 {
-		cfg.FailureTimeout = 5 * time.Second
+		cfg.FailureTimeout = 12 * time.Second
 	}
 	if cfg.SuspectTimeout <= 0 {
-		cfg.SuspectTimeout = 2 * time.Second
+		cfg.SuspectTimeout = 8 * time.Second
 	}
 
 	exec, err := executor.New(executor.Opts{
@@ -104,6 +111,7 @@ func newMemberMgr(cfg memberConfig) (*memberMgr, error) {
 		failureTimeout:     cfg.FailureTimeout,
 		suspectTimeout:     cfg.SuspectTimeout,
 		executor:           exec,
+		scheduler:          executor.NewScheduler(),
 		stopCh:             make(chan struct{}),
 		sendFunc:           cfg.SendFunc,
 		onMembershipChange: cfg.OnMembershipChange,
@@ -137,6 +145,9 @@ func (m *memberMgr) Close(ctx context.Context) error {
 	case <-m.stopCh:
 	default:
 		close(m.stopCh)
+	}
+	if m.scheduler != nil {
+		m.scheduler.Close()
 	}
 	if err := m.executor.Stop(10 * time.Second); err != nil {
 		return err
@@ -189,7 +200,7 @@ func (m *memberMgr) doPing() {
 
 		now := time.Now()
 
-		// Check for failure timeout - mark suspect or dead based on current state
+		// Check for failure timeout - mark suspect or dead based on current state.
 		if now.Sub(info.LastActive) > m.failureTimeout {
 			if info.State == NodeStateSuspect {
 				m.markDead(nodeID)
@@ -493,8 +504,11 @@ func (m *memberMgr) markSuspect(nodeID string) {
 		m.onMembershipChange()
 	}
 
-	// Schedule confirm check
-	time.AfterFunc(m.suspectTimeout, func() {
+	if m.scheduler == nil {
+		return
+	}
+
+	m.scheduler.Schedule(m.suspectTimeout, func() {
 		value, ok := m.members.Load(nodeID)
 		if !ok {
 			return
@@ -572,38 +586,61 @@ func (m *memberMgr) updateNode(nodeID string, address string, incarnation int64,
 		return
 	}
 	value, ok := m.members.Load(nodeID)
-	wasNew := !ok
-	stateChanged := false
+	now := time.Now()
 
 	if !ok {
+		// New node: allocate info once.
 		info := &NodeInfo{
 			NodeID:      nodeID,
 			Address:     address,
 			State:       state,
 			Incarnation: incarnation,
-			LastActive:  time.Now(),
+			LastActive:  now,
 		}
 		m.members.Store(nodeID, info)
-		stateChanged = true
+		if m.onMembershipChange != nil {
+			m.onMembershipChange()
+		}
 		logging.Debug("new node discovered", "nodeID", nodeID, "address", address, "local", m.nodeID)
-	} else {
-		info := value.(*NodeInfo)
-		if incarnation < info.Incarnation {
-			return
-		}
-
-		stateChanged = (info.State != state)
-		newInfo := &NodeInfo{
-			NodeID:      nodeID,
-			Address:     address,
-			State:       state,
-			Incarnation: incarnation,
-			LastActive:  time.Now(),
-		}
-		m.members.Store(nodeID, newInfo)
+		return
 	}
 
-	if (wasNew || stateChanged) && m.onMembershipChange != nil {
+	info := value.(*NodeInfo)
+	if incarnation < info.Incarnation {
+		// Stale update, ignore.
+		return
+	}
+
+	// Fast path: state and address unchanged, only refresh LastActive.
+	if info.State == state && info.Address == address && info.Incarnation == incarnation {
+		// Avoid allocating a new NodeInfo; just bump LastActive with a small
+		// threshold to reduce write traffic under rapid ping/ack.
+		if now.Sub(info.LastActive) > time.Second {
+			// Create new NodeInfo to avoid race condition with concurrent readers
+			newInfo := &NodeInfo{
+				NodeID:      nodeID,
+				Address:     address,
+				State:       state,
+				Incarnation: incarnation,
+				LastActive:  now,
+			}
+			m.members.Store(nodeID, newInfo)
+		}
+		return
+	}
+
+	// State/address or incarnation changed: replace NodeInfo so that readers
+	// always see a consistent snapshot.
+	newInfo := &NodeInfo{
+		NodeID:      nodeID,
+		Address:     address,
+		State:       state,
+		Incarnation: incarnation,
+		LastActive:  now,
+	}
+	m.members.Store(nodeID, newInfo)
+
+	if m.onMembershipChange != nil {
 		m.onMembershipChange()
 	}
 }

@@ -19,7 +19,8 @@ var (
 	// String slice pool for aliveMembers
 	aliveMembersPool = sync.Pool{
 		New: func() interface{} {
-			return make([]string, 0, 64)
+			buf := make([]string, 0, 64)
+			return &buf
 		},
 	}
 
@@ -181,39 +182,42 @@ func (g *gossip) doGossip() {
 
 	// Select log(N) random targets for fan-out
 	// Use object pool to reduce allocations
-	aliveMembers := aliveMembersPool.Get().([]string)
-	aliveMembers = aliveMembers[:0] // Reset length
-	defer aliveMembersPool.Put(aliveMembers)
+	aliveMembersPtr := aliveMembersPool.Get().(*[]string)
+	*aliveMembersPtr = (*aliveMembersPtr)[:0]
+	defer func() {
+		*aliveMembersPtr = (*aliveMembersPtr)[:0]
+		aliveMembersPool.Put(aliveMembersPtr)
+	}()
 
 	for _, m := range members {
 		if m.NodeID != g.nodeID && m.State == NodeStateAlive {
-			aliveMembers = append(aliveMembers, m.NodeID)
+			*aliveMembersPtr = append(*aliveMembersPtr, m.NodeID)
 		}
 	}
 
-	if len(aliveMembers) == 0 {
+	if len(*aliveMembersPtr) == 0 {
 		return
 	}
 
 	// Fan-out = log2(N), but at least 1
 	fanOut := 1
-	if len(aliveMembers) > 1 {
-		n := len(aliveMembers)
+	if len(*aliveMembersPtr) > 1 {
+		n := len(*aliveMembersPtr)
 		// Calculate log2(n) efficiently
 		fanOut = 0
 		for n > 0 {
 			fanOut++
 			n >>= 1
 		}
-		if fanOut > len(aliveMembers) {
-			fanOut = len(aliveMembers)
+		if fanOut > len(*aliveMembersPtr) {
+			fanOut = len(*aliveMembersPtr)
 		}
 	}
 
 	// Random selection to avoid hotspots
 	// Shuffle first fanOut positions
 	selected := make([]string, fanOut)
-	copy(selected, aliveMembers[:fanOut])
+	copy(selected, (*aliveMembersPtr)[:fanOut])
 
 	// Simple shuffle using current time as seed (in production, use crypto/rand)
 	for i := len(selected) - 1; i > 0; i-- {
@@ -336,13 +340,20 @@ func (g *gossip) pushToTarget(target string, data []byte, maxRetries int) {
 		defer timeout.Stop()
 		done := errorChanPool.Get().(chan error)
 
+		// Use buffered channel to prevent goroutine leak if timeout occurs
+		doneWithBuffer := make(chan error, 1)
 		go func() {
-			done <- g.sendFunc(target, msg)
+			err := g.sendFunc(target, msg)
+			select {
+			case doneWithBuffer <- err:
+			case <-timeout.C:
+				// Timeout occurred, discard result to prevent goroutine leak
+			}
+			errorChanPool.Put(done)
 		}()
 
 		select {
-		case err := <-done:
-			errorChanPool.Put(done)
+		case err := <-doneWithBuffer:
 			if err == nil {
 				return
 			}
@@ -353,7 +364,6 @@ func (g *gossip) pushToTarget(target string, data []byte, maxRetries int) {
 				logging.Debug("gossip push failed, retrying", "node", g.nodeID, "target", target, "attempt", i+1, "error", err)
 			}
 		case <-timeout.C:
-			errorChanPool.Put(done)
 			if i == maxRetries-1 || i%3 == 0 {
 				logging.Debug("gossip push timeout, retrying", "node", g.nodeID, "target", target, "attempt", i+1)
 			}
@@ -413,6 +423,10 @@ func (g *gossip) Pull(target string) ([]*mem_storage.SyncOperation, error) {
 }
 
 func (g *gossip) applyOps(ops []*mem_storage.SyncOperation) error {
+	if g == nil || g.store == nil {
+		return nil
+	}
+
 	if len(ops) == 0 {
 		return nil
 	}
@@ -441,7 +455,7 @@ func (g *gossip) applyOps(ops []*mem_storage.SyncOperation) error {
 	appliedCount := 0
 	skippedCount := 0
 	for _, op := range ops {
-		if op.Item == nil {
+		if op == nil || op.Item == nil {
 			skippedCount++
 			continue
 		}
@@ -509,8 +523,7 @@ func (g *gossip) HandleMessage(data []byte) error {
 			remoteOps, err := DeserializeSyncOps(payload[idx+1:])
 			if err == nil && len(remoteOps) > 0 {
 				// Apply remote operations (error ignored as this is async gossip path)
-				if err := g.applyOps(remoteOps); err != nil {
-				}
+				_ = g.applyOps(remoteOps)
 			}
 		}
 		// Send back local ops (push-pull pattern)
@@ -548,8 +561,7 @@ func (g *gossip) HandleMessage(data []byte) error {
 				copy(responseMsg, pushPrefix)
 				copy(responseMsg[len(pushPrefix):], serializedData)
 				// Send response (error ignored as this is async gossip path)
-				if err := g.sendFunc(targetAddr, responseMsg); err != nil {
-				}
+				_ = g.sendFunc(targetAddr, responseMsg)
 			})
 		}
 	}

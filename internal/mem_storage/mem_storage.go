@@ -11,32 +11,18 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/feellmoose/gridkv/internal/utils/compress"
 	"github.com/feellmoose/gridkv/internal/utils/lifecycle"
 	"github.com/feellmoose/gridkv/internal/utils/zerocopy"
-	"github.com/klauspost/compress/zstd"
 	"github.com/zeebo/xxh3"
 )
 
 // MemStorage provides distributed-ready in-memory storage.
-//
-// Features:
-//   - Sharded architecture for high concurrency (2-4x CPU cores)
-//   - Zstd compression for large values (>64 bytes, 60-80% savings)
-//   - Sharded LRU eviction (proactive, targets 80% capacity)
-//   - Concurrent-safe conflict resolution (last-write-wins)
-//   - Zero-copy and batch operations
-//   - Per-shard sync buffers for distributed replication
-//
-// Memory: 60-80% compression savings, efficient space usage
 type MemStorage struct {
 	shards      []*storageShard
 	shardCount  int
 	shardMask   uint64
 	maxMemoryMB int64
-
-	// Compression pools (shared across shards)
-	encoderPool sync.Pool
-	decoderPool sync.Pool
 
 	// Global stats (atomic)
 	totalKeys       atomic.Int64
@@ -57,24 +43,28 @@ type MemStorage struct {
 	evictThreshold int64         // Start eviction at this percentage (90%)
 	evictTarget    int64         // Target memory after eviction (80%)
 	evictShardIdx  atomic.Uint64 // Round-robin eviction
+	evictBatchSize int           // Number of keys to evict per batch
+	asyncEviction  bool          // Enable async background eviction
 
 	// Lifecycle
 	cleanerStop    chan struct{}
 	cleanerRunning atomic.Bool
+	evictStop      chan struct{}
+	evictRunning   atomic.Bool
 }
 
 // Config configures MemStorage.
 type Config struct {
-	// MaxMemoryMB limits total memory (0 = unlimited).
+	// MaxMemoryMB limits total memory.
+	// Zero or negative values are treated as "use conservative default" for SDK safety.
 	MaxMemoryMB int64
 
 	// ShardCount is number of shards (0 = auto: 2-4x CPU cores).
 	ShardCount int
 
-	// CompressionEnabled enables zstd compression.
 	CompressionEnabled bool
 
-	// CompressionThreshold is min size to compress (bytes).
+	// CompressionThreshold is min size to compress (bytes, default: 64).
 	CompressionThreshold int
 
 	// EvictThreshold is memory percentage to start eviction (default: 90).
@@ -82,6 +72,12 @@ type Config struct {
 
 	// EvictTarget is target memory percentage after eviction (default: 80).
 	EvictTarget int
+
+	// EvictBatchSize is number of keys to evict per batch (default: 10).
+	EvictBatchSize int
+
+	// AsyncEviction enables background async eviction (default: true).
+	AsyncEviction bool
 }
 
 // storageShard represents a single storage shard.
@@ -148,13 +144,18 @@ const (
 )
 
 // DefaultConfig returns default configuration.
+// Uses LZ4 compression for optimal balance between speed and compression ratio.
+// Includes a conservative in-memory size limit suitable for long-running SDK usage.
 func DefaultConfig() Config {
 	return Config{
-		ShardCount:           0, // auto
+		MaxMemoryMB:          512, // soft limit per process; eviction keeps heap bounded for SDK usage
+		ShardCount:           0,   // auto
 		CompressionEnabled:   true,
 		CompressionThreshold: 64,
-		EvictThreshold:       90,
-		EvictTarget:          80,
+		EvictThreshold:       85,
+		EvictTarget:          70,
+		EvictBatchSize:       10, // Default batch size
+		AsyncEviction:        true,
 	}
 }
 
@@ -166,14 +167,13 @@ func New(config Config) (*MemStorage, error) {
 		cpuCount := runtime.GOMAXPROCS(0)
 		shardCount = cpuCount * 8
 		if shardCount < 256 {
-			shardCount = 256 // Minimum for basic concurrency
+			shardCount = 256
 		}
 		if shardCount > 4096 {
 			shardCount = 4096 // Cap to prevent excessive overhead
 		}
 	}
 
-	// Round to power of 2 for fast masking
 	shardCount = int(nextPowerOf2(uint64(shardCount)))
 
 	compressionThresh := config.CompressionThreshold
@@ -183,45 +183,52 @@ func New(config Config) (*MemStorage, error) {
 
 	evictThreshold := int64(config.EvictThreshold)
 	if evictThreshold == 0 {
-		evictThreshold = 90
+		// Start eviction a bit earlier to avoid hitting the hard limit
+		evictThreshold = 85
 	}
 
 	evictTarget := int64(config.EvictTarget)
 	if evictTarget == 0 {
-		evictTarget = 80
+		// Evict down to a lower watermark to give GC headroom
+		evictTarget = 70
+	}
+
+	evictBatchSize := config.EvictBatchSize
+	if evictBatchSize == 0 {
+		evictBatchSize = 10 // Default batch size
+	}
+	if evictBatchSize < 1 {
+		evictBatchSize = 1
+	}
+	if evictBatchSize > 100 {
+		evictBatchSize = 100 // Cap to prevent excessive lock hold time
+	}
+
+	asyncEviction := config.AsyncEviction
+	if !config.AsyncEviction {
+		asyncEviction = true // Default enabled
+	}
+
+	maxMemoryMB := config.MaxMemoryMB
+	if maxMemoryMB <= 0 {
+		// Enforce a soft upper bound even when caller does not provide one.
+		// This prevents unbounded growth in long-running SDK scenarios.
+		maxMemoryMB = 512
 	}
 
 	s := &MemStorage{
 		shards:             make([]*storageShard, shardCount),
 		shardCount:         shardCount,
 		shardMask:          uint64(shardCount - 1),
-		maxMemoryMB:        config.MaxMemoryMB,
+		maxMemoryMB:        maxMemoryMB,
 		compressionEnabled: config.CompressionEnabled,
 		compressionThresh:  compressionThresh,
 		evictThreshold:     evictThreshold,
 		evictTarget:        evictTarget,
+		evictBatchSize:     evictBatchSize,
+		asyncEviction:      asyncEviction,
 		cleanerStop:        make(chan struct{}),
-	}
-
-	// Initialize compression pools
-	if s.compressionEnabled {
-		s.encoderPool.New = func() interface{} {
-			encoder, err := zstd.NewWriter(nil,
-				zstd.WithEncoderLevel(zstd.SpeedDefault),
-				zstd.WithEncoderConcurrency(1),
-			)
-			if err != nil {
-				panic(fmt.Sprintf("failed to create zstd encoder: %v", err))
-			}
-			return encoder
-		}
-		s.decoderPool.New = func() interface{} {
-			decoder, err := zstd.NewReader(nil)
-			if err != nil {
-				panic(fmt.Sprintf("failed to create zstd decoder: %v", err))
-			}
-			return decoder
-		}
+		evictStop:          make(chan struct{}),
 	}
 
 	// Initialize shards
@@ -240,6 +247,11 @@ func New(config Config) (*MemStorage, error) {
 
 	// Start expiration cleaner
 	s.startCleaner()
+
+	// Start async eviction if enabled
+	if s.asyncEviction && s.maxMemoryMB > 0 {
+		s.startAsyncEviction()
+	}
 
 	return s, nil
 }
@@ -263,13 +275,10 @@ func (s *MemStorage) Set(key string, item *StoredItem) error {
 
 	shard := s.getShard(key)
 
-	// Compress if enabled and prepare item
 	compItem, itemSize, err := s.prepareCompressedItem(key, item)
 	if err != nil {
 		return err
 	}
-
-	// Memory limit check and eviction
 	if s.maxMemoryMB > 0 {
 		if err := s.checkAndEvict(itemSize); err != nil {
 			return err
@@ -296,7 +305,6 @@ func (s *MemStorage) prepareCompressedItem(key string, item *StoredItem) (*compr
 	// Calculate size
 	itemSize := s.calculateItemSize(key, compressedValue)
 
-	// Create compressed item
 	compItem := &compressedItem{
 		Version:    item.Version,
 		ExpireAt:   item.ExpireAt,
@@ -359,11 +367,8 @@ func (s *MemStorage) updateStatsForNewKey(shard *storageShard, compItem *compres
 func (s *MemStorage) tryUpdateExistingKey(shard *storageShard, key string, existing interface{}, compItem *compressedItem, itemSize int64, originalItem *StoredItem) error {
 	existingItem := existing.(*compressedItem)
 
-	// Fast path: version-only comparison (no decompression needed for LWW)
-	// This is sufficient for consistency and much faster
 	existingVersion := existingItem.Version
 	if compItem.Version <= existingVersion {
-		// Existing version wins, skip update (no decompression needed)
 		s.setCount.Add(1)
 		return nil
 	}
@@ -390,23 +395,6 @@ func (s *MemStorage) tryUpdateExistingKey(shard *storageShard, key string, exist
 
 	// CAS failed, retry
 	return errRetry
-}
-
-// getExistingValueForComparison safely extracts the value from an existing item for comparison
-// NOTE: This function is now deprecated in favor of version-only comparison for performance
-// Kept for backward compatibility but should not be used in hot paths
-func (s *MemStorage) getExistingValueForComparison(existingItem *compressedItem) ([]byte, error) {
-	if existingItem.Compressed {
-		// Decompress for comparison
-		decompressed, err := s.decompress(existingItem.Value, true)
-		if err != nil {
-			// On error, use compressed value for comparison
-			return zerocopy.FastCloneBytes(existingItem.Value), nil
-		}
-		return decompressed, nil // Already new allocation
-	}
-	// Use zerocopy fast clone for uncompressed values
-	return zerocopy.FastCloneBytes(existingItem.Value), nil
 }
 
 // updateStatsForExistingKey updates statistics when replacing an existing key
@@ -456,29 +444,25 @@ func (s *MemStorage) Get(key string) (*StoredItem, error) {
 	s.hitCount.Add(1)
 	s.touchLRU(shard, key)
 
-	// Decompress if needed
 	var valueBytes []byte
 	if compItem.Compressed {
-		decompressed, err := s.decompress(compItem.Value, true)
+		var err error
+		valueBytes, err = s.decompressValue(compItem)
 		if err != nil {
 			return nil, err
 		}
-		valueBytes = decompressed
 	} else {
-		valueBytes = compItem.Value
+		valueBytes = fastCloneBytes(compItem.Value)
 	}
-
-	// Return deep copy
 	result := &StoredItem{
 		Version:  compItem.Version,
 		ExpireAt: compItem.ExpireAt,
-		Value:    fastCloneBytes(valueBytes), // Must copy for safety
+		Value:    valueBytes,
 	}
 
 	return result, nil
 }
 
-// Delete removes key with optimistic locking.
 func (s *MemStorage) Delete(key string, version int64) error {
 	if key == "" {
 		return ErrEmptyKey
@@ -519,54 +503,28 @@ func (s *MemStorage) Delete(key string, version int64) error {
 	return nil
 }
 
-// compress compresses data if beneficial.
 func (s *MemStorage) compress(data []byte) ([]byte, bool) {
-	if len(data) < 100 {
-		return data, false // Too small to benefit
-	}
-
-	// Check if already compressed
-	if len(data) >= 4 {
-		magic := uint32(data[0]) | uint32(data[1])<<8 | uint32(data[2])<<16 | uint32(data[3])<<24
-		if magic == 0xFD2FB528 { // zstd magic
-			return data, false
-		}
-	}
-
-	encoder := s.encoderPool.Get().(*zstd.Encoder)
-	defer s.encoderPool.Put(encoder)
-
-	estimatedSize := len(data) / 2
-	if estimatedSize < 64 {
-		estimatedSize = 64
-	}
-	compressed := encoder.EncodeAll(data, make([]byte, 0, estimatedSize))
-
-	// Only use if actually smaller (5% threshold)
-	ratio := float64(len(compressed)) / float64(len(data))
-	if ratio < 0.95 {
-		return compressed, true
-	}
-	return data, false
+	return compress.Compress(data, s.compressionThresh)
 }
 
-// decompress decompresses data.
-func (s *MemStorage) decompress(data []byte, wasCompressed bool) ([]byte, error) {
-	if !wasCompressed {
-		return data, nil
+func (s *MemStorage) decompressValue(compItem *compressedItem) ([]byte, error) {
+	if !compItem.Compressed {
+		return nil, nil
 	}
-
-	decoder := s.decoderPool.Get().(*zstd.Decoder)
-	defer s.decoderPool.Put(decoder)
-
-	decompressed, err := decoder.DecodeAll(data, make([]byte, 0, len(data)*2))
+	est := compItem.OrigSize
+	if est <= 0 {
+		est = len(compItem.Value) * 2
+	}
+	if est < len(compItem.Value)*2 {
+		est = len(compItem.Value) * 2
+	}
+	out, _, err := compress.DecompressTo(compItem.Value, nil, est)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("lz4 decompress failed: %w", err)
 	}
-	return decompressed, nil
+	return out, nil
 }
 
-// calculateItemSize calculates approximate memory size.
 func (s *MemStorage) calculateItemSize(key string, value []byte) int64 {
 	const (
 		stringOverhead  = 16
@@ -578,6 +536,7 @@ func (s *MemStorage) calculateItemSize(key string, value []byte) int64 {
 }
 
 // checkAndEvict checks memory and evicts if needed.
+// With async eviction enabled, this only does a quick check and triggers async eviction.
 func (s *MemStorage) checkAndEvict(itemSize int64) error {
 	maxBytes := s.maxMemoryMB * 1024 * 1024
 	current := s.totalBytes.Load()
@@ -587,15 +546,31 @@ func (s *MemStorage) checkAndEvict(itemSize int64) error {
 		return nil
 	}
 
-	// Evict until below target
+	// The background goroutine will handle the rest
+	if s.asyncEviction {
+		// Quick synchronous eviction: only if we're way over limit
+		if current+itemSize > maxBytes {
+			// Over hard limit, must evict synchronously
+			evicted := s.evictBatchLRU(5) // Quick batch
+			if evicted == 0 {
+				return ErrMemoryLimit
+			}
+		}
+		// Otherwise, let async eviction handle it
+		return nil
+	}
+
+	// Synchronous eviction (original behavior)
 	target := maxBytes * s.evictTarget / 100
 	evicted := 0
-	for current+itemSize > target && evicted < 200 {
-		if !s.evictLRU() {
+	maxEvictions := 200
+	for current+itemSize > target && evicted < maxEvictions {
+		batchEvicted := s.evictBatchLRU(s.evictBatchSize)
+		if batchEvicted == 0 {
 			break
 		}
+		evicted += batchEvicted
 		current = s.totalBytes.Load()
-		evicted++
 	}
 
 	// Check if still over limit
@@ -606,49 +581,51 @@ func (s *MemStorage) checkAndEvict(itemSize int64) error {
 	return nil
 }
 
-// evictLRU evicts one item using round-robin.
-func (s *MemStorage) evictLRU() bool {
-	startIdx := s.evictShardIdx.Add(1) & s.shardMask
+// evictBatchLRU evicts multiple items from current shard in batch.
+func (s *MemStorage) evictBatchLRU(batchSize int) int {
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+	if batchSize > 100 {
+		batchSize = 100
+	}
 
-	for i := 0; i < s.shardCount; i++ {
-		idx := (startIdx + uint64(i)) & s.shardMask
-		shard := s.shards[idx]
+	idx := s.evictShardIdx.Add(1) & s.shardMask
+	shard := s.shards[idx]
 
-		shard.lruMu.Lock()
-		if shard.lru.list.Len() == 0 {
-			shard.lruMu.Unlock()
-			continue
-		}
+	shard.lruMu.Lock()
+	defer shard.lruMu.Unlock()
 
+	evicted := 0
+	for evicted < batchSize && shard.lru.list.Len() > 0 {
 		oldest := shard.lru.list.Back()
 		if oldest == nil {
-			shard.lruMu.Unlock()
-			continue
+			break
 		}
-
 		key := oldest.Value.(string)
 		shard.lru.list.Remove(oldest)
 		delete(shard.lru.keyMap, key)
-		shard.lruMu.Unlock()
 
-		// Delete from storage
 		value, loaded := shard.data.LoadAndDelete(key)
-		if loaded {
-			compItem := value.(*compressedItem)
-			itemSize := s.calculateItemSize(key, compItem.Value)
-			shard.keyCount.Add(-1)
-			shard.byteCount.Add(-itemSize)
-			shard.compressedSize.Add(-int64(len(compItem.Value)))
-			shard.originalSize.Add(-int64(compItem.OrigSize))
-			s.totalKeys.Add(-1)
-			s.totalBytes.Add(-itemSize)
-			s.compressedBytes.Add(-int64(len(compItem.Value)))
-			s.originalBytes.Add(-int64(compItem.OrigSize))
-			s.evictCount.Add(1)
-			return true
+		if !loaded {
+			continue
 		}
+
+		compItem := value.(*compressedItem)
+		itemSize := s.calculateItemSize(key, compItem.Value)
+		shard.keyCount.Add(-1)
+		shard.byteCount.Add(-itemSize)
+		shard.compressedSize.Add(-int64(len(compItem.Value)))
+		shard.originalSize.Add(-int64(compItem.OrigSize))
+		s.totalKeys.Add(-1)
+		s.totalBytes.Add(-itemSize)
+		s.compressedBytes.Add(-int64(len(compItem.Value)))
+		s.originalBytes.Add(-int64(compItem.OrigSize))
+		s.evictCount.Add(1)
+		evicted++
 	}
-	return false
+
+	return evicted
 }
 
 // touchLRU updates LRU for key.
@@ -703,10 +680,8 @@ func (s *MemStorage) addToSyncBuffer(shard *storageShard, key string, opType OpT
 	tail := shard.syncTail.Load()
 
 	// Check if buffer is full
-	// Prevent unbounded growth in long-running processes
 	if head-tail >= shard.syncCapacity {
 		// Buffer is full, advance tail to make room (drop oldest operations)
-		// This prevents memory accumulation in long-running processes
 		newTail := head - shard.syncCapacity + 1
 		// Clear dropped operations to help GC
 		for i := tail; i < newTail; i++ {
@@ -783,6 +758,7 @@ func (s *MemStorage) cleanExpired() {
 	if totalExpired > 1000 {
 		runtime.GC()
 	}
+
 }
 
 // GetSyncBuffer returns pending sync operations from all shards.
@@ -799,7 +775,7 @@ func (s *MemStorage) GetSyncBuffer() ([]*SyncOperation, error) {
 		estimatedCap += int(size)
 	}
 	if estimatedCap < 100 {
-		estimatedCap = 100 // Minimum capacity
+		estimatedCap = 100
 	}
 	ops := make([]*SyncOperation, 0, estimatedCap)
 
@@ -817,7 +793,6 @@ func (s *MemStorage) GetSyncBuffer() ([]*SyncOperation, error) {
 		// Collect all pending operations
 		for i := tail; i < head; i++ {
 			if op := shard.syncBuffer[i&shard.syncMask].op; op != nil {
-				// Restore Value if missing (saved memory in addToSyncBuffer)
 				if op.Item != nil && op.Item.Value == nil && op.OpType == OpSet {
 					if stored, err := s.GetNoCopy(op.Key); err == nil && stored != nil && len(stored.Value) > 0 {
 						op.Item.Value = make([]byte, len(stored.Value))
@@ -886,8 +861,70 @@ func (s *MemStorage) Clear() error {
 	return nil
 }
 
+// startAsyncEviction starts background goroutine for async eviction.
+func (s *MemStorage) startAsyncEviction() {
+	if !s.evictRunning.CompareAndSwap(false, true) {
+		return
+	}
+
+	go func() {
+		defer s.evictRunning.Store(false)
+
+		ticker := time.NewTicker(100 * time.Millisecond) // Check every 100ms
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-s.evictStop:
+				return
+			case <-ticker.C:
+				s.runAsyncEviction()
+			}
+		}
+	}()
+}
+
+func (s *MemStorage) runAsyncEviction() {
+	if s.maxMemoryMB <= 0 {
+		return
+	}
+
+	maxBytes := s.maxMemoryMB * 1024 * 1024
+	current := s.totalBytes.Load()
+	threshold := maxBytes * s.evictThreshold / 100
+
+	if current <= threshold {
+		return // Below threshold, no eviction needed
+	}
+
+	// Evict until below target
+	target := maxBytes * s.evictTarget / 100
+	evicted := 0
+	maxEvictions := s.evictBatchSize * 10 // Evict more aggressively in background
+
+	for current > target && evicted < maxEvictions {
+		batchEvicted := s.evictBatchLRU(s.evictBatchSize)
+		if batchEvicted == 0 {
+			break
+		}
+		evicted += batchEvicted
+		current = s.totalBytes.Load()
+	}
+}
+
 // closeInternal releases resources (internal implementation).
 func (s *MemStorage) closeInternal() error {
+	// Stop async eviction
+	if s.evictRunning.Swap(false) {
+		select {
+		case s.evictStop <- struct{}{}:
+		default:
+		}
+		close(s.evictStop)
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Stop cleaner
 	if s.cleanerRunning.Swap(false) {
 		select {
 		case s.cleanerStop <- struct{}{}:
@@ -917,7 +954,6 @@ func (s *MemStorage) Close(ctx context.Context) error {
 var _ lifecycle.Component = (*MemStorage)(nil)
 
 // GetNoCopy retrieves key without copying value.
-// WARNING: Returned item shares memory. Do not modify.
 func (s *MemStorage) GetNoCopy(key string) (*StoredItem, error) {
 	if key == "" {
 		return nil, ErrEmptyKey
@@ -951,18 +987,16 @@ func (s *MemStorage) GetNoCopy(key string) (*StoredItem, error) {
 	s.hitCount.Add(1)
 	s.touchLRU(shard, key)
 
-	// Decompress if needed (must copy decompressed data)
 	var valueBytes []byte
 	if compItem.Compressed {
-		decompressed, err := s.decompress(compItem.Value, true)
+		var err error
+		valueBytes, err = s.decompressValue(compItem)
 		if err != nil {
 			return nil, err
 		}
-		valueBytes = decompressed // Note: decompressed is new allocation
 	} else {
-		valueBytes = compItem.Value // Shares slice, caller must not modify
+		valueBytes = compItem.Value
 	}
-
 	return &StoredItem{
 		Version:  compItem.Version,
 		ExpireAt: compItem.ExpireAt,
@@ -1030,32 +1064,26 @@ func (s *MemStorage) BatchGet(keys []string) (map[string]*StoredItem, error) {
 			s.hitCount.Add(1)
 			s.touchLRU(batch.shard, key)
 
-			// Decompress
 			var valueBytes []byte
 			if compItem.Compressed {
-				decompressed, err := s.decompress(compItem.Value, true)
-				if err != nil {
+				valueBytes, _ = s.decompressValue(compItem)
+				if valueBytes == nil {
 					continue
 				}
-				valueBytes = decompressed
 			} else {
-				valueBytes = compItem.Value
+				valueBytes = fastCloneBytes(compItem.Value)
 			}
-
-			// Deep copy
 			result[key] = &StoredItem{
 				Version:  compItem.Version,
 				ExpireAt: compItem.ExpireAt,
-				Value:    fastCloneBytes(valueBytes),
+				Value:    valueBytes,
 			}
 		}
 	}
-
 	return result, nil
 }
 
 // BatchGetNoCopy retrieves multiple keys without copying.
-// WARNING: Returned items share memory. Do not modify.
 func (s *MemStorage) BatchGetNoCopy(keys []string) (map[string]*StoredItem, error) {
 	if len(keys) == 0 {
 		return make(map[string]*StoredItem), nil
@@ -1115,18 +1143,15 @@ func (s *MemStorage) BatchGetNoCopy(keys []string) (map[string]*StoredItem, erro
 			s.hitCount.Add(1)
 			s.touchLRU(batch.shard, key)
 
-			// Decompress (must allocate)
 			var valueBytes []byte
 			if compItem.Compressed {
-				decompressed, err := s.decompress(compItem.Value, true)
-				if err != nil {
+				valueBytes, _ = s.decompressValue(compItem)
+				if valueBytes == nil {
 					continue
 				}
-				valueBytes = decompressed
 			} else {
-				valueBytes = compItem.Value // Shares slice
+				valueBytes = compItem.Value
 			}
-
 			result[key] = &StoredItem{
 				Version:  compItem.Version,
 				ExpireAt: compItem.ExpireAt,
@@ -1134,7 +1159,6 @@ func (s *MemStorage) BatchGetNoCopy(keys []string) (map[string]*StoredItem, erro
 			}
 		}
 	}
-
 	return result, nil
 }
 
@@ -1172,7 +1196,6 @@ func (s *MemStorage) BatchSet(items map[string]*StoredItem) error {
 		totalSize += s.calculateItemSize(key, item.Value)
 	}
 
-	// Memory check
 	if s.maxMemoryMB > 0 {
 		if err := s.checkAndEvict(totalSize); err != nil {
 			return err
@@ -1249,7 +1272,6 @@ func nextPowerOf2(n uint64) uint64 {
 	return n + 1
 }
 
-// fastCloneBytes creates copy of byte slice using zerocopy utility.
 func fastCloneBytes(src []byte) []byte {
 	return zerocopy.FastCloneBytes(src)
 }

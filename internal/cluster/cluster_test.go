@@ -95,7 +95,6 @@ func startTestCluster(t *testing.T, cluster *Cluster) {
 	}
 }
 
-// stopTestCluster stops a cluster for testing
 func stopTestCluster(t *testing.T, cluster *Cluster) {
 	t.Helper()
 	ctx := context.Background()
@@ -104,20 +103,6 @@ func stopTestCluster(t *testing.T, cluster *Cluster) {
 	}
 }
 
-// populateTestData populates cluster with test data
-func populateTestData(t *testing.T, cluster *Cluster, count int) {
-	t.Helper()
-	ctx := context.Background()
-	for i := 0; i < count; i++ {
-		key := fmt.Sprintf("key-%d", i)
-		value := fmt.Sprintf("value-%d", i)
-		if err := cluster.Set(ctx, key, []byte(value)); err != nil {
-			t.Fatalf("Failed to set test data for key %s: %v", key, err)
-		}
-	}
-}
-
-// noOpSendFunc is a no-op send function for single-node tests
 func noOpSendFunc(address string, msg interface{}) error {
 	return nil
 }
@@ -172,7 +157,6 @@ func createTestClusterWithNetwork(t *testing.T, deps *testClusterDeps, nodeID st
 	}
 
 	// Join seed addresses if provided (should be done after Start)
-	// Note: Join will be called after cluster.Start() in the test
 
 	return cluster
 }

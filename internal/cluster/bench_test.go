@@ -25,7 +25,7 @@ func BenchmarkWriter_Set(b *testing.B) {
 		QueueSize: 1000,
 		NoStats:   true,
 	})
-	defer executor.Stop(5 * time.Second)
+	defer func() { _ = executor.Stop(5 * time.Second) }()
 
 	// Create minimal writer (no gossip for benchmark)
 	writer := &writer{
@@ -145,7 +145,7 @@ func BenchmarkGossip_ApplyOps(b *testing.B) {
 		QueueSize: 1000,
 		NoStats:   true,
 	})
-	defer executor.Stop(5 * time.Second)
+	defer func() { _ = executor.Stop(5 * time.Second) }()
 
 	g := &gossip{
 		nodeID:       "node-1",

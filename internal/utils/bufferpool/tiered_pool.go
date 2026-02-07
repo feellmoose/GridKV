@@ -5,8 +5,6 @@ import (
 	"sync/atomic"
 )
 
-// TieredBufferPool implements a tiered buffer pool strategy based on industry best practices
-// Uses multiple pools for different size ranges to optimize memory allocation and reuse
 type TieredBufferPool struct {
 	// Tier pools: small, medium, large, extra-large
 	tier1 *sync.Pool // 64-256 bytes
@@ -32,40 +30,41 @@ func NewTieredBufferPool() *TieredBufferPool {
 	return &TieredBufferPool{
 		tier1: &sync.Pool{
 			New: func() interface{} {
-				return make([]byte, 0, 256)
+				buf := make([]byte, 0, 256)
+				return &buf
 			},
 		},
 		tier2: &sync.Pool{
 			New: func() interface{} {
-				return make([]byte, 0, 1024)
+				buf := make([]byte, 0, 1024)
+				return &buf
 			},
 		},
 		tier3: &sync.Pool{
 			New: func() interface{} {
-				return make([]byte, 0, 4096)
+				buf := make([]byte, 0, 4096)
+				return &buf
 			},
 		},
 		tier4: &sync.Pool{
 			New: func() interface{} {
-				return make([]byte, 0, 16384)
+				buf := make([]byte, 0, 16384)
+				return &buf
 			},
 		},
 		tier5: &sync.Pool{
 			New: func() interface{} {
-				return make([]byte, 0, 65536) // 64KB
+				buf := make([]byte, 0, 65536) // 64KB
+				return &buf
 			},
 		},
 	}
 }
 
 // Get returns a buffer from the appropriate tier
-// Strategy: Use pool for sizes > 256 bytes (Go's allocator is optimized for small objects < 256B)
-// For very small buffers, direct allocation is often faster due to Go's size class optimization
 func (p *TieredBufferPool) Get(size int) []byte {
 	atomic.AddUint64(&p.stats.total, 1)
 
-	// Very small buffers (< 256B): direct allocation is faster
-	// Go's allocator has optimized size classes for small objects
 	if size <= 256 {
 		atomic.AddUint64(&p.stats.misses, 1)
 		return make([]byte, 0, size)
@@ -99,7 +98,8 @@ func (p *TieredBufferPool) Get(size int) []byte {
 		tierNum = 5
 	}
 
-	poolBuf := fromPool.Get().([]byte)
+	poolBufPtr := fromPool.Get().(*[]byte)
+	poolBuf := *poolBufPtr
 	if cap(poolBuf) >= size {
 		// Pool buffer is large enough
 		buf = poolBuf[:size]
@@ -116,9 +116,14 @@ func (p *TieredBufferPool) Get(size int) []byte {
 			atomic.AddUint64(&p.stats.tier5Hits, 1)
 		}
 	} else {
-		// Pool buffer too small, allocate directly and return pool buffer
-		buf = make([]byte, 0, size)
-		fromPool.Put(poolBuf[:0])
+		// Cap allocation to prevent excessive memory usage
+		const maxAlloc = 2 * 1024 * 1024 // 2MB max
+		allocSize := size
+		if allocSize > maxAlloc {
+			allocSize = maxAlloc
+		}
+		buf = make([]byte, 0, allocSize)
+		fromPool.Put(poolBufPtr)
 		atomic.AddUint64(&p.stats.misses, 1)
 	}
 
@@ -137,24 +142,32 @@ func (p *TieredBufferPool) Put(buf []byte) {
 		return
 	}
 
-	// Reset length but keep capacity
-	reset := buf[:0]
+	// Don't pool very large buffers to prevent memory bloat
+	const maxPoolSize = 65536 // 64KB max for pooling
+	if cap > maxPoolSize {
+		return
+	}
+
+	// Return to appropriate tier based on capacity
+	// Reset the slice and store pointer to avoid SA6002
+	resetBuf := buf[:0]
+	bufPtr := &resetBuf
 
 	// Return to appropriate tier based on capacity
 	switch {
 	case cap <= 256:
-		// Skip very small buffers - they're allocated directly
 		return
 	case cap <= 1024:
-		p.tier1.Put(reset)
+		p.tier1.Put(bufPtr)
 	case cap <= 4096:
-		p.tier2.Put(reset)
+		p.tier2.Put(bufPtr)
 	case cap <= 16384:
-		p.tier3.Put(reset)
+		p.tier3.Put(bufPtr)
 	case cap <= 65536:
-		p.tier4.Put(reset)
+		p.tier4.Put(bufPtr)
 	default:
-		p.tier5.Put(reset)
+		// Should not reach here due to maxPoolSize check above
+		return
 	}
 }
 

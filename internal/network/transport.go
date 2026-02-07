@@ -222,7 +222,8 @@ func deadlineFromContext(ctx context.Context, fallback time.Duration) time.Time 
 
 var lengthBufPool = sync.Pool{
 	New: func() interface{} {
-		return make([]byte, 4)
+		buf := make([]byte, 4)
+		return &buf
 	},
 }
 
@@ -235,40 +236,43 @@ func (c *tcpConn) Send(ctx context.Context, data []byte) error {
 	}
 
 	if c.cfg.EnableZeroCopy && len(data) > 4096 {
-		buf := lengthBufPool.Get().([]byte)
+		bufPtr := lengthBufPool.Get().(*[]byte)
+		buf := *bufPtr
 		binary.BigEndian.PutUint32(buf, uint32(len(data)))
 		// Write length header
 		if _, err := c.conn.Write(buf); err != nil {
-			lengthBufPool.Put(buf)
+			lengthBufPool.Put(bufPtr)
 			return err
 		}
-		lengthBufPool.Put(buf)
+		lengthBufPool.Put(bufPtr)
 		// Use io.Copy for zero-copy (kernel handles copy)
 		_, err := io.Copy(c.conn, bytes.NewReader(data))
 		return err
 	}
 
 	if len(data) <= 4096 {
-		buf := lengthBufPool.Get().([]byte)
+		bufPtr := lengthBufPool.Get().(*[]byte)
+		buf := *bufPtr
 		binary.BigEndian.PutUint32(buf, uint32(len(data)))
 		// Write both header and data in sequence (TCP will coalesce small writes)
 		if _, err := c.conn.Write(buf); err != nil {
-			lengthBufPool.Put(buf)
+			lengthBufPool.Put(bufPtr)
 			return err
 		}
-		lengthBufPool.Put(buf)
+		lengthBufPool.Put(bufPtr)
 		_, err := c.conn.Write(data)
 		return err
 	}
 
 	// Fallback for medium-sized messages
-	buf := lengthBufPool.Get().([]byte)
+	bufPtr := lengthBufPool.Get().(*[]byte)
+	buf := *bufPtr
 	binary.BigEndian.PutUint32(buf, uint32(len(data)))
 	if _, err := c.conn.Write(buf); err != nil {
-		lengthBufPool.Put(buf)
+		lengthBufPool.Put(bufPtr)
 		return err
 	}
-	lengthBufPool.Put(buf)
+	lengthBufPool.Put(bufPtr)
 	_, err := c.conn.Write(data)
 	if err != nil {
 		logging.Debug("tcpConn.Send: failed to write data", "remote", c.conn.RemoteAddr(), "error", err, "dataLen", len(data))
@@ -278,7 +282,8 @@ func (c *tcpConn) Send(ctx context.Context, data []byte) error {
 
 var lengthReadBufPool = sync.Pool{
 	New: func() interface{} {
-		return make([]byte, 4)
+		buf := make([]byte, 4)
+		return &buf
 	},
 }
 
@@ -296,16 +301,12 @@ func (c *tcpConn) Receive(ctx context.Context) ([]byte, error) {
 		_ = c.conn.SetReadDeadline(deadline)
 	}
 
-	// Read length header using buffered reader
 	var length uint32
 	if err := binary.Read(c.reader, binary.BigEndian, &length); err != nil {
-		// Filter out common non-actionable errors to reduce log noise
 		if err != io.EOF {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				// Timeout errors are normal and expected
-			} else if isNetworkError(err) {
-				// Connection issues during shutdown/normal network behavior - don't log
-			} else {
+			} else if !isNetworkError(err) {
+				logging.Debug("tcpConn.Receive: read length failed", "remote", c.conn.RemoteAddr(), "error", err)
 			}
 		}
 		return nil, err
@@ -316,16 +317,12 @@ func (c *tcpConn) Receive(ctx context.Context) ([]byte, error) {
 		return nil, ErrMessageTooLarge
 	}
 
-	// Read payload using buffered reader (reduces syscalls)
 	buf := make([]byte, size)
 	if _, err := io.ReadFull(c.reader, buf); err != nil {
-		// Filter out common non-actionable errors to reduce log noise
 		if err != io.EOF {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				// Timeout errors are normal and expected
-			} else if isNetworkError(err) {
-				// Connection issues during shutdown/normal network behavior - don't log
-			} else {
+			} else if !isNetworkError(err) {
+				logging.Debug("tcpConn.Receive: read payload failed", "remote", c.conn.RemoteAddr(), "error", err, "size", size)
 			}
 		}
 		return nil, err
@@ -370,10 +367,10 @@ func NewQUICTransport(cfg TransportConfig) Transport {
 		tlsCfg = &tls.Config{InsecureSkipVerify: true, ServerName: "localhost", NextProtos: []string{"gridkv"}}
 	}
 	quicCfg := &quic.Config{
-		KeepAlivePeriod:      time.Second,
-		HandshakeIdleTimeout: 10 * time.Second,
+		KeepAlivePeriod:      10 * time.Second,
+		HandshakeIdleTimeout: 15 * time.Second, // Longer timeout for handshake
 		MaxIdleTimeout:       30 * time.Second,
-		EnableDatagrams:      true,
+		EnableDatagrams:      false, // Disable datagrams as we use streams
 	}
 	return &quicTransport{cfg: cfg, tls: tlsCfg, quic: quicCfg}
 }
@@ -421,6 +418,7 @@ func (t *quicTransport) Dial(ctx context.Context, address string) (Conn, error) 
 		_ = session.CloseWithError(0, "stream open failed")
 		return nil, fmt.Errorf("quic stream open failed: %w", err)
 	}
+	// Stream is already a pointer in newer quic-go versions
 	return &quicConn{session: session, stream: stream, cfg: t.cfg}, nil
 }
 
@@ -454,8 +452,9 @@ func (c *quicConn) Send(ctx context.Context, data []byte) error {
 	}
 
 	// Reuse buffer from pool
-	buf := lengthBufPool.Get().([]byte)
-	defer lengthBufPool.Put(buf)
+	bufPtr := lengthBufPool.Get().(*[]byte)
+	defer lengthBufPool.Put(bufPtr)
+	buf := *bufPtr
 	binary.BigEndian.PutUint32(buf, uint32(len(data)))
 
 	if _, err := c.stream.Write(buf); err != nil {
@@ -478,13 +477,13 @@ func (c *quicConn) Receive(ctx context.Context) ([]byte, error) {
 	}
 
 	// Reuse buffer from pool
-	lenBuf := lengthReadBufPool.Get().([]byte)
-	defer lengthReadBufPool.Put(lenBuf)
+	lenBufPtr := lengthReadBufPool.Get().(*[]byte)
+	defer lengthReadBufPool.Put(lenBufPtr)
+	lenBuf := *lenBufPtr
 
 	if _, err := io.ReadFull(c.stream, lenBuf); err != nil {
 		// Don't log EOF as it's normal connection closure
-		if err != io.EOF {
-		}
+		// Error is returned anyway, no need for empty branch
 		return nil, fmt.Errorf("read length header: %w", err)
 	}
 	size := int(binary.BigEndian.Uint32(lenBuf))
@@ -497,8 +496,7 @@ func (c *quicConn) Receive(ctx context.Context) ([]byte, error) {
 	buf := make([]byte, size)
 	if _, err := io.ReadFull(c.stream, buf); err != nil {
 		// Don't log EOF as it's normal connection closure
-		if err != io.EOF {
-		}
+		// Error is returned anyway, no need for empty branch
 		return nil, fmt.Errorf("read payload: %w", err)
 	}
 	return buf, nil
@@ -530,11 +528,15 @@ func (l *quicListener) Accept(ctx context.Context) (Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("accept session: %w", err)
 	}
+
+	// AcceptStream waits for client to open a stream after handshake completes
+	// Use the same context - AcceptStream will block until client calls OpenStreamSync
 	stream, err := sess.AcceptStream(ctx)
 	if err != nil {
 		_ = sess.CloseWithError(0, "stream accept failed")
 		return nil, fmt.Errorf("accept stream: %w", err)
 	}
+	// Stream is already a pointer in newer quic-go versions
 	return &quicConn{session: sess, stream: stream, cfg: l.cfg}, nil
 }
 

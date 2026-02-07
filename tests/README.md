@@ -15,6 +15,23 @@ go test ./tests/ -short -v
 go test ./tests/ -bench=. -benchmem
 ```
 
+## Profiling Long-Running Stability
+
+`TestStabilityLongRun` is designed for 30-minute stability and GC/memory
+behaviour validation. You can enable standard Go CPU/heap profiles:
+
+```bash
+go test ./tests -run TestStabilityLongRun -timeout 40m \
+  -cpuprofile=cpu_long.out -memprofile=heap_long.out
+```
+
+Then inspect profiles with:
+
+```bash
+go tool pprof cpu_long.out
+go tool pprof heap_long.out
+```
+
 ## Test Types
 
 | Test | Description | Duration |

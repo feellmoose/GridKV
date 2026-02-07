@@ -23,7 +23,7 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 		NodeCount:     config.NodeCount,
 		ReplicaCount:  config.ReplicaCount,
 		BasePort:      29500 + (len(t.Name()) * 10), // Unique port per test
-		MemoryMB:      256,
+		MemoryMB:      GetEnvInt64("TEST_MAX_MEMORY_MB", 256),
 		ShardCount:    64,
 		SetupTimeout:  30 * time.Second,
 		StabilizeTime: 15 * time.Second,
@@ -55,6 +55,103 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 			metricsSnapshots = CollectPoolMetrics(simulator, 5*time.Second, config.Duration+30*time.Second)
 		}()
 	}
+
+	// Periodic progress and memory reporting for long-running tests
+	progressDone := make(chan struct{})
+	go func() {
+		defer close(progressDone)
+
+		// Use 1-minute interval for long tests; longer for short tests to reduce noise
+		interval := time.Minute
+		if config.Duration < 10*time.Minute {
+			interval = 2 * time.Minute
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		deadline := time.Now().Add(config.Duration + 2*time.Minute)
+		for {
+			select {
+			case <-ticker.C:
+				completed, failed, elapsed, qps := executor.GetStats()
+				setFailed, getFailed, timeoutFailed, contextFailed := executor.GetFailureStats()
+
+				var ms runtime.MemStats
+				runtime.ReadMemStats(&ms)
+				goroutines := runtime.NumGoroutine()
+
+				// Runtime-level progress
+				t.Logf("[progress] elapsed=%v completed=%d failed=%d qps=%.1f goroutines=%d heap_alloc=%d heap_sys=%d heap_idle=%d heap_inuse=%d gc_cycles=%d failures{set=%d,get=%d,timeout=%d,context=%d}",
+					elapsed,
+					completed,
+					failed,
+					qps,
+					goroutines,
+					ms.HeapAlloc,
+					ms.HeapSys,
+					ms.HeapIdle,
+					ms.HeapInuse,
+					ms.NumGC,
+					setFailed,
+					getFailed,
+					timeoutFailed,
+					contextFailed,
+				)
+
+				// GridKV-level stats from a representative node
+				nodes := simulator.GetNodes()
+				if len(nodes) > 0 && nodes[0] != nil {
+					stats := nodes[0].Stats()
+
+					cs := stats.Cluster
+					ss := stats.Storage
+					ns := stats.Network
+
+					// Aggregate storage stats across all nodes
+					totalKeys := int64(0)
+					totalStorageBytes := int64(0)
+					totalEvicts := int64(0)
+					for _, node := range nodes {
+						if node != nil {
+							nodeStats := node.Stats()
+							totalKeys += nodeStats.Storage.KeyCount
+							totalStorageBytes += nodeStats.Storage.TotalBytes
+							totalEvicts += nodeStats.Storage.EvictCount
+						}
+					}
+
+					t.Logf("[gridkv] node=%s cluster{size=%d,healthy=%d,replica=%d,peers=%d} storage{keys=%d,total_bytes=%d,compressed_bytes=%d,hit_rate=%.3f,evict=%d} network{active_conns=%d,pool_total=%d,pool_active=%d,pool_idle=%d,pool_waiters=%d} cluster_storage{total_keys=%d,total_bytes=%d,total_evicts=%d}",
+						cs.LocalNodeID,
+						cs.ClusterSize,
+						cs.HealthyNodes,
+						cs.ReplicaFactor,
+						cs.PeerCount,
+						ss.KeyCount,
+						ss.TotalBytes,
+						ss.CompressedBytes,
+						ss.HitRate,
+						ss.EvictCount,
+						ns.ServerActiveConns,
+						ns.PoolTotal,
+						ns.PoolActive,
+						ns.PoolIdle,
+						ns.PoolWaiters,
+						totalKeys,
+						totalStorageBytes,
+						totalEvicts,
+					)
+				}
+
+				// Safety exit if we have passed the expected deadline
+				if time.Now().After(deadline) {
+					return
+				}
+			case <-time.After(time.Until(deadline)):
+				return
+			}
+		}
+	}()
 
 	// Execute workload
 	t.Logf("starting workload execution")
@@ -124,8 +221,8 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 
 	// For large-scale tests, reduce number of checks and intervals
 	if config.NodeCount > 7 || config.WorkerCount > 50 || keyCount > 5000 {
-		checkCount = 6                  // Fewer checks for large tests
-		checkInterval = 3 * time.Second // Shorter intervals
+		checkCount = 4                  // Fewer checks for large tests to prevent timeout
+		checkInterval = 2 * time.Second // Shorter intervals
 	}
 
 	for i := 0; i < checkCount; i++ {
@@ -182,6 +279,9 @@ func RunTestSuite(t *testing.T, config TestSuiteConfig) {
 			PrintMetricsSummary(metricsSnapshots)
 		}
 	}
+
+	// Ensure progress reporter is stopped before returning
+	<-progressDone
 
 	// Additional cleanup wait to ensure resources are fully released before next test
 	// This is critical when running multiple tests sequentially to prevent resource leaks

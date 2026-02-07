@@ -15,21 +15,24 @@ var (
 	// Small buffer pool (64-128 bytes) for message encoding
 	smallBufPool = sync.Pool{
 		New: func() interface{} {
-			return make([]byte, 0, 128)
+			buf := make([]byte, 0, 128)
+			return &buf
 		},
 	}
 
 	// Medium buffer pool (256-512 bytes) for larger messages
 	mediumBufPool = sync.Pool{
 		New: func() interface{} {
-			return make([]byte, 0, 512)
+			buf := make([]byte, 0, 512)
+			return &buf
 		},
 	}
 
 	// Fixed-size buffer pool (8 bytes) for incarnation/timestamp encoding
 	fixed8BufPool = sync.Pool{
 		New: func() interface{} {
-			return make([]byte, 8)
+			buf := make([]byte, 8)
+			return &buf
 		},
 	}
 )
@@ -55,10 +58,13 @@ func (c *SyncOpsCodec) Serialize(ops []*mem_storage.SyncOperation) ([]byte, erro
 
 	// Get pooled buffer for zero-copy operation
 	var buf []byte
+	var pooledBuf *[]byte
 	if estimatedSize <= 128 {
-		buf = smallBufPool.Get().([]byte)[:0]
+		pooledBuf = smallBufPool.Get().(*[]byte)
+		buf = (*pooledBuf)[:0]
 	} else if estimatedSize <= 512 {
-		buf = mediumBufPool.Get().([]byte)[:0]
+		pooledBuf = mediumBufPool.Get().(*[]byte)
+		buf = (*pooledBuf)[:0]
 	} else {
 		buf = make([]byte, 0, estimatedSize)
 	}
@@ -92,12 +98,14 @@ func (c *SyncOpsCodec) Serialize(ops []*mem_storage.SyncOperation) ([]byte, erro
 		// Small buffer: return pooled buffer directly (caller owns it)
 		result = make([]byte, len(buf))
 		copy(result, buf)
-		smallBufPool.Put(buf[:0])
+		*pooledBuf = (*pooledBuf)[:0]
+		smallBufPool.Put(pooledBuf)
 	} else if estimatedSize <= 512 {
 		// Medium buffer: return pooled buffer directly (caller owns it)
 		result = make([]byte, len(buf))
 		copy(result, buf)
-		mediumBufPool.Put(buf[:0])
+		*pooledBuf = (*pooledBuf)[:0]
+		mediumBufPool.Put(pooledBuf)
 	} else {
 		// Large buffer: just use the allocated buffer directly (no pool)
 		result = buf
@@ -344,14 +352,15 @@ func (c *MemberMsgCodec) DecodeMemberMsg(data []byte, msgType uint8) interface{}
 // Binary encoding helpers (no reflection)
 // Uses LittleEndian to match SyncOpsCodec style
 
-func (c *MemberMsgCodec) encodeString(s string) []byte {
-	b := []byte(s)
-	// Use fixed buffer pool for length encoding
-	lenBuf := fixed8BufPool.Get().([]byte)[:2]
-	binary.LittleEndian.PutUint16(lenBuf, uint16(len(b)))
-	result := append(lenBuf, b...)
-	fixed8BufPool.Put(lenBuf[:8]) // Return full buffer
-	return result
+// encodeStringTo appends encoded string directly to buffer, avoiding intermediate allocations
+func (c *MemberMsgCodec) encodeStringTo(buf *[]byte, s string) {
+	strLen := uint16(len(s))
+	// Reserve space for length (2 bytes)
+	oldLen := len(*buf)
+	*buf = append(*buf, 0, 0)
+	binary.LittleEndian.PutUint16((*buf)[oldLen:], strLen)
+	// Append string bytes directly
+	*buf = append(*buf, s...)
 }
 
 func (c *MemberMsgCodec) decodeString(data []byte, offset int) (string, int) {
@@ -386,22 +395,24 @@ func (c *MemberMsgCodec) decodeString(data []byte, offset int) (string, int) {
 }
 
 func (c *MemberMsgCodec) encodePingMsg(msg *pingMsg) []byte {
-	buf := smallBufPool.Get().([]byte)
-	buf = buf[:0] // Reset length
+	pooledBuf := smallBufPool.Get().(*[]byte)
+	buf := (*pooledBuf)[:0]
 
-	buf = append(buf, c.encodeString(msg.From)...)
-	buf = append(buf, c.encodeString(msg.To)...)
+	c.encodeStringTo(&buf, msg.From)
+	c.encodeStringTo(&buf, msg.To)
 
 	// Use fixed buffer pool for incarnation
-	incBuf := fixed8BufPool.Get().([]byte)
+	incBufPtr := fixed8BufPool.Get().(*[]byte)
+	incBuf := *incBufPtr
 	binary.LittleEndian.PutUint64(incBuf, uint64(msg.Incarnation))
 	buf = append(buf, incBuf...)
-	fixed8BufPool.Put(incBuf)
+	fixed8BufPool.Put(incBufPtr)
 
 	// Return copy, return buffer to pool
 	result := make([]byte, len(buf))
 	copy(result, buf)
-	smallBufPool.Put(buf[:0])
+	*pooledBuf = (*pooledBuf)[:0]
+	smallBufPool.Put(pooledBuf)
 	return result
 }
 
@@ -424,22 +435,24 @@ func (c *MemberMsgCodec) decodePingMsg(data []byte) *pingMsg {
 }
 
 func (c *MemberMsgCodec) encodeAckMsg(msg *ackMsg) []byte {
-	buf := smallBufPool.Get().([]byte)
-	buf = buf[:0] // Reset length
+	pooledBuf := smallBufPool.Get().(*[]byte)
+	buf := (*pooledBuf)[:0]
 
-	buf = append(buf, c.encodeString(msg.From)...)
-	buf = append(buf, c.encodeString(msg.To)...)
+	c.encodeStringTo(&buf, msg.From)
+	c.encodeStringTo(&buf, msg.To)
 
 	// Use fixed buffer pool for incarnation
-	incBuf := fixed8BufPool.Get().([]byte)
+	incBufPtr := fixed8BufPool.Get().(*[]byte)
+	incBuf := *incBufPtr
 	binary.LittleEndian.PutUint64(incBuf, uint64(msg.Incarnation))
 	buf = append(buf, incBuf...)
-	fixed8BufPool.Put(incBuf)
+	fixed8BufPool.Put(incBufPtr)
 
 	// Return copy, return buffer to pool
 	result := make([]byte, len(buf))
 	copy(result, buf)
-	smallBufPool.Put(buf[:0])
+	*pooledBuf = (*pooledBuf)[:0]
+	smallBufPool.Put(pooledBuf)
 	return result
 }
 
@@ -462,22 +475,24 @@ func (c *MemberMsgCodec) decodeAckMsg(data []byte) *ackMsg {
 }
 
 func (c *MemberMsgCodec) encodeConnectMsg(msg *connectMsg) []byte {
-	buf := mediumBufPool.Get().([]byte)
-	buf = buf[:0] // Reset length
+	pooledBuf := mediumBufPool.Get().(*[]byte)
+	buf := (*pooledBuf)[:0]
 
-	buf = append(buf, c.encodeString(msg.NodeID)...)
-	buf = append(buf, c.encodeString(msg.Address)...)
+	c.encodeStringTo(&buf, msg.NodeID)
+	c.encodeStringTo(&buf, msg.Address)
 
 	// Use fixed buffer pool for incarnation
-	incBuf := fixed8BufPool.Get().([]byte)
+	incBufPtr := fixed8BufPool.Get().(*[]byte)
+	incBuf := *incBufPtr
 	binary.LittleEndian.PutUint64(incBuf, uint64(msg.Incarnation))
 	buf = append(buf, incBuf...)
-	fixed8BufPool.Put(incBuf)
+	fixed8BufPool.Put(incBufPtr)
 
 	// Return copy, return buffer to pool
 	result := make([]byte, len(buf))
 	copy(result, buf)
-	mediumBufPool.Put(buf[:0])
+	*pooledBuf = (*pooledBuf)[:0]
+	mediumBufPool.Put(pooledBuf)
 	return result
 }
 
@@ -520,21 +535,23 @@ func (c *MemberMsgCodec) decodeConnectMsg(data []byte) *connectMsg {
 }
 
 func (c *MemberMsgCodec) encodeLeaveMsg(msg *leaveMsg) []byte {
-	buf := smallBufPool.Get().([]byte)
-	buf = buf[:0] // Reset length
+	pooledBuf := smallBufPool.Get().(*[]byte)
+	buf := (*pooledBuf)[:0]
 
-	buf = append(buf, c.encodeString(msg.NodeID)...)
+	c.encodeStringTo(&buf, msg.NodeID)
 
 	// Use fixed buffer pool for incarnation
-	incBuf := fixed8BufPool.Get().([]byte)
+	incBufPtr := fixed8BufPool.Get().(*[]byte)
+	incBuf := *incBufPtr
 	binary.LittleEndian.PutUint64(incBuf, uint64(msg.Incarnation))
 	buf = append(buf, incBuf...)
-	fixed8BufPool.Put(incBuf)
+	fixed8BufPool.Put(incBufPtr)
 
 	// Return copy, return buffer to pool
 	result := make([]byte, len(buf))
 	copy(result, buf)
-	smallBufPool.Put(buf[:0])
+	*pooledBuf = (*pooledBuf)[:0]
+	smallBufPool.Put(pooledBuf)
 	return result
 }
 
@@ -553,22 +570,24 @@ func (c *MemberMsgCodec) decodeLeaveMsg(data []byte) *leaveMsg {
 }
 
 func (c *MemberMsgCodec) encodeIndirectProbeMsg(msg *indirectProbeMsg) []byte {
-	buf := smallBufPool.Get().([]byte)
-	buf = buf[:0] // Reset length
+	pooledBuf := smallBufPool.Get().(*[]byte)
+	buf := (*pooledBuf)[:0]
 
-	buf = append(buf, c.encodeString(msg.From)...)
-	buf = append(buf, c.encodeString(msg.Target)...)
+	c.encodeStringTo(&buf, msg.From)
+	c.encodeStringTo(&buf, msg.Target)
 
 	// Use fixed buffer pool for incarnation
-	incBuf := fixed8BufPool.Get().([]byte)
+	incBufPtr := fixed8BufPool.Get().(*[]byte)
+	incBuf := *incBufPtr
 	binary.LittleEndian.PutUint64(incBuf, uint64(msg.Incarnation))
 	buf = append(buf, incBuf...)
-	fixed8BufPool.Put(incBuf)
+	fixed8BufPool.Put(incBufPtr)
 
 	// Return copy, return buffer to pool
 	result := make([]byte, len(buf))
 	copy(result, buf)
-	smallBufPool.Put(buf[:0])
+	*pooledBuf = (*pooledBuf)[:0]
+	smallBufPool.Put(pooledBuf)
 	return result
 }
 
@@ -591,34 +610,38 @@ func (c *MemberMsgCodec) decodeIndirectProbeMsg(data []byte) *indirectProbeMsg {
 }
 
 func (c *MemberMsgCodec) encodeNodeInfo(info *NodeInfo) []byte {
-	buf := mediumBufPool.Get().([]byte)
-	buf = buf[:0] // Reset length
+	pooledBuf := mediumBufPool.Get().(*[]byte)
+	buf := (*pooledBuf)[:0]
 
-	buf = append(buf, c.encodeString(info.NodeID)...)
-	buf = append(buf, c.encodeString(info.Address)...)
+	c.encodeStringTo(&buf, info.NodeID)
+	c.encodeStringTo(&buf, info.Address)
 
 	// Use fixed buffer for state (4 bytes from 8-byte pool)
-	stateBuf := fixed8BufPool.Get().([]byte)[:4]
+	stateBufPtr := fixed8BufPool.Get().(*[]byte)
+	stateBuf := (*stateBufPtr)[:4]
 	binary.LittleEndian.PutUint32(stateBuf, uint32(info.State))
 	buf = append(buf, stateBuf...)
-	fixed8BufPool.Put(stateBuf[:8])
+	fixed8BufPool.Put(stateBufPtr)
 
 	// Use fixed buffer pool for incarnation
-	incBuf := fixed8BufPool.Get().([]byte)
+	incBufPtr := fixed8BufPool.Get().(*[]byte)
+	incBuf := *incBufPtr
 	binary.LittleEndian.PutUint64(incBuf, uint64(info.Incarnation))
 	buf = append(buf, incBuf...)
-	fixed8BufPool.Put(incBuf)
+	fixed8BufPool.Put(incBufPtr)
 
 	// Use fixed buffer pool for timestamp
-	timeBuf := fixed8BufPool.Get().([]byte)
+	timeBufPtr := fixed8BufPool.Get().(*[]byte)
+	timeBuf := *timeBufPtr
 	binary.LittleEndian.PutUint64(timeBuf, uint64(info.LastActive.UnixNano()))
 	buf = append(buf, timeBuf...)
-	fixed8BufPool.Put(timeBuf)
+	fixed8BufPool.Put(timeBufPtr)
 
 	// Return copy, return buffer to pool
 	result := make([]byte, len(buf))
 	copy(result, buf)
-	mediumBufPool.Put(buf[:0])
+	*pooledBuf = (*pooledBuf)[:0]
+	mediumBufPool.Put(pooledBuf)
 	return result
 }
 
@@ -665,13 +688,14 @@ func (c *MemberMsgCodec) encodeClusterSyncMsg(msg *clusterSyncMsg) ([]byte, erro
 	estimatedSize := 256 + len(msg.Members)*128
 	buf := make([]byte, 0, estimatedSize)
 
-	buf = append(buf, c.encodeString(msg.From)...)
+	c.encodeStringTo(&buf, msg.From)
 
 	// Use fixed buffer for member count (4 bytes from 8-byte pool)
-	memberCountBuf := fixed8BufPool.Get().([]byte)[:4]
+	memberCountBufPtr := fixed8BufPool.Get().(*[]byte)
+	memberCountBuf := (*memberCountBufPtr)[:4]
 	binary.LittleEndian.PutUint32(memberCountBuf, uint32(len(msg.Members)))
 	buf = append(buf, memberCountBuf...)
-	fixed8BufPool.Put(memberCountBuf[:8])
+	fixed8BufPool.Put(memberCountBufPtr)
 
 	for i := range msg.Members {
 		buf = append(buf, c.encodeNodeInfo(&msg.Members[i])...)
