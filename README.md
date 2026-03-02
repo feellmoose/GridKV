@@ -1,5 +1,7 @@
 # GridKV
 
+**Experimental project for feasibility testing; not for production use.**
+
 [![Go Version](https://img.shields.io/badge/go-%3E%3D1.24-blue.svg)](https://golang.org/)
 [![GitHub License](https://img.shields.io/github/license/feellmoose/GridKV)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/feellmoose/gridkv)](https://goreportcard.com/report/github.com/feellmoose/gridkv)
